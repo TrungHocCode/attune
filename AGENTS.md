@@ -64,7 +64,26 @@ Current phase: **PHASE 0 — FOUNDATION (M1: `attune detect`)**.
 - Don't rename binary/crate prefix (`attune`, `attune-*`).
 - Don't add Desktop/Tauri code until M5 (serve) is complete.
 
-## 7. Commit Style
+## 7. Git Flow (strict — solo dev, chuẩn team)
 
-- Conventional: `chore:`, `feat(hal):`, `feat(cli):`, `fix:`, `docs:`.
-- Keep commit 1 minimal and shippable (see §4).
+**Branches:**
+- `main` — luôn xanh (CI pass), chỉ merge vào, KHÔNG code trực tiếp cho feature.
+- `feat/<m1-detect-simd>` / `fix/<…>` / `chore/<…>` / `docs/<…>` — làm việc ở đây.
+- `release/m1`, tag `v0.1.0`, `v0.2.0`… cho M1→M5.
+- **Ngoại lệ bootstrap:** commit 1-2 đầu (dựng workspace/CI/skeleton, như `chore: init...`) được push thẳng lên `main` để dựng sườn. Từ commit 3 trở đi bắt buộc đi qua branch + PR.
+
+**Workflow bắt buộc cho mọi task:**
+1. `git checkout main; git pull; git checkout -b feat/<ten-ngan>`
+2. Code theo §1-§5, chạy đủ 4 lệnh §2 (test + clippy + fmt + detect).
+3. Commit theo Conventional Commits (xem dưới). 1 commit = 1 ý, message tiếng Anh, mô tả tiếng Việt trong PR nếu cần.
+4. `git push -u origin feat/<…>` → mở PR vào `main` → CI xanh → squash/merge → xóa branch.
+5. Update `CHANGELOG.md` khi xong milestone.
+
+**Commit style:**
+- Format: `type(scope): subject` — ví dụ: `feat(hal): detect SIMD via raw-cpuid`, `fix(cli): handle zero RAM`, `chore: init CI`, `docs: update architecture`.
+- Types cho phép: `feat|fix|chore|docs|refactor|test|perf|ci|build`.
+- KHÔNG: `git push --force` lên `main`, commit `target/`, `*.gguf`, `profiles/*.json`, secret, `attune-plan.md` (đã gitignored — local only).
+- Trước commit luôn chạy: `git status --short` + `git diff --stat` để soát file lọt (plan, secret).
+
+**Release:**
+- M1→M5 tag `v0.1.0`→`v0.5.0`, ghi `CHANGELOG.md`, binary <20MB.
