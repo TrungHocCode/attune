@@ -1,3 +1,17 @@
 [workspace]
-members = ["crates/attune-hal", "crates/attune-cli"]
+members = [
+    "crates/attune-hal",
+    "crates/attune-bench",
+    "crates/attune-cli",
+]
 resolver = "2"
+
+# The bandwidth/FLOPS kernels must never be measured through unoptimized
+# codegen: a dev-profile kernel reports ~6x less bandwidth than the same code
+# at opt-level 3, which would poison the roofline math in `attune estimate`.
+# Optimize this one crate only, so `cargo run -- bench --quick` stays honest.
+[profile.dev.package.attune-bench]
+opt-level = 3
+
+[profile.test.package.attune-bench]
+opt-level = 3
