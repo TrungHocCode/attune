@@ -67,10 +67,10 @@ Current phase: **PHASE 0 — FOUNDATION (M1: `attune detect`)**.
 ## 7. Git Flow (strict — solo dev, chuẩn team)
 
 **Branches:**
-- `main` — luôn xanh (CI pass), chỉ merge vào, KHÔNG code trực tiếp cho feature.
+- `main` — luôn xanh (CI pass), PROTECTED, chỉ merge qua PR, KHÔNG push trực tiếp.
 - `feat/<m1-detect-simd>` / `fix/<…>` / `chore/<…>` / `docs/<…>` — làm việc ở đây.
 - `release/m1`, tag `v0.1.0`, `v0.2.0`… cho M1→M5.
-- **Ngoại lệ bootstrap:** commit 1-2 đầu (dựng workspace/CI/skeleton, như `chore: init...`) được push thẳng lên `main` để dựng sườn. Từ commit 3 trở đi bắt buộc đi qua branch + PR.
+- **Ngoại lệ bootstrap:** commit 1-2 đầu (dựng workspace/CI/skeleton, như `chore: init...`) được push thẳng lên `main` để dựng sườn. Từ commit 3 trở đi bắt buộc đi qua branch + PR (đã qua giai đoạn này — KHÔNG dùng ngoại lệ nữa).
 
 **Workflow bắt buộc cho mọi task:**
 1. `git checkout main; git pull; git checkout -b feat/<ten-ngan>`
@@ -87,3 +87,9 @@ Current phase: **PHASE 0 — FOUNDATION (M1: `attune detect`)**.
 
 **Release:**
 - M1→M5 tag `v0.1.0`→`v0.5.0`, ghi `CHANGELOG.md`, binary <20MB.
+
+## 8. Open-Source Contribution (see CONTRIBUTING.md)
+
+- External contributors: fork → branch → PR. Same 4 verify gates + English-only rule.
+- `main` protection enforced via API: PR required, `check (ubuntu-latest)` + `check (windows-latest)` must pass, linear history (squash), no force push/deletion, applies to admins too.
+- Issue/PR templates live in `.github/`. Link issues (`Fixes #N`) in every PR.
