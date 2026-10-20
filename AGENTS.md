@@ -75,7 +75,7 @@ Current phase: **PHASE 0 — FOUNDATION (M1: `attune detect`)**.
 **Workflow bắt buộc cho mọi task:**
 1. `git checkout main; git pull; git checkout -b feat/<ten-ngan>`
 2. Code theo §1-§5, chạy đủ 4 lệnh §2 (test + clippy + fmt + detect).
-3. Commit theo Conventional Commits (xem dưới). 1 commit = 1 ý, message tiếng Anh, mô tả tiếng Việt trong PR nếu cần.
+3. Commit theo Conventional Commits (xem dưới). 1 commit = 1 ý. ALL commit messages, PR titles and PR bodies MUST be in English (no Vietnamese).
 4. `git push -u origin feat/<…>` → mở PR vào `main` → CI xanh → squash/merge → xóa branch.
 5. Update `CHANGELOG.md` khi xong milestone.
 

@@ -2,10 +2,16 @@
 name = "attune-hal"
 version = "0.1.0"
 edition = "2021"
-description = "Hardware detection for Attune (CPU / memory / OS stub for M1)"
+description = "Hardware detection for Attune (CPU / memory / cache / OS for M1)"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.36"
 thiserror = "1"
+
+# raw-cpuid gives us CPUID-based brand/SIMD/cache enumeration on x86.
+# On non-x86 targets (e.g. aarch64) we skip the dep entirely and fall back to
+# a generic stub — M1 only targets Linux/Windows x86-64 anyway.
+[target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
+raw-cpuid = "11"
