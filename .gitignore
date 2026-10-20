@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+# NOTE: keep Cargo.lock (binary project) — do NOT ignore
+
+# Attune outputs (never commit)
+profiles/*.json
+!profiles/.gitkeep
+models/
+*.gguf
+bench-*.json
+
+# Local plan — keep private, only AGENTS.md is pushed (per user decision)
+attune-plan.md
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
