@@ -1,0 +1,17 @@
+[package]
+name = "attune-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Micro-benchmarks for Attune (memory bandwidth, FLOPS, e2e)"
+
+[dependencies]
+# Plan §7: attune-bench depends ONLY on attune-hal (plus serde for the JSON
+# contract). No clap/anyhow here — the CLI owns arg parsing and error context.
+attune-hal = { path = "../attune-hal" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+
+# serde_json is only needed by the tests that assert the JSON contract of
+# `ReadResult`; the CLI already owns serialization for the end user.
+[dev-dependencies]
+serde_json = "1"
