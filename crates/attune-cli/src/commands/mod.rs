@@ -6,6 +6,7 @@ mod detect;
 
 use anyhow::Result;
 use clap::Subcommand;
+use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -23,6 +24,14 @@ pub enum Command {
         /// Output machine-readable JSON instead of pretty table
         #[arg(long)]
         json: bool,
+        /// GGUF model to load-test with llama.cpp (skips the llama.cpp probe
+        /// when omitted)
+        #[arg(long, value_name = "PATH")]
+        model: Option<PathBuf>,
+        /// Path to the llama.cpp `llama-cli` binary (default: `--llama-cli`,
+        /// then $ATTUNE_LLAMA_CLI, then a PATH search for `llama-cli`/`main`)
+        #[arg(long, value_name = "PATH")]
+        llama_cli: Option<PathBuf>,
     },
 }
 
@@ -30,6 +39,11 @@ pub enum Command {
 pub fn dispatch(command: Command) -> Result<()> {
     match command {
         Command::Detect { json } => detect::run(json),
-        Command::Bench { quick, json } => bench::run(quick, json),
+        Command::Bench {
+            quick,
+            json,
+            model,
+            llama_cli,
+        } => bench::run(quick, json, model.as_deref(), llama_cli.as_deref()),
     }
 }

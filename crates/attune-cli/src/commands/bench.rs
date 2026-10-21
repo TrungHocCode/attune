@@ -6,10 +6,20 @@
 //! throughput sweep, and decorates the human output with theoretical-bandwidth
 //! and theoretical-FLOPS context. Both modes accept `--json` and print the
 //! same machine-readable shape the human output is rendered from (no surprises).
+//!
+//! `--model <PATH>` adds a llama.cpp smoke test (M2 slice 5): resolve
+//! `llama-cli`, read its `--version`, and load the model for a single token.
+//! It runs *before* the kernels so a misconfigured backend fails in
+//! milliseconds instead of after a multi-second benchmark, and its result is
+//! printed as one extra line (human mode) or one extra `"llama"` object
+//! (JSON mode). Without `--model` nothing here changes.
+
+use std::path::Path;
 
 use anyhow::Result;
 use attune_bench::bandwidth::{quick_read, FullBandwidthResult};
 use attune_bench::flops::{FlopsResult, WARMUP_PASSES as FLOPS_WARMUP_PASSES};
+use attune_bench::llama::{probe_model, resolve_llama_cli, LlamaProbeReport, LOAD_TIMEOUT};
 use attune_bench::monitor::ResourceStats;
 use attune_bench::quick_full_with_flops;
 use attune_hal::HardwareInfo;
@@ -142,13 +152,90 @@ fn print_pretty_full(result: &FullBandwidthResult, hw: &HardwareInfo) {
     println!("Total RAM: {}", human_bytes(hw.memory.total_bytes));
 }
 
-pub fn run(quick: bool, json: bool) -> Result<()> {
+// ---- llama.cpp probe (`--model`) ---------------------------------------------
+
+/// One line summarising the llama.cpp smoke test. The first line is the
+/// pass/fail statement; the second, when llama.cpp printed a `llama_perf`
+/// block, is the throughput it managed on the single token.
+fn print_pretty_llama(report: &LlamaProbeReport) {
+    println!(
+        "llama.cpp ({}) — model load OK ({}, {:.1} s)",
+        report.version,
+        report.model,
+        report.elapsed_ms / 1_000.0,
+    );
+    if let Some(perf) = report.perf.as_ref() {
+        println!(
+            "llama.cpp timings:     decode {:.1} tok/s ({} tokens), prefill {:.1} tok/s ({} tokens)",
+            perf.eval_tps(),
+            perf.eval_tokens,
+            perf.prompt_tps(),
+            perf.prompt_tokens,
+        );
+    }
+}
+
+/// Resolve `llama-cli` and load `model` through it.
+///
+/// Every failure here is a clean `anyhow` error and a non-zero exit code —
+/// notably [`resolve_llama_cli`], which reports a missing binary as
+/// "llama-cli not found (...) — pass --llama-cli or set ATTUNE_LLAMA_CLI"
+/// rather than panicking on a spawn error.
+fn probe_llama(llama_cli: Option<&Path>, model: &Path) -> Result<LlamaProbeReport> {
+    let explicit = match llama_cli {
+        Some(path) => Some(utf8_arg(path, "--llama-cli")?),
+        None => None,
+    };
+    let cli = resolve_llama_cli(explicit)?;
+    // `?` keeps `BenchError`'s Display message as the top-level error and its
+    // OS error as the `Caused by:` chain.
+    Ok(probe_model(&cli, model, LOAD_TIMEOUT, None)?)
+}
+
+/// Clap hands us an OS string, but the resolver takes `&str` (paths that reach
+/// the JSON contract as text). A non-UTF-8 path is a user mistake worth naming
+/// rather than silently ignoring.
+fn utf8_arg<'a>(path: &'a Path, flag: &str) -> Result<&'a str> {
+    path.to_str().ok_or_else(|| {
+        anyhow::anyhow!("{flag} path is not valid UTF-8: {}", path.to_string_lossy())
+    })
+}
+
+/// Print the bench report as JSON, optionally under a `"llama"` key.
+///
+/// Stdout stays a single JSON document either way (AGENTS.md §3.6: JSON is the
+/// contract) — the probe just adds a sibling key, so a consumer asking for
+/// `bench --model --json` gets both halves without parsing prose.
+fn print_json(probe: Option<&LlamaProbeReport>, bench: serde_json::Value) -> Result<()> {
+    match probe {
+        None => println!("{}", serde_json::to_string_pretty(&bench)?),
+        Some(probe) => {
+            let mut doc = serde_json::Map::new();
+            doc.insert("llama".to_string(), serde_json::to_value(probe)?);
+            doc.insert("bench".to_string(), bench);
+            println!("{}", serde_json::to_string_pretty(&doc)?);
+        }
+    }
+    Ok(())
+}
+
+pub fn run(quick: bool, json: bool, model: Option<&Path>, llama_cli: Option<&Path>) -> Result<()> {
+    // Probe first: a misconfigured llama.cpp should be reported in
+    // milliseconds, not after the kernels have burned their seconds.
+    let probe = match model {
+        Some(model_path) => Some(probe_llama(llama_cli, model_path)?),
+        None => None,
+    };
+
     if quick {
         let result = quick_read()?;
         if json {
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            print_json(probe.as_ref(), serde_json::to_value(result)?)?;
         } else {
             print_pretty_quick(&result);
+            if let Some(probe) = probe.as_ref() {
+                print_pretty_llama(probe);
+            }
         }
         return Ok(());
     }
@@ -158,9 +245,12 @@ pub fn run(quick: bool, json: bool) -> Result<()> {
     let hw = HardwareInfo::detect()?;
     let result = quick_full_with_flops()?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        print_json(probe.as_ref(), serde_json::to_value(result)?)?;
     } else {
         print_pretty_full(&result, &hw);
+        if let Some(probe) = probe.as_ref() {
+            print_pretty_llama(probe);
+        }
     }
     Ok(())
 }
