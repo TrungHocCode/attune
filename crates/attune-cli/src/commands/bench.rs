@@ -7,24 +7,39 @@
 //! and theoretical-FLOPS context. Both modes accept `--json` and print the
 //! same machine-readable shape the human output is rendered from (no surprises).
 //!
-//! `--model <PATH>` adds a llama.cpp smoke test (M2 slice 5): resolve
-//! `llama-cli`, read its `--version`, and load the model for a single token.
-//! It runs *before* the kernels so a misconfigured backend fails in
-//! milliseconds instead of after a multi-second benchmark, and its result is
-//! printed as one extra line (human mode) or one extra `"llama"` object
-//! (JSON mode). Without `--model` nothing here changes.
+//! `--model <PATH>` adds a llama.cpp smoke test (M2 slice 5) and, with
+//! slice 6, a full end-to-end decode run: it loads the model through
+//! `llama-cli`, scrapes the `llama_perf` block, and reports TTFT / decode
+//! tok/s / RAM peak / CPU avg. Both run *before* the kernels so a
+//! misconfigured backend fails in milliseconds instead of after a
+//! multi-second benchmark, and their results are printed as one extra
+//! block (human mode) or as an extra `"llama"` object plus an `"e2e"`
+//! nested key (JSON mode). Without `--model` nothing here changes from
+//! the slice-5 behaviour.
+//!
+//! `--save <PATH>` writes the JSON report to a file in addition to
+//! printing it; the file is the JSON contract verbatim and lives
+//! wherever the user points it (typically `%TEMP%/attune/...` — never
+//! the repo). Optional knobs (only meaningful with `--model`):
+//!
+//! * `--prompt-tokens <N>` — size of the synthetic prefill (`-p`).
+//!   Default 512.
+//! * `--gen-tokens <N>` — number of decode tokens (`-n`). Default 128.
+//! * `--ctx <N>` — context window (`-c`). Default 2048.
+//! * `--threads <N>` — thread pin (`-t`); omit to let llama.cpp pick.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use attune_bench::bandwidth::{quick_read, FullBandwidthResult};
+use anyhow::{Context, Result};
+use attune_bench::bandwidth::{FullBandwidthResult, ReadResult};
+use attune_bench::e2e::{E2eConfig, E2eResult};
 use attune_bench::flops::{FlopsResult, WARMUP_PASSES as FLOPS_WARMUP_PASSES};
 use attune_bench::llama::{probe_model, resolve_llama_cli, LlamaProbeReport, LOAD_TIMEOUT};
 use attune_bench::monitor::ResourceStats;
-use attune_bench::quick_full_with_flops;
+use attune_bench::{run_full, run_quick, BandwidthReport, BenchReport};
 use attune_hal::HardwareInfo;
 
-fn print_pretty_quick(result: &attune_bench::bandwidth::ReadResult) {
+fn print_pretty_quick(result: &ReadResult) {
     println!(
         "Memory bandwidth (read): {:.1} GB/s (buffer {} MiB, {} threads, {} reps)",
         result.read_gbps, result.buffer_mib, result.threads, result.reps,
@@ -114,17 +129,21 @@ fn print_resources_line(res: &ResourceStats) {
     );
 }
 
-fn print_pretty_full(result: &FullBandwidthResult, hw: &HardwareInfo) {
+fn print_pretty_full(
+    bandwidth: &FullBandwidthResult,
+    flops: Option<&FlopsResult>,
+    res: Option<&ResourceStats>,
+    hw: &HardwareInfo,
+) {
     let theoretical_bw = hw.memory.theoretical_bandwidth_gbps;
-    print_full_line("read", result.read.median_gbps, theoretical_bw);
-    print_full_line("write", result.write.median_gbps, theoretical_bw);
-    print_full_line("copy", result.copy.median_gbps, theoretical_bw);
+    print_full_line("read", bandwidth.read.median_gbps, theoretical_bw);
+    print_full_line("write", bandwidth.write.median_gbps, theoretical_bw);
+    print_full_line("copy", bandwidth.copy.median_gbps, theoretical_bw);
     println!(
         "Working set: {} MiB, {} worker threads, {} timed passes (1 warm-up discarded) per bandwidth kernel",
-        result.buffer_mib, result.threads, result.reps,
+        bandwidth.buffer_mib, bandwidth.threads, bandwidth.reps,
     );
-
-    if let Some(flops) = result.flops.as_ref() {
+    if let Some(flops) = flops {
         print_full_flops_line(flops);
         println!(
             "FMA kernel: {} threads, {} timed passes ({} warm-up discarded)",
@@ -134,7 +153,7 @@ fn print_pretty_full(result: &FullBandwidthResult, hw: &HardwareInfo) {
         println!("FP32 FLOPS: skipped (no flops block in report)");
     }
 
-    match result.resources.as_ref() {
+    match res {
         Some(res) => print_resources_line(res),
         None => println!("Resource usage:          not monitored"),
     }
@@ -152,11 +171,9 @@ fn print_pretty_full(result: &FullBandwidthResult, hw: &HardwareInfo) {
     println!("Total RAM: {}", human_bytes(hw.memory.total_bytes));
 }
 
-// ---- llama.cpp probe (`--model`) ---------------------------------------------
+// ---- llama.cpp probe + e2e (`--model`) -----------------------------------
 
-/// One line summarising the llama.cpp smoke test. The first line is the
-/// pass/fail statement; the second, when llama.cpp printed a `llama_perf`
-/// block, is the throughput it managed on the single token.
+/// One-line summary of the slice-5 llama.cpp probe (1-token model load).
 fn print_pretty_llama(report: &LlamaProbeReport) {
     println!(
         "llama.cpp ({}) — model load OK ({}, {:.1} s)",
@@ -175,51 +192,192 @@ fn print_pretty_llama(report: &LlamaProbeReport) {
     }
 }
 
-/// Resolve `llama-cli` and load `model` through it.
-///
-/// Every failure here is a clean `anyhow` error and a non-zero exit code —
-/// notably [`resolve_llama_cli`], which reports a missing binary as
-/// "llama-cli not found (...) — pass --llama-cli or set ATTUNE_LLAMA_CLI"
-/// rather than panicking on a spawn error.
-fn probe_llama(llama_cli: Option<&Path>, model: &Path) -> Result<LlamaProbeReport> {
-    let explicit = match llama_cli {
-        Some(path) => Some(utf8_arg(path, "--llama-cli")?),
-        None => None,
+/// The slice-6 e2e block in human mode. Two lines: the inference summary
+/// (TTFT, decode tok/s, token counts) and the resource readings.
+fn print_pretty_e2e(e2e: &E2eResult) {
+    if e2e.is_complete() {
+        println!(
+            "llama.cpp e2e ({}):     TTFT {:.1} ms, decode {:.1} tok/s ({} prompt / {} gen tokens)",
+            e2e.engine, e2e.ttft_ms, e2e.tok_s, e2e.prompt_tokens, e2e.eval_tokens,
+        );
+    } else {
+        println!(
+            "llama.cpp e2e ({}):     decode measurement unavailable (no perf block)",
+            e2e.engine,
+        );
+    }
+    let power = match e2e.power_avg_watts {
+        Some(watts) => format!("{watts:.1} W avg"),
+        None => "power unavailable (no counter)".to_string(),
     };
-    let cli = resolve_llama_cli(explicit)?;
+    println!(
+        "e2e resource usage:     RAM peak {}, CPU avg {:.1}%, {}",
+        human_bytes(e2e.ram_peak_bytes),
+        e2e.cpu_avg_pct,
+        power,
+    );
+}
+
+/// Resolve `llama-cli` and load `model` through it (the slice-5 smoke
+/// test). The slice-6 e2e *also* calls `llama_version` on the same binary,
+/// so a missing or non-runnable binary only costs one resolution.
+fn probe_llama(llama_cli: Option<&Path>, model: &Path) -> Result<LlamaProbeReport> {
+    let cli = resolve_llama_cli(llama_explicit(llama_cli)?)?;
     // `?` keeps `BenchError`'s Display message as the top-level error and its
     // OS error as the `Caused by:` chain.
     Ok(probe_model(&cli, model, LOAD_TIMEOUT, None)?)
 }
 
+/// Same resolution chain as `probe_llama`, but returns a `PathBuf` (which
+/// the e2e runner needs to spawn the child). Helper so the resolution
+/// detail lives in exactly one place.
+fn resolve_e2e_cli(llama_cli: Option<&Path>) -> Result<PathBuf> {
+    let cli = resolve_llama_cli(llama_explicit(llama_cli)?)?;
+    Ok(cli)
+}
+
 /// Clap hands us an OS string, but the resolver takes `&str` (paths that reach
 /// the JSON contract as text). A non-UTF-8 path is a user mistake worth naming
 /// rather than silently ignoring.
-fn utf8_arg<'a>(path: &'a Path, flag: &str) -> Result<&'a str> {
-    path.to_str().ok_or_else(|| {
-        anyhow::anyhow!("{flag} path is not valid UTF-8: {}", path.to_string_lossy())
-    })
+fn llama_explicit(path: Option<&Path>) -> Result<Option<&str>> {
+    match path {
+        None => Ok(None),
+        Some(p) => p
+            .to_str()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--llama-cli path is not valid UTF-8: {}",
+                    p.to_string_lossy()
+                )
+            })
+            .map(Some),
+    }
 }
 
-/// Print the bench report as JSON, optionally under a `"llama"` key.
+/// Build the [`E2eConfig`] from CLI overrides. The model path is required
+/// here; the four numeric knobs stay at their [`e2e`] defaults when the
+/// caller did not override them.
+fn make_e2e_config(
+    model: &Path,
+    prompt_tokens: Option<usize>,
+    gen_tokens: Option<u32>,
+    ctx_size: Option<u32>,
+    threads: Option<u32>,
+) -> E2eConfig {
+    let mut cfg = E2eConfig::new(model.to_path_buf());
+    if let Some(n) = prompt_tokens {
+        cfg.prompt_tokens = n;
+    }
+    if let Some(n) = gen_tokens {
+        cfg.gen_tokens = n;
+    }
+    if let Some(n) = ctx_size {
+        cfg.ctx_size = n;
+    }
+    if let Some(n) = threads {
+        cfg.threads = n;
+    }
+    cfg
+}
+
+// ---- JSON output ---------------------------------------------------------
+
+/// Build the JSON envelope printed by `--model --json` and saved by
+/// `--save`. Returning a [`serde_json::Value`] makes print and save share
+/// exactly the same shape, so a saved file mirrors what would have been
+/// printed to stdout.
 ///
-/// Stdout stays a single JSON document either way (AGENTS.md §3.6: JSON is the
-/// contract) — the probe just adds a sibling key, so a consumer asking for
-/// `bench --model --json` gets both halves without parsing prose.
-fn print_json(probe: Option<&LlamaProbeReport>, bench: serde_json::Value) -> Result<()> {
-    match probe {
-        None => println!("{}", serde_json::to_string_pretty(&bench)?),
-        Some(probe) => {
-            let mut doc = serde_json::Map::new();
-            doc.insert("llama".to_string(), serde_json::to_value(probe)?);
-            doc.insert("bench".to_string(), bench);
-            println!("{}", serde_json::to_string_pretty(&doc)?);
+/// Layout mirrors the slice-5 contract so older consumers still find
+/// their `llama` key: the probe sits next to the bench results, and the
+/// e2e block lives inside the bench object (`bench.e2e`) for consistency
+/// with the standalone [`BenchReport`] shape.
+fn json_envelope_with_model(
+    probe: &LlamaProbeReport,
+    report: &BenchReport,
+    bandwidth_value: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let mut bench = serde_json::Map::new();
+    bench.insert(
+        "schema".to_string(),
+        serde_json::Value::String(report.schema.clone()),
+    );
+    bench.insert(
+        "mode".to_string(),
+        serde_json::Value::String(report.mode.clone()),
+    );
+    bench.insert("bandwidth".to_string(), bandwidth_value.clone());
+    if let Some(flops) = report.flops.as_ref() {
+        bench.insert("flops".to_string(), serde_json::to_value(flops)?);
+    }
+    if let Some(resources) = report.resources.as_ref() {
+        bench.insert("resources".to_string(), serde_json::to_value(resources)?);
+    }
+    if let Some(e2e_block) = report.e2e.as_ref() {
+        bench.insert("e2e".to_string(), serde_json::to_value(e2e_block)?);
+    }
+    Ok(serde_json::json!({
+        "llama": probe,
+        "bench": bench,
+    }))
+}
+
+/// Write the JSON document to `path`. Matches what would otherwise have
+/// been printed to stdout — a saved report is interchangeable with the
+/// printed one. The caller passes an already-built [`serde_json::Value`]
+/// so the save path does not duplicate any envelope-building logic.
+fn write_json_value(path: &Path, value: &serde_json::Value) -> Result<()> {
+    let pretty = serde_json::to_string_pretty(value)?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
         }
     }
+    std::fs::write(path, pretty)
+        .with_context(|| format!("failed to write report to {}", path.display()))?;
     Ok(())
 }
 
-pub fn run(quick: bool, json: bool, model: Option<&Path>, llama_cli: Option<&Path>) -> Result<()> {
+/// Build the bandwidth-only subshape for the slice-5-compatible JSON
+/// envelope. Top-level `read` / `write` / `copy` keys, not the
+/// `bandwidth: { … }` wrapper — keeping the slices-1-4 contracts intact.
+fn bandwidth_value(bandwidth: &BandwidthReport, flops: &Option<FlopsResult>) -> serde_json::Value {
+    let mut value = match bandwidth {
+        BandwidthReport::Quick(r) => serde_json::to_value(r).expect("ReadResult serialises"),
+        BandwidthReport::Full(r) => serde_json::json!({
+            "read":   { "median_gbps": r.read.median_gbps,   "best_gbps": r.read.best_gbps },
+            "write":  { "median_gbps": r.write.median_gbps,  "best_gbps": r.write.best_gbps },
+            "copy":   { "median_gbps": r.copy.median_gbps,   "best_gbps": r.copy.best_gbps },
+            "buffer_mib": r.buffer_mib,
+            "threads": r.threads,
+            "reps": r.reps,
+        }),
+    };
+    if let (Some(obj), Some(flops)) = (value.as_object_mut(), flops.as_ref()) {
+        if let BandwidthReport::Full(_) = bandwidth {
+            obj.insert(
+                "flops".to_string(),
+                serde_json::to_value(flops).expect("FlopsResult serialises"),
+            );
+        }
+    }
+    value
+}
+
+// ---- entry point ---------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    quick: bool,
+    json: bool,
+    model: Option<&Path>,
+    llama_cli: Option<&Path>,
+    save: Option<&Path>,
+    prompt_tokens: Option<usize>,
+    gen_tokens: Option<u32>,
+    ctx_size: Option<u32>,
+    threads: Option<u32>,
+) -> Result<()> {
     // Probe first: a misconfigured llama.cpp should be reported in
     // milliseconds, not after the kernels have burned their seconds.
     let probe = match model {
@@ -227,30 +385,104 @@ pub fn run(quick: bool, json: bool, model: Option<&Path>, llama_cli: Option<&Pat
         None => None,
     };
 
+    // Resolve llama-cli up-front for e2e too, so a missing backend fails
+    // fast (instead of after the bandwidth phase already burned its
+    // seconds). Resolution failures here only matter when `--model` is
+    // also passed; the no-model path is unaffected.
+    let e2e_cli = match model {
+        Some(_) => Some(resolve_e2e_cli(llama_cli)?),
+        None => None,
+    };
+    let e2e_cfg = model.map(|m| make_e2e_config(m, prompt_tokens, gen_tokens, ctx_size, threads));
+
     if quick {
-        let result = quick_read()?;
+        let report = run_quick()?;
+        let bw_value = bandwidth_value(&report.bandwidth, &report.flops);
         if json {
-            print_json(probe.as_ref(), serde_json::to_value(result)?)?;
+            let value = match probe.as_ref() {
+                None => serde_json::to_value(&report)?,
+                Some(p) => json_envelope_with_model(p, &report, &bw_value)?,
+            };
+            println!("{}", serde_json::to_string_pretty(&value)?);
         } else {
-            print_pretty_quick(&result);
-            if let Some(probe) = probe.as_ref() {
-                print_pretty_llama(probe);
+            match &report.bandwidth {
+                BandwidthReport::Quick(r) => print_pretty_quick(r),
+                BandwidthReport::Full(_) => unreachable!("quick mode returns ReadResult"),
             }
+            if let Some(p) = probe.as_ref() {
+                print_pretty_llama(p);
+            }
+        }
+        if let Some(path) = save {
+            let value = match probe.as_ref() {
+                None => serde_json::to_value(&report)?,
+                Some(p) => json_envelope_with_model(p, &report, &bw_value)?,
+            };
+            write_json_value(path, &value)?;
         }
         return Ok(());
     }
 
-    // Full mode: detect hardware so we can decorate the human output with
-    // theoretical-bandwidth context (AGENTS.md §6 — JSON is the contract).
+    // Full mode.
     let hw = HardwareInfo::detect()?;
-    let result = quick_full_with_flops()?;
+    let report = run_full(&hw, e2e_cfg.as_ref(), e2e_cli.as_deref())?;
+    let bw_value = bandwidth_value(&report.bandwidth, &report.flops);
     if json {
-        print_json(probe.as_ref(), serde_json::to_value(result)?)?;
+        let value = match probe.as_ref() {
+            None => serde_json::to_value(&report)?,
+            Some(p) => json_envelope_with_model(p, &report, &bw_value)?,
+        };
+        println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
-        print_pretty_full(&result, &hw);
-        if let Some(probe) = probe.as_ref() {
-            print_pretty_llama(probe);
+        print_report_pretty(&report, &hw);
+        if let Some(p) = probe.as_ref() {
+            print_pretty_llama(p);
+        }
+        if let Some(e2e_block) = report.e2e.as_ref() {
+            print_pretty_e2e(e2e_block);
         }
     }
+    if let Some(path) = save {
+        let value = match probe.as_ref() {
+            None => serde_json::to_value(&report)?,
+            Some(p) => json_envelope_with_model(p, &report, &bw_value)?,
+        };
+        write_json_value(path, &value)?;
+    }
     Ok(())
+}
+
+/// Pretty-print a full-mode [`BenchReport`]. Mirrors the slice-5 layout
+/// so the human output is unchanged for everyone not using `--model` —
+/// the e2e block is the only addition. Full mode is the only path that
+/// reaches here, so a `BandwidthReport::Full` is the only case worth
+/// handling.
+fn print_report_pretty(report: &BenchReport, hw: &HardwareInfo) {
+    match &report.bandwidth {
+        BandwidthReport::Full(r) => {
+            print_pretty_full(r, report.flops.as_ref(), report.resources.as_ref(), hw);
+        }
+        BandwidthReport::Quick(r) => {
+            // Quick mode in the CLI goes through `print_pretty_quick` and
+            // returns early; this branch only fires when an external
+            // caller (a future test or a downstream consumer) hands us a
+            // quick-mode report and asks for the long render anyway.
+            let theoretical_bw = hw.memory.theoretical_bandwidth_gbps;
+            print_full_line("read", r.read_gbps, theoretical_bw);
+            println!(
+                "Working set: {} MiB, {} worker threads, {} timed passes (1 warm-up discarded)",
+                r.buffer_mib, r.threads, r.reps,
+            );
+            print_resources_or_skip(report.resources.as_ref());
+        }
+    }
+}
+
+fn print_resources_or_skip(res: Option<&ResourceStats>) {
+    match res {
+        Some(res) => print_resources_line(res),
+        None => println!("Resource usage:          not monitored"),
+    }
+    // Quick-mode report: no FLOPS, no DRAM footer to render. The header
+    // already covered the read kernel.
 }
