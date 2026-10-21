@@ -170,6 +170,12 @@ fn windows_dram_speed_channels() -> (u64, u32) {
     }
 }
 
+/// Pure parser for the `"<speed>|<count>"` line emitted by the Windows
+/// PowerShell probe. Kept platform-independent so its unit tests run on
+/// every OS; the only production caller is Windows-gated, hence the
+/// `allow(dead_code)` on other platforms (plain `cargo clippy` without
+/// `--all-targets` does not count `#[cfg(test)]` uses).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_speed_channels(s: &str) -> (u64, u32) {
     let trimmed = s.trim();
     let mut parts = trimmed.split('|');
