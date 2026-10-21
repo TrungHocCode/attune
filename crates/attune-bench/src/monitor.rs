@@ -969,7 +969,16 @@ mod tests {
 
     #[test]
     fn short_real_run_samples_this_process() {
-        let cores = sysinfo::System::physical_core_count().unwrap_or(1).max(1) as f64;
+        // Bound by LOGICAL cores, not physical: the test process runs other
+        // test threads in parallel, so whole-process CPU% can legitimately
+        // exceed physical_count * 100. The 1.5x headroom absorbs short-window
+        // (25 ms) sampling noise on loaded CI machines. Exact accounting is
+        // covered by the fake-sampler tests; this is only a smoke test.
+        let logical = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .max(1) as f64;
+        let bound = logical * 100.0 * 1.5;
         let started = Instant::now();
         let monitor =
             Monitor::start_sysinfo(25).expect("monitor should start against the real sampler");
@@ -991,11 +1000,11 @@ mod tests {
         );
         // Total-CPU semantics: a multi-threaded process can exceed 100 %.
         assert!(
-            stats.cpu_peak_pct <= cores * 100.0,
-            "cpu peak {} exceeds {}-core bound {}",
+            stats.cpu_peak_pct <= bound,
+            "cpu peak {} exceeds logical-core bound {} ({} logical cores)",
             stats.cpu_peak_pct,
-            cores,
-            cores * 100.0
+            bound,
+            logical
         );
         if let Some(watts) = stats.power_avg_watts {
             assert!(
