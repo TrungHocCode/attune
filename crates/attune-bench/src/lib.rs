@@ -1,8 +1,8 @@
 //! attune-bench — micro-benchmarks (M2).
 //!
-//! Slice 1 ships the **read memory-bandwidth kernel** only. Write/copy
-//! kernels, FLOPS, power monitoring and llama.cpp e2e land in later slices;
-//! do not add them ahead of the phase discipline in AGENTS.md §4.
+//! Slice 2 ships the **read / write / copy memory-bandwidth kernel** set.
+//! FLOPS, power monitoring and llama.cpp e2e land in later slices; do not
+//! add them ahead of the phase discipline in AGENTS.md §4.
 //!
 //! Every public type here is part of the JSON contract (`attune bench --json`),
 //! so fields are stable once shipped — evolve with `serde(default)` like
