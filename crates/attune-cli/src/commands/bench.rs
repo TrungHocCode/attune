@@ -10,6 +10,7 @@
 use anyhow::Result;
 use attune_bench::bandwidth::{quick_read, FullBandwidthResult};
 use attune_bench::flops::{FlopsResult, WARMUP_PASSES as FLOPS_WARMUP_PASSES};
+use attune_bench::monitor::ResourceStats;
 use attune_bench::quick_full_with_flops;
 use attune_hal::HardwareInfo;
 
@@ -85,6 +86,24 @@ fn print_full_flops_line(flops: &FlopsResult) {
     }
 }
 
+/// One resource-usage line for full-mode human output. Power is Linux-only
+/// (RAPL), so the absence of a reading is rendered as text, never as a gap.
+fn print_resources_line(res: &ResourceStats) {
+    let power = match res.power_avg_watts {
+        Some(watts) => format!("{watts:.1} W avg"),
+        None => "power unavailable (no counter)".to_string(),
+    };
+    println!(
+        "Resource usage:          RAM peak {}, CPU avg {:.1}% / peak {:.1}%, {} ({} samples @ {} ms)",
+        human_bytes(res.ram_peak_bytes),
+        res.cpu_avg_pct,
+        res.cpu_peak_pct,
+        power,
+        res.samples,
+        res.interval_ms,
+    );
+}
+
 fn print_pretty_full(result: &FullBandwidthResult, hw: &HardwareInfo) {
     let theoretical_bw = hw.memory.theoretical_bandwidth_gbps;
     print_full_line("read", result.read.median_gbps, theoretical_bw);
@@ -103,6 +122,11 @@ fn print_pretty_full(result: &FullBandwidthResult, hw: &HardwareInfo) {
         );
     } else {
         println!("FP32 FLOPS: skipped (no flops block in report)");
+    }
+
+    match result.resources.as_ref() {
+        Some(res) => print_resources_line(res),
+        None => println!("Resource usage:          not monitored"),
     }
 
     println!(

@@ -86,6 +86,12 @@ pub struct FullBandwidthResult {
     /// FLOPS sweep. `serde(default)` keeps old M2 slice-2 JSON parseable.
     #[serde(default)]
     pub flops: Option<crate::flops::FlopsResult>,
+    /// Resource-usage block (M2 slice 4) collected by the monitor while this
+    /// sweep ran. `None` when the field is absent from older JSON or when the
+    /// sweep ran without a monitor. `serde(default)` keeps old slice-2/3 JSON
+    /// parseable.
+    #[serde(default)]
+    pub resources: Option<crate::monitor::ResourceStats>,
 }
 
 /// Benchmark parameters. Build with [`BandwidthConfig::from_hardware`] for
@@ -250,6 +256,9 @@ pub fn full_bandwidth(cfg: &BandwidthConfig) -> Result<FullBandwidthResult, Benc
         threads: cfg.threads,
         reps: cfg.reps,
         flops: None,
+        // Resource monitoring is layered on by the caller (`quick_full_with_flops`),
+        // not by the kernels themselves.
+        resources: None,
     })
 }
 
@@ -901,6 +910,7 @@ mod tests {
             threads: 8,
             reps: 5,
             flops: None,
+            resources: None,
         };
         let json = serde_json::to_string(&res).expect("serialize FullBandwidthResult");
         assert!(json.contains("\"read\""), "missing read: {json}");
@@ -940,5 +950,30 @@ mod tests {
         assert_eq!(back.buffer_mib, 256);
         assert_eq!(back.reps, 5);
         assert!(back.flops.is_none());
+        // Slice 4 added `resources` with the same backward-compatible shape.
+        assert!(back.resources.is_none());
+    }
+
+    #[test]
+    fn full_result_carries_the_resource_block() {
+        let mut res = full_bandwidth(&test_cfg(8, 1, 1)).expect("full sweep should run");
+        let resources = crate::monitor::ResourceStats {
+            ram_peak_bytes: 512 * MIB,
+            cpu_avg_pct: 87.5,
+            cpu_peak_pct: 99.0,
+            power_avg_watts: None,
+            samples: 7,
+            interval_ms: crate::monitor::DEFAULT_INTERVAL_MS,
+        };
+        res.resources = Some(resources);
+
+        let json = serde_json::to_string(&res).expect("serialize FullBandwidthResult");
+        assert!(
+            json.contains("\"ram_peak_bytes\""),
+            "missing resource block: {json}"
+        );
+        let back: FullBandwidthResult =
+            serde_json::from_str(&json).expect("deserialize FullBandwidthResult");
+        assert_eq!(back.resources, Some(resources));
     }
 }

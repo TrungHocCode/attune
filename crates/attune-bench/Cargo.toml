@@ -8,6 +8,11 @@ description = "Micro-benchmarks for Attune (memory bandwidth, FLOPS, e2e)"
 # Plan §7: attune-bench depends ONLY on attune-hal (plus serde for the JSON
 # contract). No clap/anyhow here — the CLI owns arg parsing and error context.
 attune-hal = { path = "../attune-hal" }
+# Justification: the resource monitor needs per-process RSS + CPU on Linux AND
+# Windows through one code path. `sysinfo` is already the workspace-standard
+# source of RAM/CPU facts (attune-hal uses it for `detect`), so this adds no
+# new transitive dependency, only a second workspace consumer of it.
+sysinfo = "0.36"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 
