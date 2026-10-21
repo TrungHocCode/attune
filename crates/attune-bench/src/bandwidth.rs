@@ -81,6 +81,11 @@ pub struct FullBandwidthResult {
     pub threads: usize,
     /// Timed passes per kernel (warm-up excluded).
     pub reps: usize,
+    /// FMA throughput block (M2 slice 3). `None` when (a) the field is
+    /// absent from older JSON, or (b) full mode deliberately skipped the
+    /// FLOPS sweep. `serde(default)` keeps old M2 slice-2 JSON parseable.
+    #[serde(default)]
+    pub flops: Option<crate::flops::FlopsResult>,
 }
 
 /// Benchmark parameters. Build with [`BandwidthConfig::from_hardware`] for
@@ -244,6 +249,7 @@ pub fn full_bandwidth(cfg: &BandwidthConfig) -> Result<FullBandwidthResult, Benc
         buffer_mib: cfg.buffer_bytes / MIB,
         threads: cfg.threads,
         reps: cfg.reps,
+        flops: None,
     })
 }
 
@@ -894,6 +900,7 @@ mod tests {
             buffer_mib: 256,
             threads: 8,
             reps: 5,
+            flops: None,
         };
         let json = serde_json::to_string(&res).expect("serialize FullBandwidthResult");
         assert!(json.contains("\"read\""), "missing read: {json}");
@@ -914,5 +921,24 @@ mod tests {
         let back: FullBandwidthResult =
             serde_json::from_str(&json).expect("deserialize FullBandwidthResult");
         assert_eq!(back, res);
+    }
+
+    #[test]
+    fn full_result_deserializes_old_slice2_json_without_flops() {
+        // Slice-2 JSON has no `flops` field. Backward-compat: it must still
+        // parse, with `flops` defaulting to None.
+        let old_json = r#"{
+            "read":   {"median_gbps": 22.0, "best_gbps": 25.0},
+            "write":  {"median_gbps": 14.0, "best_gbps": 16.0},
+            "copy":   {"median_gbps": 20.0, "best_gbps": 23.0},
+            "buffer_mib": 256,
+            "threads": 8,
+            "reps": 5
+        }"#;
+        let back: FullBandwidthResult =
+            serde_json::from_str(old_json).expect("deserialize old FullBandwidthResult");
+        assert_eq!(back.buffer_mib, 256);
+        assert_eq!(back.reps, 5);
+        assert!(back.flops.is_none());
     }
 }
