@@ -1,13 +1,16 @@
 //! `attune bench` — micro-benchmarks.
 //!
-//! Quick mode (`--quick`) returns the best-of-reps read bandwidth number from
-//! M2 slice 1. Full mode (the default now that slice 2 is shipped) runs the
-//! read / write / copy kernels in series and reports the median of `reps`
-//! timed passes for each. Both modes accept `--json` and print the same
-//! machine-readable shape the human output is rendered from (no surprises).
+//! Quick mode (`--quick`) returns the best-of-reps read bandwidth number
+//! from M2 slice 1. Full mode (the default now that slice 3 is shipped)
+//! runs the read / write / copy kernels back-to-back, then an FP32 FMA
+//! throughput sweep, and decorates the human output with theoretical-bandwidth
+//! and theoretical-FLOPS context. Both modes accept `--json` and print the
+//! same machine-readable shape the human output is rendered from (no surprises).
 
 use anyhow::Result;
-use attune_bench::bandwidth::{quick_full, quick_read, FullBandwidthResult};
+use attune_bench::bandwidth::{quick_read, FullBandwidthResult};
+use attune_bench::flops::{FlopsResult, WARMUP_PASSES as FLOPS_WARMUP_PASSES};
+use attune_bench::quick_full_with_flops;
 use attune_hal::HardwareInfo;
 
 fn print_pretty_quick(result: &attune_bench::bandwidth::ReadResult) {
@@ -62,15 +65,46 @@ fn print_full_line(label: &str, median_gbps: f64, theoretical: f64) {
     }
 }
 
+/// One FP32 FLOPS line for full-mode human output. Same decoration pattern
+/// as the bandwidth lines: either `XX% of theoretical YY.Y` or
+/// `(theoretical: unknown)` depending on whether the peak was quoteable.
+fn print_full_flops_line(flops: &FlopsResult) {
+    if flops.theoretical_gflops > 0.0 {
+        println!(
+            "FP32 FLOPS:             {:.1} GFLOPS (path: {}{})",
+            flops.fp32_gflops,
+            flops.path.as_str(),
+            pct_of(flops.fp32_gflops, flops.theoretical_gflops),
+        );
+    } else {
+        println!(
+            "FP32 FLOPS:             {:.1} GFLOPS (path: {}, theoretical: unknown)",
+            flops.fp32_gflops,
+            flops.path.as_str(),
+        );
+    }
+}
+
 fn print_pretty_full(result: &FullBandwidthResult, hw: &HardwareInfo) {
-    let theoretical = hw.memory.theoretical_bandwidth_gbps;
-    print_full_line("read", result.read.median_gbps, theoretical);
-    print_full_line("write", result.write.median_gbps, theoretical);
-    print_full_line("copy", result.copy.median_gbps, theoretical);
+    let theoretical_bw = hw.memory.theoretical_bandwidth_gbps;
+    print_full_line("read", result.read.median_gbps, theoretical_bw);
+    print_full_line("write", result.write.median_gbps, theoretical_bw);
+    print_full_line("copy", result.copy.median_gbps, theoretical_bw);
     println!(
-        "Working set: {} MiB, {} worker threads, {} timed passes (1 warm-up discarded) per kernel",
+        "Working set: {} MiB, {} worker threads, {} timed passes (1 warm-up discarded) per bandwidth kernel",
         result.buffer_mib, result.threads, result.reps,
     );
+
+    if let Some(flops) = result.flops.as_ref() {
+        print_full_flops_line(flops);
+        println!(
+            "FMA kernel: {} threads, {} timed passes ({} warm-up discarded)",
+            flops.threads, flops.reps, FLOPS_WARMUP_PASSES,
+        );
+    } else {
+        println!("FP32 FLOPS: skipped (no flops block in report)");
+    }
+
     println!(
         "DRAM (best-effort): speed {} MT/s, {} DIMMs → {} peak",
         hw.memory.speed_mts,
@@ -98,7 +132,7 @@ pub fn run(quick: bool, json: bool) -> Result<()> {
     // Full mode: detect hardware so we can decorate the human output with
     // theoretical-bandwidth context (AGENTS.md §6 — JSON is the contract).
     let hw = HardwareInfo::detect()?;
-    let result = quick_full()?;
+    let result = quick_full_with_flops()?;
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
