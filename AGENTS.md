@@ -93,3 +93,4 @@ Current phase: **PHASE 0 — FOUNDATION (M1: `attune detect`)**.
 - External contributors: fork → branch → PR. Same 4 verify gates + English-only rule.
 - `main` protection enforced via API: PR required, `check (ubuntu-latest)` + `check (windows-latest)` must pass, linear history (squash), no force push/deletion, applies to admins too.
 - Issue/PR templates live in `.github/`. Link issues (`Fixes #N`) in every PR.
+- Writing bar: imitate issues/PRs #10–#14 (problem with evidence first, concrete proposal, verification output, reviewer-focus note). See CONTRIBUTING.md “Writing Quality Issues and PRs”. Never tick the CI checkbox without green checks.
