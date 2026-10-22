@@ -126,6 +126,31 @@ impl ModelSpec {
 /// `"7000000"`. Suffixes are case-insensitive and decimal values are allowed
 /// (`"0.5B"`). Zero, negatives, NaN/Inf and garbage are rejected instead of
 /// being coerced to a bogus size.
+/// Parse a comma-separated quant list such as `"fp16,q8_0,q4_k_m"`.
+///
+/// Entries are trimmed and parsed case-insensitively; duplicates are dropped
+/// in first-seen order. An empty list or an empty entry is rejected instead of
+/// silently ignored.
+pub fn parse_quants(input: &str) -> Result<Vec<Quant>, EstimateError> {
+    let mut quants = Vec::new();
+    for part in input.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err(EstimateError::InvalidQuant(input.trim().to_string()));
+        }
+        let quant: Quant = part.parse()?;
+        if !quants.contains(&quant) {
+            quants.push(quant);
+        }
+    }
+
+    if quants.is_empty() {
+        Err(EstimateError::InvalidQuant(input.trim().to_string()))
+    } else {
+        Ok(quants)
+    }
+}
+
 pub fn parse_params(input: &str) -> Result<u64, EstimateError> {
     let text = input.trim();
     if text.is_empty() {
@@ -203,6 +228,29 @@ mod tests {
     fn rejects_bad_sizes() {
         for input in ["", "M", "B", "abc", "NaN", "inf", "-5M", "0", "0.0B"] {
             assert!(parse_params(input).is_err(), "{input:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn parses_comma_separated_quants() {
+        assert_eq!(
+            parse_quants("fp16,q8_0,q4_k_m").expect("list"),
+            vec![Quant::Fp16, Quant::Q8_0, Quant::Q4_K_M]
+        );
+        assert_eq!(
+            parse_quants(" FP16 , q4_0 ").expect("trimmed"),
+            vec![Quant::Fp16, Quant::Q4_0]
+        );
+        assert_eq!(
+            parse_quants("q8_0,q8_0").expect("deduped"),
+            vec![Quant::Q8_0]
+        );
+    }
+
+    #[test]
+    fn rejects_empty_or_invalid_quant_lists() {
+        for input in ["", ",", "fp16,", ",q8_0", "fp16,,q8_0", "int3"] {
+            assert!(parse_quants(input).is_err(), "{input:?} should be rejected");
         }
     }
 

@@ -3,8 +3,10 @@
 //! Slice 1 ships the roofline **decode** core: parse a model size + quant,
 //! combine it with measured bandwidth, and report a predicted decode rate.
 //! Slice 2 adds **prefill / TTFT**, the memory/compute **ridge** (`AI* =
-//! FLOPS / BW`) and **bottleneck classification**. Later slices add
-//! calibration, confidence intervals and multi-config sweeps.
+//! FLOPS / BW`) and **bottleneck classification**. Slice 3 adds **calibration**
+//! from a measured bench. Slice 4 closes M3 with **confidence intervals**
+//! derived from the measured bandwidth spread plus the **multi-config** report
+//! contract.
 //!
 //! The JSON contract is [`report::EstimateReport`]; evolve it with
 //! `serde(default)` like `attune-hal` / `attune-bench`, never by silently
@@ -21,9 +23,12 @@ pub mod roofline;
 pub use bottleneck::{classify, decode_ai, prefill_ai, ridge_ai};
 pub use calibrate::{apply_decode, apply_prefill, fit_eta, CalibratedInputs, MAX_ETA, MIN_ETA};
 pub use error::EstimateError;
-pub use model::{parse_params, ModelSpec, Quant, BITS_PER_WEIGHT};
+pub use model::{parse_params, parse_quants, ModelSpec, Quant, BITS_PER_WEIGHT};
 pub use prefill::predict_prefill_ms;
-pub use report::{Bottleneck, CalibrationReport, EstimateInputs, EstimateReport};
+pub use report::{
+    interval, spread_pct_from_stats, Bottleneck, CalibrationReport, Confidence, EstimateInputs,
+    EstimateReport, MultiEstimateReport,
+};
 pub use roofline::{predict_decode_tps, HwInputs};
 
 /// Schema stamped on every [`EstimateReport`] so consumers can tell a

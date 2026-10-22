@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-10-22
+
+Closes **M3 — `attune estimate`**. Roofline decode/prefill prediction,
+calibration against a real bench, confidence intervals and multi-config
+compares are now in place.
+
+### Added
+- `EstimateReport` confidence interval fields: `decode_tps_lo` /
+  `decode_tps_hi` and `prefill_ms_lo` / `prefill_ms_hi`, plus a
+  `confidence { level, method }` block. Bounds use the symmetric
+  `pred × (1 ± spread/100)` formula, where the spread is
+  `(best − median) / median` from a full bench read-kernel `KernelStats`.
+- `attune-estimate` exports `interval` and `spread_pct_from_stats` as pure,
+  unit-tested helpers; `Confidence::measured` / `Confidence::unavailable`
+  carry the level (`high`/`medium`/`low`/`unavailable`) and provenance.
+- `--quant fp16,q8_0,q4_k_m` multi-config compare: the human output is a
+  fastest-first table and `--json` emits `{ schema, model, configs: [...] }`.
+  A single `--quant` still emits the existing bare report (backward
+  compatible).
+- `--spread-pct <PCT>` to supply an explicit half-spread when bandwidth is
+  overridden or quick-probed; a full `--bench-json` report supplies the
+  measured spread automatically.
+- `parse_quants` in `attune-estimate::model` for comma-separated,
+  deduplicated weight-format lists.
+
+### Changed
+- `--bench-json` is also used as the confidence-spread source; a full report
+  gives intervals, a quick report records why they are unavailable.
+
+### Notes
+- No new dependencies. Confidence bounds stay `null` when no measured spread
+  is available (the quick probe has no median), with the reason in
+  `confidence.method`.
+
 ## [0.2.0] - 2026-10-21
 
 Closes **M2 — `attune bench`**. New end-to-end llama.cpp decode measurement

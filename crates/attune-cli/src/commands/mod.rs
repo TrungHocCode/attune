@@ -56,19 +56,26 @@ pub enum Command {
         #[arg(long, value_name = "N", requires = "model")]
         threads: Option<u32>,
     },
-    /// Predict decode throughput, prefill/TTFT and the roofline bottleneck
-    /// (M3 slices 1-2). Without overrides, bandwidth comes from a quick bench
-    /// and the FP32 peak from `attune detect`.
+    /// Predict decode throughput, prefill/TTFT, the roofline bottleneck and
+    /// confidence intervals (M3 slices 1-4). Without overrides, bandwidth
+    /// comes from a quick bench and the FP32 peak from `attune detect`.
+    /// Comma-separated `--quant` compares several weight formats.
     Estimate {
         /// Model size, e.g. `135M`, `1.2B` or `7000000`
         #[arg(long, value_name = "SIZE")]
         params: String,
-        /// Weight format: `fp16`, `q8_0`, `q4_0` or `q4_k_m`
-        #[arg(long, value_name = "QUANT")]
+        /// Weight format(s): `fp16`, `q8_0`, `q4_0` or `q4_k_m`.
+        /// Comma-separate to compare configs, e.g. `fp16,q8_0,q4_k_m`
+        #[arg(long, value_name = "QUANT[,QUANT...]")]
         quant: String,
         /// Override measured memory bandwidth (decimal GB/s); skips the bench
         #[arg(long, value_name = "GBPS")]
         bandwidth_gbps: Option<f64>,
+        /// Explicit half-spread percentage for the confidence interval
+        /// (e.g. `10` for ±10%). Overrides the spread from `--bench-json`;
+        /// needed when bandwidth is overridden or quick-probed.
+        #[arg(long, value_name = "PCT")]
+        spread_pct: Option<f64>,
         /// Override the FP32 peak (decimal GFLOPS); skips the HAL estimate
         #[arg(long, value_name = "GFLOPS")]
         gflops: Option<f64>,
@@ -84,7 +91,8 @@ pub enum Command {
         ctx: u32,
         /// Saved `attune bench --json` report to calibrate against. Accepts
         /// either a bare report or the `{ "bench": … }` envelope written by
-        /// `attune bench --model --save`.
+        /// `attune bench --model --save`. A full report also supplies the
+        /// read-kernel spread for confidence intervals.
         #[arg(long, value_name = "PATH")]
         bench_json: Option<PathBuf>,
         /// Calibrate the prediction from `--bench-json` (the report must
@@ -126,6 +134,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             params,
             quant,
             bandwidth_gbps,
+            spread_pct,
             gflops,
             prompt_tokens,
             gen_tokens,
@@ -137,6 +146,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             &params,
             &quant,
             bandwidth_gbps,
+            spread_pct,
             gflops,
             prompt_tokens,
             gen_tokens,
