@@ -1,0 +1,44 @@
+name: pr-title
+
+# Runs from `main` with the base repo's token, even for fork PRs.
+# Never check out or run PR code here. Action is pinned by SHA.
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            chore
+            docs
+            refactor
+            test
+            perf
+            ci
+            build
+          scopes: |
+            hal
+            bench
+            estimate
+            tune
+            profile
+            backend
+            serve
+            cli
+            deps
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: >-
+            Subject "{subject}" must start with a lowercase letter,
+            e.g. "feat(hal): detect AVX-512 support".
