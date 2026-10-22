@@ -16,7 +16,7 @@
 - Acceptance: output matches OS tooling (`lscpu`/WMI/CIM) on test machines;
   `cargo test` green on Linux and Windows.
 
-## M2 — Measure ✅ (v0.2.0)
+## M2 — Measure 🚧 (code complete, validation pending — v0.2.0)
 
 **Goal:** know what the hardware can really do (datasheets overpromise).
 
@@ -30,6 +30,10 @@
   `docs/benchmark-methodology.md`.
 - Acceptance: repeated runs agree within 5%; e2e numbers match manual
   llama.cpp runs within ±20%.
+- **Remaining:** e2e/subprocess acceptance was never run against a real
+  model (no `llama-cli` or `.gguf` on the dev machine; live tests are
+  env-gated). Tracked in the validation issue — M2 flips to ✅ only when
+  measured TTFT/tok/s numbers are posted there.
 
 ## M3 — Estimate 🚧 (current, v0.3.0 planned)
 
