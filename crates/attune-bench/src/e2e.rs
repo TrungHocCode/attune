@@ -7,11 +7,15 @@
 //!
 //! Three principles, repeated from earlier slices:
 //!
-//! 1. **Old-build-safe flags only.** The CLI line is just `-m -p -n -c [-t]`.
-//!    Every flag here is one the b2xxx-b6xxx series understands, so the same
-//!    `E2eConfig` works against any reasonably recent llama.cpp checkout the
-//!    user might have built. New conveniences (`-ngl`, `-no-cnv`, …) would
-//!    make the bench fail on an older build and report nothing useful.
+//! 1. **Old-build-safe flags only.** The CLI line is
+//!    `-m -p -n -c [-st] [-v] [-t]`. Every flag here is one the b2xxx-b6xxx
+//!    series understands — `-st` and `-v` both predate the chat rewrite — so
+//!    the same `E2eConfig` works against any reasonably recent llama.cpp
+//!    checkout the user might have built. New conveniences (`-ngl`, `-no-cnv`, …)
+//!    would make the bench fail on an older build and report nothing useful.
+//!    `-st` keeps the child from sitting in its interactive REPL and `-v` is
+//!    what makes it print the per-slot timing block [`parse_perf`] reads (the
+//!    non-verbose summary line has no `ms / tokens` pair to parse).
 //! 2. **Generous deadline.** A real run loads a model (mmap + warm-up of
 //!    every layer), processes the prefill, then decodes. On a slow box that
 //!    is minutes; [`E2E_TIMEOUT`] is sized for that, so the user can ride out
@@ -250,9 +254,15 @@ pub fn build_prompt(target_tokens: usize, max_chars: usize) -> String {
 }
 
 /// Build the llama.cpp command line for an e2e run. Only old-build-safe
-/// flags (`-m`, `-p`, `-n`, `-c`, optional `-t`); newer conveniences would
-/// make the bench fail on older llama.cpp checkouts instead of telling us
-/// anything useful.
+/// flags (`-m`, `-p`, `-n`, `-c`, [`llama::COMMON_ARGS`], optional `-t`);
+/// newer conveniences would make the bench fail on older llama.cpp checkouts
+/// instead of telling us anything useful.
+///
+/// [`llama::COMMON_ARGS`] carries `-st` and `-v`, both of which predate the
+/// chat rewrite: `-st` makes the child answer the prompt and exit instead of
+/// opening its interactive REPL, `-v` makes it print the timing block
+/// [`parse_perf`] reads instead of the compact `[ Prompt: … | Generation: … ]`
+/// summary, which carries no parseable timings.
 pub fn build_e2e_args(cfg: &E2eConfig) -> Vec<String> {
     let prompt = build_prompt(cfg.effective_prompt_tokens(), cfg.max_prompt_chars());
     let mut args = vec![
@@ -265,6 +275,7 @@ pub fn build_e2e_args(cfg: &E2eConfig) -> Vec<String> {
         "-c".to_string(),
         cfg.ctx_size().to_string(),
     ];
+    args.extend(llama::COMMON_ARGS.iter().map(|flag| flag.to_string()));
     if cfg.threads > 0 {
         args.push("-t".to_string());
         args.push(cfg.threads.to_string());
@@ -637,6 +648,15 @@ mod tests {
             joined.contains(&format!("-c {}", DEFAULT_CTX_SIZE)),
             "{joined}"
         );
+        // `-st` and `-v` predate the chat rewrite, so they are old-safe too:
+        // `-st` stops the child from waiting in its interactive REPL and `-v`
+        // makes it print the timing block `parse_perf` reads.
+        for flag in llama::COMMON_ARGS {
+            assert!(
+                args.iter().any(|arg| arg == flag),
+                "missing {flag}: {joined}"
+            );
+        }
         // The prompt must exist and be at least roughly the target length.
         let prompt_idx = args.iter().position(|s| s == "-p").expect("-p flag");
         let prompt_value = &args[prompt_idx + 1];

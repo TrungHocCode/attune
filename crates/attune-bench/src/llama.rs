@@ -15,7 +15,10 @@
 //!   and stderr on their own threads (llama.cpp writes a lot of progress to
 //!   stderr — a blocking read would deadlock on a full pipe), and waits with a
 //!   deadline. On expiry it kills the child and reaps it through [`ChildGuard`]'s
-//!   `Drop`, so a wedged backend can never leave a zombie behind.
+//!   `Drop`, so a wedged backend can never leave a zombie behind. Every command
+//!   line also carries [`COMMON_ARGS`] (`-st` so the child answers `-p` and
+//!   exits instead of opening its chat REPL, `-v` so the run prints the timing
+//!   block [`parse_perf`] reads).
 //! * **Read it** — llama.cpp has moved its banner text several times, so both
 //!   parsers ([`parse_version`], [`parse_perf`]) are tolerant pure functions
 //!   unit-tested against canned output from several `b`-versions. They accept
@@ -72,6 +75,24 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// short enough that a grandchild holding the pipe open cannot hang the bench.
 /// See [`join_reader`].
 const READER_JOIN_BUDGET: Duration = Duration::from_secs(2);
+
+/// Flags appended to *every* llama.cpp command line this crate builds — both
+/// [`load_probe_args`] and the e2e runner ([`crate::e2e::build_e2e_args`]).
+///
+/// * `-st` / `--single-turn` — answer the one `-p` prompt and exit, instead of
+///   dropping into the interactive chat REPL the current `llama-cli` defaults
+///   to. Without it a bench run would sit waiting on a stdin we never feed
+///   (the child is spawned with `stdin(Stdio::null())`).
+/// * `-v` / `--verbose` — print the per-slot timing block that
+///   [`parse_perf`] reads. The compact default summary
+///   (`[ Prompt: 953.4 t/s | Generation: 157.4 t/s ]`) on stdout carries no
+///   `… ms / … tokens` pair, so without `-v` there is nothing to parse and
+///   the e2e block reports "decode measurement unavailable".
+///
+/// Both flags are far older than the chat rewrite (`-v` since the b1xxx era,
+/// `-st` since well before it), so no build-number gating is needed: an old
+/// checkout understands them just as well as b11804.
+pub const COMMON_ARGS: &[&str] = &["-st", "-v"];
 
 /// Prompt used by the minimal load test. Deliberately trivial: the point is to
 /// make llama.cpp mmap the weights and build its KV cache, not to benchmark
@@ -375,7 +396,8 @@ impl ChildGuard {
     /// Spawn `cli` with its stdout/stderr piped and drained concurrently.
     ///
     /// stdin is `null`: llama.cpp falls back to an interactive prompt when it
-    /// has a terminal, and a bench run must never block on one.
+    /// has a terminal, and a bench run must never block on one. [`COMMON_ARGS`]
+    /// (`-st`) is the belt to that braces — the run exits by itself too.
     fn spawn(cli: &Path, args: &[&str]) -> Result<Self, BenchError> {
         let mut child = Command::new(cli)
             .args(args)
@@ -661,12 +683,14 @@ fn parse_ms_and_count(line: &str) -> Option<(f64, u64)> {
 }
 
 /// Command line for the minimal load test: tiny prompt, `LOAD_PREDICT` tokens,
-/// a small context, and optional thread pinning.
+/// a small context, optional thread pinning, plus [`COMMON_ARGS`].
 ///
 /// Kept to flags every build since the b2xxx era understands, on purpose: the
 /// point is a portable smoke test, so newer conveniences (`-ngl`, `-no-cnv`)
 /// are deliberately absent — an unknown flag would make the probe fail on an
-/// older checkout instead of telling us anything useful.
+/// older checkout instead of telling us anything useful. `-st` and `-v` are
+/// part of that old-safe set and are what make the run terminate by itself and
+/// print a parseable timing block.
 pub fn load_probe_args(model: &Path, threads: Option<u32>) -> Vec<String> {
     let mut args = vec![
         "-m".to_string(),
@@ -678,6 +702,7 @@ pub fn load_probe_args(model: &Path, threads: Option<u32>) -> Vec<String> {
         "-c".to_string(),
         LOAD_CTX.to_string(),
     ];
+    args.extend(COMMON_ARGS.iter().map(|flag| flag.to_string()));
     if let Some(threads) = threads {
         args.push("-t".to_string());
         args.push(threads.to_string());
@@ -1028,6 +1053,54 @@ llama_perf_context_print:       total time =   554.30 ms.
     }
 
     #[test]
+    fn parse_perf_reads_a_slot_print_timing_block() {
+        // b11804 (v0.7.0-dev) with `-v`: the `llama_perf_context_print`
+        // prefix is gone, the lines now come from the server log as
+        // `slot print_timing: id … | task … | …`. The `ms / … tokens` shape
+        // is unchanged, so the parser must not be anchored on the old prefix.
+        let stderr = "\
+slot print_timing: id  0 | task 0 | prompt eval time =     158.37 ms /   151 tokens (    1.05 ms per token,   953.44 tokens per second)
+slot print_timing: id  0 | task 0 |        eval time =     196.92 ms /    32 tokens (    6.35 ms per token,   157.42 tokens per second)
+slot print_timing: id  0 | task 0 |       total time =     355.30 ms /   183 tokens
+";
+        let perf = parse_perf(stderr).expect("slot print_timing block should parse");
+        assert!((perf.prompt_eval_ms - 158.37).abs() < 1e-9);
+        assert_eq!(perf.prompt_tokens, 151);
+        assert!((perf.eval_ms - 196.92).abs() < 1e-9);
+        assert_eq!(perf.eval_tokens, 32);
+        // Total time (355.30) must not be mistaken for either half, and the
+        // 183-token total must not leak into the prefill count either.
+        assert!(perf.eval_ms < 355.0);
+        assert_eq!(perf.prompt_tokens + perf.eval_tokens, 183);
+        // Throughput is our own ms/tokens division (llama.cpp's printed t/s
+        // averages differently), so check it against that derivation.
+        assert!((perf.prompt_tps() - 953.46).abs() < 0.01);
+        assert!((perf.eval_tps() - 162.50).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_perf_reads_a_logged_and_wrapped_slot_print_timing_block() {
+        // The same block as it actually arrives: prefixed by llama.cpp's log
+        // line (`<t> <level> …`) and hard-wrapped at ~120 columns, which can
+        // split the trailing `( … ms per token, … tok/s)` breakdown onto its
+        // own line. Every number `parse_perf` needs comes *before* the wrap,
+        // so a wrapped run must still parse — and the wrap continuation must
+        // not be mistaken for a second reading.
+        let stderr = "\
+ 0.00.640.331 I slot print_timing: id  0 | task 0 | prompt eval time =      46.60 ms /    40 tokens (    1.17 ms per
+token,   858.37 tokens per second)
+ 0.00.640.333 I slot print_timing: id  0 | task 0 |        eval time =      35.38 ms /     8 tokens (    5.05 ms per
+token,   197.87 tokens per second)
+ 0.00.640.333 I slot print_timing: id  0 | task 0 |       total time =      81.98 ms /    48 tokens
+";
+        let perf = parse_perf(stderr).expect("logged, wrapped block should parse");
+        assert!((perf.prompt_eval_ms - 46.60).abs() < 1e-9);
+        assert_eq!(perf.prompt_tokens, 40);
+        assert!((perf.eval_ms - 35.38).abs() < 1e-9);
+        assert_eq!(perf.eval_tokens, 8);
+    }
+
+    #[test]
     fn parse_perf_returns_none_for_a_missing_or_half_block() {
         assert_eq!(parse_perf(""), None);
         assert_eq!(parse_perf("main: loading model from 'x.gguf'...\n"), None);
@@ -1210,9 +1283,27 @@ llama_perf_context_print:        eval time =   999.00 ms /   99 runs   ( ... )
         assert!(joined.contains(&format!("-c {LOAD_CTX}")), "{joined}");
         assert!(joined.contains(&format!("-p {LOAD_PROMPT}")), "{joined}");
         assert!(!joined.contains("-t "), "no thread pin asked for: {joined}");
+        // `-st` (exit after the prompt instead of opening the chat REPL) and
+        // `-v` (print the timing block `parse_perf` reads) are on every run.
+        for flag in COMMON_ARGS {
+            assert!(
+                args.iter().any(|arg| arg == flag),
+                "missing {flag}: {joined}"
+            );
+        }
 
         let pinned = load_probe_args(Path::new("/models/tiny.gguf"), Some(6));
-        assert!(pinned.join(" ").contains("-t 6"), "{:?}", pinned);
+        let pinned_joined = pinned.join(" ");
+        assert!(pinned_joined.contains("-t 6"), "{pinned_joined}");
+        // The thread pin stays last, and the common flags survive it.
+        assert_eq!(pinned.last().map(String::as_str), Some("6"), "{pinned:?}");
+        assert_eq!(pinned[pinned.len() - 2], "-t".to_string(), "{pinned:?}");
+        for flag in COMMON_ARGS {
+            assert!(
+                pinned.iter().any(|arg| arg == flag),
+                "missing {flag}: {pinned_joined}"
+            );
+        }
     }
 
     #[test]
