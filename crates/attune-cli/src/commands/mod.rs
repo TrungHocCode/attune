@@ -82,6 +82,15 @@ pub enum Command {
         /// Context window size (default 2048; reserved for slice 3/4)
         #[arg(long, value_name = "N", default_value_t = 2048)]
         ctx: u32,
+        /// Saved `attune bench --json` report to calibrate against. Accepts
+        /// either a bare report or the `{ "bench": … }` envelope written by
+        /// `attune bench --model --save`.
+        #[arg(long, value_name = "PATH")]
+        bench_json: Option<PathBuf>,
+        /// Calibrate the prediction from `--bench-json` (the report must
+        /// contain an `e2e` block with a measured tok/s)
+        #[arg(long, requires = "bench_json")]
+        calibrate: bool,
         /// Output machine-readable JSON instead of the human lines
         #[arg(long)]
         json: bool,
@@ -121,6 +130,8 @@ pub fn dispatch(command: Command) -> Result<()> {
             prompt_tokens,
             gen_tokens,
             ctx,
+            bench_json,
+            calibrate,
             json,
         } => estimate::run(
             &params,
@@ -130,6 +141,8 @@ pub fn dispatch(command: Command) -> Result<()> {
             prompt_tokens,
             gen_tokens,
             ctx,
+            bench_json.as_deref(),
+            calibrate,
             json,
         ),
     }

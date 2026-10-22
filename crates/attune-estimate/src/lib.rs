@@ -11,6 +11,7 @@
 //! retyping fields.
 
 pub mod bottleneck;
+pub mod calibrate;
 pub mod error;
 pub mod model;
 pub mod prefill;
@@ -18,10 +19,11 @@ pub mod report;
 pub mod roofline;
 
 pub use bottleneck::{classify, decode_ai, prefill_ai, ridge_ai};
+pub use calibrate::{apply_decode, apply_prefill, fit_eta, CalibratedInputs, MAX_ETA, MIN_ETA};
 pub use error::EstimateError;
-pub use model::{parse_params, ModelSpec, Quant};
+pub use model::{parse_params, ModelSpec, Quant, BITS_PER_WEIGHT};
 pub use prefill::predict_prefill_ms;
-pub use report::{Bottleneck, EstimateInputs, EstimateReport};
+pub use report::{Bottleneck, CalibrationReport, EstimateInputs, EstimateReport};
 pub use roofline::{predict_decode_tps, HwInputs};
 
 /// Schema stamped on every [`EstimateReport`] so consumers can tell a
