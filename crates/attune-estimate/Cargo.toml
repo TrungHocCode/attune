@@ -1,0 +1,17 @@
+[package]
+name = "attune-estimate"
+version = "0.1.0"
+edition = "2021"
+description = "Roofline performance estimates for Attune (M3)"
+
+[dependencies]
+# Plan §7: attune-estimate builds predictions on top of measured hardware
+# inputs from attune-bench. No clap/anyhow here — the CLI owns arg parsing.
+attune-bench = { path = "../attune-bench" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+
+# serde_json is only needed by the tests that pin the report's JSON contract;
+# the CLI owns serialization for the end user.
+[dev-dependencies]
+serde_json = "1"

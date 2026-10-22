@@ -75,9 +75,20 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "attune-bench",
+ "attune-estimate",
  "attune-hal",
  "clap",
  "serde_json",
+]
+
+[[package]]
+name = "attune-estimate"
+version = "0.1.0"
+dependencies = [
+ "attune-bench",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@
 members = [
     "crates/attune-hal",
     "crates/attune-bench",
+    "crates/attune-estimate",
     "crates/attune-cli",
 ]
 resolver = "2"
