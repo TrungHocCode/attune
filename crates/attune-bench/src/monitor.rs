@@ -826,17 +826,23 @@ mod tests {
 
         #[cfg(target_os = "linux")]
         {
-            // If this box does expose a package counter, the reader must
-            // actually return it — a real RAPL chip must never read as None.
-            let has_counter = PathBuf::from(POWERCAP_ROOT)
+            // Assert consistency with what the current user can actually
+            // read. `is_file()` is true even for root-only counters, so
+            // probe readability instead of existence: a readable counter
+            // must parse, an unreadable one must read as None (best-effort
+            // power must never break a bench run).
+            let energy_path = PathBuf::from(POWERCAP_ROOT)
                 .join("intel-rapl:0")
-                .join(RAPL_ENERGY_FILE)
-                .is_file();
-            if has_counter {
-                assert!(
+                .join(RAPL_ENERGY_FILE);
+            match std::fs::read_to_string(&energy_path) {
+                Ok(content) => assert!(
                     reading.is_some(),
-                    "a readable intel-rapl:0 counter must parse"
-                );
+                    "a readable intel-rapl:0 counter must parse: {content:?}"
+                ),
+                Err(_) => assert_eq!(
+                    reading, None,
+                    "an unreadable or missing counter must read as None"
+                ),
             }
         }
     }
