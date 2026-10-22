@@ -71,14 +71,9 @@ JSON output is the stable contract for scripting; the pretty table is for humans
 
 ## Roadmap
 
-| Milestone | Command         | Status          |
-|-----------|----------------|-----------------|
-| M1        | `attune detect`  | ✅ Done          |
-| M2        | `attune bench`   | 🚧 In progress  |
-| M3        | `attune estimate`| Planned         |
-| M4        | `attune tune`    | Planned         |
-| M5        | `attune serve`   | Planned (MVP)   |
+M1 `detect` ✅ · M2 `bench` ✅ · M3 `estimate` 🚧 · M4 `tune` · M5 `serve` (MVP)
 
+Details, acceptance criteria, and status live in [ROADMAP.md](ROADMAP.md).
 GitHub issues and milestones are the source of truth for what lands next.
 
 ## Development
