@@ -13,4 +13,11 @@ pub enum EstimateError {
     /// A hardware input is missing, non-finite or non-positive.
     #[error("invalid hardware inputs: {0}")]
     BadHw(String),
+    /// A calibration ratio could not be computed from the supplied values.
+    #[error("invalid calibration input: {0}")]
+    InvalidCalibration(String),
+    /// Calibration was requested but the bench report has no usable measured
+    /// data (missing/partial `e2e` block). Expected condition, not a bug.
+    #[error("calibration unavailable: {0}")]
+    CalibrationUnavailable(String),
 }

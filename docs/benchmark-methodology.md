@@ -85,6 +85,60 @@ later `attune estimate` slice from this bench's `tok_s` plus the
 hardware context. M2 deliberately *measures* what the model actually
 did; M3 derives a roofline number from it.
 
+## Estimate math & calibration
+
+`attune estimate` turns measured hardware numbers into a prediction:
+
+* **Decode (memory-bound):** `tok/s = bandwidth / (params × bytes_per_param)`.
+  `bytes_per_param` comes from the `BITS_PER_WEIGHT` table in
+  `crates/attune-estimate/src/model.rs`, which uses the real llama.cpp block
+  layouts rather than rounded labels: FP16 16.0, Q8_0 8.5008, Q4_0 4.5,
+  Q4_K_M 4.8944 bits per weight (0.6118 B/param for Q4_K_M). The figure is
+  **weights only**; the KV cache grows with context and is not modelled yet.
+* **Prefill (compute-bound):**
+  `ms = 2 × params × prompt_tokens / (GFLOPS × 1e9) × 1000`.
+* **Ridge:** `AI* = FLOPS_peak / BW` in FLOP per byte. Decode's arithmetic
+  intensity is `1 / bytes_per_param`; below the ridge it is memory-bound,
+  at or above it compute-bound.
+
+Calibration (`--bench-json <PATH> --calibrate`) reads a saved
+`attune bench --model` report — either the bare `BenchReport` or the
+`{ "llama": …, "bench": … }` envelope written by `--save` — and fits two
+scalar correction factors:
+
+```text
+eta_mem  = measured_tok_s / roofline_tok_s
+eta_comp = roofline_prefill_ms / measured_ttft_ms
+calibrated_decode_tps = roofline_tok_s × eta_mem
+calibrated_ttft_ms    = roofline_prefill_ms / eta_comp
+```
+
+Both etas are clamped to `0.05 ..= 1.5`. Decode is a throughput ratio;
+prefill *time* scales inversely, so it is applied as a divisor. The ratio
+absorbs everything the roofline leaves out for this slice: KV-cache traffic,
+dequantisation and attention overhead, scheduling, and the gap between the
+quoted FP32 peak and the precision llama.cpp actually runs. A report with no
+`e2e` block (or a non-positive `tok_s`) fails cleanly as
+`CalibrationUnavailable` instead of guessing. On the canned fixture
+(246.9 tok/s predicted vs 55.6 tok/s measured) `eta_mem ≈ 0.225` and the
+calibrated figure reproduces the measurement — zero error by construction.
+Pass the same `--prompt-tokens` value used for `attune bench --model`, so the
+roofline prefill and the measured TTFT cover the same prompt length; otherwise
+the TTFT ratio is comparing two different workloads (the eta clamp keeps it
+bounded, but it is not meaningful).
+
+**Median choice.** The bandwidth input is the kernel's *median* GB/s (full
+mode), so one noisy rep cannot drag the roofline. The e2e input is already a
+whole-decode-phase average (`eval_ms / eval_tokens`), which is the steady-state
+number a user sees rather than a single first-token sample.
+
+**FP32-vs-inference precision caveat.** `--gflops` (and the HAL theoretical
+peak) is FP32. llama.cpp's prefill usually runs FP16 or quantised kernels, so
+the quoted peak is an *upper bound*, not a like-for-like measurement. Treat
+`eta_comp` as an empirical fudge factor, not as "compute utilisation"; do not
+read `eta_comp < 1` as wasted silicon without checking the kernel's actual
+precision first.
+
 ## Caveats
 
 These are real failure modes the bench will not catch:

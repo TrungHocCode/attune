@@ -22,25 +22,59 @@ pub enum Quant {
     Q8_0,
     #[serde(rename = "q4_0")]
     Q4_0,
-    /// Mixed 4-bit / 6-bit blocks. `≈0.6` bytes per parameter is a temporary
-    /// constant; a real GGUF parser (M4) will read the exact block layout.
+    /// Mixed 4-bit / 6-bit blocks. Its effective rate is 4.8944 bits per
+    /// weight (see [`BITS_PER_WEIGHT`]), not the round `0.5` a naive
+    /// "4-bit" label suggests.
     #[serde(rename = "q4_k_m")]
     Q4_K_M,
 }
 
+/// Effective storage cost of every supported weight format, in bits per
+/// parameter.
+///
+/// These are the real llama.cpp block layouts (`ggml-common.h` /
+/// `k_quants.h`, and the `llama-quantize` table), not rounded label values:
+///
+/// | format   | bits/weight | bytes/param |
+/// |----------|-------------|-------------|
+/// | `fp16`   | 16.0        | 2.0         |
+/// | `q8_0`   | 8.5008      | 1.0626      |
+/// | `q4_0`   | 4.5         | 0.5625      |
+/// | `q4_k_m` | 4.8944      | 0.6118      |
+///
+/// Q8_0 packs 32 weights plus one f16 scale into 34 bytes; Q4_0 packs 32
+/// nibbles plus one f16 scale into 18 bytes; Q4_K_M is a mixed 4/6-bit
+/// k-quant whose measured effective rate is 4.8944 bits/weight.
+///
+/// **Scope:** [`Quant::bytes_per_param`] is weights only. Decode also streams
+/// the KV cache, which grows with context size and is not modelled yet; the
+/// calibration factor `eta_mem` absorbs that (and any other per-token
+/// overhead) when a real `attune bench` report is supplied.
+pub const BITS_PER_WEIGHT: [(Quant, f64); 4] = [
+    (Quant::Fp16, 16.0),
+    (Quant::Q8_0, 8.5008),
+    (Quant::Q4_0, 4.5),
+    (Quant::Q4_K_M, 4.8944),
+];
+
 impl Quant {
-    /// Bytes stored per parameter for this format.
+    /// Effective bits stored per parameter for this format.
+    pub fn bits_per_weight(self) -> f64 {
+        BITS_PER_WEIGHT
+            .iter()
+            .find_map(|(quant, bits)| (*quant == self).then_some(*bits))
+            // Every enum variant is in the table above; this fallback keeps
+            // the function total without a panic path.
+            .unwrap_or(16.0)
+    }
+
+    /// Bytes stored per parameter for this format (`bits / 8`).
     ///
-    /// FP16 = 2.0, Q8_0 = 1.0, Q4_0 = 0.5 and Q4_K_M ≈ 0.6. `Q4_K_M` is an
-    /// approximation until the GGUF parser lands in M4; the decode math only
-    /// needs the order of magnitude for slice 1.
+    /// FP16 = 2.0, Q8_0 = 1.0626, Q4_0 = 0.5625 and Q4_K_M = 0.6118. See
+    /// [`BITS_PER_WEIGHT`] for the source of each value and for the
+    /// weights-only scope note.
     pub fn bytes_per_param(self) -> f64 {
-        match self {
-            Quant::Fp16 => 2.0,
-            Quant::Q8_0 => 1.0,
-            Quant::Q4_0 => 0.5,
-            Quant::Q4_K_M => 0.6,
-        }
+        self.bits_per_weight() / 8.0
     }
 
     /// Canonical lowercase name (also the JSON value).
@@ -190,11 +224,19 @@ mod tests {
     }
 
     #[test]
+    fn bits_per_weight_matches_the_documented_table() {
+        assert_eq!(Quant::Fp16.bits_per_weight(), 16.0);
+        assert_eq!(Quant::Q8_0.bits_per_weight(), 8.5008);
+        assert_eq!(Quant::Q4_0.bits_per_weight(), 4.5);
+        assert_eq!(Quant::Q4_K_M.bits_per_weight(), 4.8944);
+    }
+
+    #[test]
     fn bytes_per_param_matches_the_documented_table() {
         assert_eq!(Quant::Fp16.bytes_per_param(), 2.0);
-        assert_eq!(Quant::Q8_0.bytes_per_param(), 1.0);
-        assert_eq!(Quant::Q4_0.bytes_per_param(), 0.5);
-        assert_eq!(Quant::Q4_K_M.bytes_per_param(), 0.6);
+        assert!((Quant::Q8_0.bytes_per_param() - 1.0626).abs() < 1e-12);
+        assert!((Quant::Q4_0.bytes_per_param() - 0.5625).abs() < 1e-12);
+        assert!((Quant::Q4_K_M.bytes_per_param() - 0.6118).abs() < 1e-9);
     }
 
     #[test]

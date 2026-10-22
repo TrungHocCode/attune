@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::calibrate::CalibratedInputs;
 use crate::model::Quant;
 use crate::SCHEMA;
 
@@ -24,6 +25,31 @@ impl std::fmt::Display for Bottleneck {
             Bottleneck::Compute => f.write_str("compute"),
         }
     }
+}
+
+/// Calibration learned from a saved `attune bench --model` report.
+///
+/// Present only when the user passes both `--bench-json` and `--calibrate`.
+/// The nested object keeps every new field grouped (and optional at the
+/// `EstimateReport` level) so older slice-1/2 documents still parse.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CalibrationReport {
+    /// The fitted factors. `eta_comp` is the neutral `1.0` when the bench had
+    /// no measurable TTFT.
+    #[serde(flatten)]
+    pub inputs: CalibratedInputs,
+    /// Decode throughput the bench measured, in tokens/second.
+    #[serde(default)]
+    pub measured_decode_tps: f64,
+    /// Roofline decode throughput scaled by `eta_mem`.
+    #[serde(default)]
+    pub calibrated_decode_tps: f64,
+    /// TTFT the bench measured, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_ttft_ms: Option<f64>,
+    /// Roofline prefill latency divided by `eta_comp`, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibrated_prefill_ms_ttft: Option<f64>,
 }
 
 /// Hardware inputs a slice-2 report was computed from, echoed so a consumer
@@ -73,6 +99,9 @@ pub struct EstimateReport {
     /// Hardware inputs the prediction was built from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inputs: Option<EstimateInputs>,
+    /// Calibration against a saved bench report, when requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<CalibrationReport>,
 }
 
 impl EstimateReport {
@@ -90,6 +119,7 @@ impl EstimateReport {
             ridge_ai: None,
             margin_pct: None,
             inputs: None,
+            calibration: None,
         }
     }
 
@@ -117,6 +147,12 @@ impl EstimateReport {
         self.bottleneck = bottleneck;
         self
     }
+
+    /// Attach the calibration block produced by `--calibrate`.
+    pub fn with_calibration(mut self, calibration: CalibrationReport) -> Self {
+        self.calibration = Some(calibration);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +172,7 @@ mod tests {
         assert_eq!(report.ridge_ai, None);
         assert_eq!(report.margin_pct, None);
         assert_eq!(report.inputs, None);
+        assert_eq!(report.calibration, None);
     }
 
     #[test]
@@ -230,6 +267,7 @@ mod tests {
         assert_eq!(back.ridge_ai, None);
         assert_eq!(back.margin_pct, None);
         assert_eq!(back.inputs, None);
+        assert_eq!(back.calibration, None);
     }
 
     #[test]
@@ -245,6 +283,39 @@ mod tests {
         assert_eq!(back.ridge_ai, None);
         assert_eq!(back.margin_pct, None);
         assert_eq!(back.inputs, None);
+        assert_eq!(back.calibration, None);
+    }
+
+    #[test]
+    fn json_roundtrip_carries_the_calibration_block() {
+        let report = sample().with_calibration(CalibrationReport {
+            inputs: CalibratedInputs {
+                eta_mem: 0.225,
+                eta_comp: 0.5,
+            },
+            measured_decode_tps: 55.6,
+            calibrated_decode_tps: 55.5525,
+            measured_ttft_ms: Some(120.0),
+            calibrated_prefill_ms_ttft: Some(5529.6),
+        });
+        let json = serde_json::to_string(&report).expect("serialize EstimateReport");
+        for key in [
+            "calibration",
+            "eta_mem",
+            "eta_comp",
+            "measured_decode_tps",
+            "calibrated_decode_tps",
+            "measured_ttft_ms",
+            "calibrated_prefill_ms_ttft",
+        ] {
+            assert!(
+                json.contains(&format!("\"{key}\"")),
+                "missing {key}: {json}"
+            );
+        }
+
+        let back: EstimateReport = serde_json::from_str(&json).expect("deserialize EstimateReport");
+        assert_eq!(back, report);
     }
 
     #[test]
