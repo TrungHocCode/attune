@@ -59,11 +59,30 @@ Harassment, spam, or low-effort PRs will be closed.
 
 ## Reporting Bugs
 
-Use the bug report template. Include: OS, CPU/RAM, Rust version
-(`rustc --version`), exact command, expected vs actual behavior, and relevant
-logs (`--json` output helps).
+Use the bug report template. A good report (see issue #13 as an example)
+includes: OS, CPU/RAM, Rust version (`rustc --version`), exact command,
+expected vs actual behavior, and relevant logs (`--json` output helps).
+For performance bugs, add measured numbers: a before/after table and, when
+relevant, disassembly or profiler evidence showing the root cause — not just
+the symptom.
 
 ## Suggesting Features
 
 Use the feature request template. Explain the use case, the proposed
 `attune` command/UX, and which milestone it belongs to (M1–M5).
+
+## Writing Quality Issues and PRs
+
+Follow the standard set by issues/PRs #10–#14 in this repo:
+
+- **Issues:** state the problem first with evidence (numbers, logs, exact
+  file:line), then propose a concrete solution with acceptance criteria.
+  Name alternatives you considered and why you rejected them. Keep the
+  title in Conventional Commits style so it reads well on the board.
+- **PRs:** fill in every section of the PR template. Summarize the change,
+  show verification output (test counts, benchmark tables, CI status), link
+  the issue with `Fixes #N`, and add a short “reviewer focus” note pointing
+  at the risky or debatable parts of the diff. Never claim “CI green” —
+  let the checks speak; leave the CI box unchecked until it is.
+- **No placeholders:** no “coming soon”, no TODO sections, no screenshots
+  of text. Paste text as text.
