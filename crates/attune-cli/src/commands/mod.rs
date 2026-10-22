@@ -56,9 +56,9 @@ pub enum Command {
         #[arg(long, value_name = "N", requires = "model")]
         threads: Option<u32>,
     },
-    /// Predict decode throughput from a roofline model (M3 slice 1). Without
-    /// overrides, bandwidth comes from a quick bench and the FP32 peak from
-    /// `attune detect`.
+    /// Predict decode throughput, prefill/TTFT and the roofline bottleneck
+    /// (M3 slices 1-2). Without overrides, bandwidth comes from a quick bench
+    /// and the FP32 peak from `attune detect`.
     Estimate {
         /// Model size, e.g. `135M`, `1.2B` or `7000000`
         #[arg(long, value_name = "SIZE")]
@@ -72,6 +72,16 @@ pub enum Command {
         /// Override the FP32 peak (decimal GFLOPS); skips the HAL estimate
         #[arg(long, value_name = "GFLOPS")]
         gflops: Option<f64>,
+        /// Prompt/prefill token count used for TTFT (default 512)
+        #[arg(long, value_name = "N", default_value_t = 512)]
+        prompt_tokens: u64,
+        /// Number of decode tokens to estimate (default 128; reserved for
+        /// slice 3 calibration output)
+        #[arg(long, value_name = "N", default_value_t = 128)]
+        gen_tokens: u64,
+        /// Context window size (default 2048; reserved for slice 3/4)
+        #[arg(long, value_name = "N", default_value_t = 2048)]
+        ctx: u32,
         /// Output machine-readable JSON instead of the human lines
         #[arg(long)]
         json: bool,
@@ -108,7 +118,19 @@ pub fn dispatch(command: Command) -> Result<()> {
             quant,
             bandwidth_gbps,
             gflops,
+            prompt_tokens,
+            gen_tokens,
+            ctx,
             json,
-        } => estimate::run(&params, &quant, bandwidth_gbps, gflops, json),
+        } => estimate::run(
+            &params,
+            &quant,
+            bandwidth_gbps,
+            gflops,
+            prompt_tokens,
+            gen_tokens,
+            ctx,
+            json,
+        ),
     }
 }

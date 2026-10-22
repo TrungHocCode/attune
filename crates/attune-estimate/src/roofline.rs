@@ -1,8 +1,9 @@
 //! Roofline math (M3 slice 1: decode only).
 //!
 //! Decode is memory-bound: every generated token streams the weight matrix
-//! once, so `tok/s ≈ bandwidth / bytes-per-weight`. Slice 2 adds the compute
-//! side (prefill) and compares the two to classify the bottleneck.
+//! once, so `tok/s ≈ bandwidth / bytes-per-weight`. The compute side
+//! (prefill) and the ridge comparison live in [`crate::prefill`] and
+//! [`crate::bottleneck`].
 
 use crate::EstimateError;
 
