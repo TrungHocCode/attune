@@ -3,6 +3,7 @@
 
 mod bench;
 mod detect;
+mod estimate;
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -55,6 +56,26 @@ pub enum Command {
         #[arg(long, value_name = "N", requires = "model")]
         threads: Option<u32>,
     },
+    /// Predict decode throughput from a roofline model (M3 slice 1). Without
+    /// overrides, bandwidth comes from a quick bench and the FP32 peak from
+    /// `attune detect`.
+    Estimate {
+        /// Model size, e.g. `135M`, `1.2B` or `7000000`
+        #[arg(long, value_name = "SIZE")]
+        params: String,
+        /// Weight format: `fp16`, `q8_0`, `q4_0` or `q4_k_m`
+        #[arg(long, value_name = "QUANT")]
+        quant: String,
+        /// Override measured memory bandwidth (decimal GB/s); skips the bench
+        #[arg(long, value_name = "GBPS")]
+        bandwidth_gbps: Option<f64>,
+        /// Override the FP32 peak (decimal GFLOPS); skips the HAL estimate
+        #[arg(long, value_name = "GFLOPS")]
+        gflops: Option<f64>,
+        /// Output machine-readable JSON instead of the human lines
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Run the selected subcommand. All logic lives in `commands::*`.
@@ -82,5 +103,12 @@ pub fn dispatch(command: Command) -> Result<()> {
             ctx,
             threads,
         ),
+        Command::Estimate {
+            params,
+            quant,
+            bandwidth_gbps,
+            gflops,
+            json,
+        } => estimate::run(&params, &quant, bandwidth_gbps, gflops, json),
     }
 }
