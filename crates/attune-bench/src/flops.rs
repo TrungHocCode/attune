@@ -160,13 +160,18 @@ pub fn select_path() -> FlopsPath {
     {
         match from_flags {
             FlopsPath::Avx512F if !is_x86_feature_detected!("avx512f") => {
-                if is_x86_feature_detected!("avx2") {
+                if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
                     FlopsPath::Avx2
                 } else {
                     FlopsPath::Scalar
                 }
             }
-            FlopsPath::Avx2 if !is_x86_feature_detected!("avx2") => FlopsPath::Scalar,
+            // `run_avx2` also needs FMA; without it the kernel would fault.
+            FlopsPath::Avx2
+                if !(is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")) =>
+            {
+                FlopsPath::Scalar
+            }
             other => other,
         }
     }
@@ -338,7 +343,7 @@ fn run_scalar(bufa: &[f32], bufb: &[f32], inner_iters: usize) -> u64 {
 // ---- SIMD kernels (x86/x86_64 only) ---------------------------------------
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-#[target_feature(enable = "avx2")]
+#[target_feature(enable = "avx2,fma")]
 unsafe fn run_avx2(bufa: &[f32], bufb: &[f32], inner_iters: usize) -> u64 {
     // 4 independent accumulators keep the FMA pipeline fed despite the
     // 4-cycle FMADD latency on Intel/AMD. Without this we'd be latency-
