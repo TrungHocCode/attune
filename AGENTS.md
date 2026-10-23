@@ -46,10 +46,17 @@ cargo run -p attune-cli -- detect
 
 ## 4. Phase Discipline (do NOT jump ahead)
 
-Current phase: **PHASE 0 — FOUNDATION (M1: `attune detect`)**.
-- Commit 1: workspace + CI + `attune-hal` skeleton + `detect` stub only.
-- DO NOT implement `bench/estimate/tune/serve/Tauri` until M1 is done.
+Current phase: **PHASE 3 — TUNE (M4: `attune tune`)**.
+- M1 (detect), M2 (bench), M3 (estimate) are done and tagged v0.1.0–v0.3.0.
+- DO NOT implement `serve/Tauri` until M4 is done.
 - Each task must meet its Acceptance column in plan §8 before marking done.
+
+**Phase-close checklist (mandatory when a milestone finishes):**
+1. `ROADMAP.md`: flip milestone to ✅ with measured acceptance numbers + links to proving PRs/issues.
+2. `README.md`: one-liner status + Quick start output still matches reality.
+3. `CHANGELOG.md`: version entry complete; tag `v0.x.0` annotated and pushed.
+4. `AGENTS.md`: advance “Current phase” above.
+5. A milestone flips to ✅ only on **executed acceptance with posted numbers** — never on green tests alone (lesson from M2).
 
 ## 5. Math Reference (plan §14 — use these, don't invent)
 

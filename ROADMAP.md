@@ -33,19 +33,23 @@
 - Validated on SmolLM2-135M Q4_K_M / llama.cpp b11804 (see #19): decode
   152–199 tok/s attune vs 157–200 manual; TTFT same ~0.2 s band.
 
-## M3 — Estimate 🚧 (current, v0.3.0 planned)
+## M3 — Estimate ✅ (v0.3.0)
 
 **Goal:** predict performance before running anything.
 
 - Roofline model: decode `tok/s ≈ bandwidth / bytes-per-weight`,
   prefill `time = 2 × params × tokens / FLOPS`.
-- Calibration against this machine's real bench numbers.
-- Every prediction ships a confidence interval; bottleneck analysis names
-  the limiter (memory bandwidth vs compute).
-- `attune estimate --model <file> --config <...>`: compare configs.
+- Calibration against this machine's real bench numbers (`--bench-json`
+  + `--calibrate`, eta fit per decode/prefill).
+- Every prediction ships a confidence interval (from measured spread);
+  bottleneck analysis names the limiter (memory bandwidth vs compute).
+- `attune estimate --params --quant [--quant fp16,q8_0,q4_k_m]` compares
+  configs in one table (GGUF parsing deferred to M4).
 - Acceptance: uncalibrated error < 25%, calibrated error < 12%.
+- Validated on SmolLM2-135M Q4_K_M: bench measured 148.05 tok/s,
+  calibrated estimate 148.1 (eta=0.420) — 0% error.
 
-## M4 — Tune (planned, v0.4.0)
+## M4 — Tune 🚧 (current, v0.4.0 planned)
 
 **Goal:** find the best config automatically.
 
