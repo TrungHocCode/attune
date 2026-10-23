@@ -46,7 +46,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::llama::{self, parse_perf, stderr_tail, PerfSummary};
+use crate::llama::{self, parse_perf, stderr_tail, LlamaProbeReport, PerfSummary};
 use crate::monitor::{Monitor, SysinfoSampler, DEFAULT_INTERVAL_MS};
 use crate::BenchError;
 
@@ -179,6 +179,10 @@ pub struct E2eResult {
     /// no power counter or the run was too short to produce one delta.
     #[serde(default)]
     pub power_avg_watts: Option<f64>,
+    /// Wall-clock time of the whole llama.cpp run (load + prefill + decode),
+    /// in milliseconds. `0.0` in reports written before this field existed.
+    #[serde(default)]
+    pub elapsed_ms: f64,
 }
 
 impl E2eResult {
@@ -186,6 +190,26 @@ impl E2eResult {
     /// produced a meaningful decode measurement rather than just a load.
     pub fn is_complete(&self) -> bool {
         self.tpot_ms > 0.0 && self.tok_s > 0.0
+    }
+
+    /// The `llama` block for a full bench: the e2e run loaded the model, so
+    /// it stands in for the separate load probe. `elapsed_ms` covers the
+    /// whole run and `perf` is rebuilt from the e2e timings.
+    pub fn load_report(&self, cli: &Path) -> LlamaProbeReport {
+        let perf = (self.ttft_ms > 0.0 || self.eval_tokens > 0).then_some(PerfSummary {
+            prompt_eval_ms: self.ttft_ms,
+            prompt_tokens: self.prompt_tokens,
+            eval_ms: self.tpot_ms * self.eval_tokens as f64,
+            eval_tokens: self.eval_tokens,
+        });
+        LlamaProbeReport {
+            cli: cli.display().to_string(),
+            version: self.engine.clone(),
+            model: self.model.clone(),
+            load_ok: true,
+            elapsed_ms: self.elapsed_ms,
+            perf,
+        }
     }
 }
 
@@ -285,24 +309,33 @@ pub fn build_e2e_args(cfg: &E2eConfig) -> Vec<String> {
 
 // ---- child orchestration --------------------------------------------------
 
+/// Millisecond-cheap checks an e2e run needs before anything slow starts:
+/// the model is a readable file and `cli` reports a parseable version.
+/// Returns the engine version. Callers that run other work first (the full
+/// bench runs its kernels before the e2e run) call this up front so a bad
+/// setup still fails fast.
+pub fn preflight(cli: &Path, model: &Path) -> Result<String, BenchError> {
+    if !llama::is_readable_file(model) {
+        return Err(BenchError::InvalidConfig(format!(
+            "model `{}` is not a readable file",
+            model.display()
+        )));
+    }
+    llama::llama_version(cli)
+}
+
 /// Run an end-to-end llama.cpp decode bench against `cli`. Spawns the
 /// child, attaches the resource monitor to its pid, scrapes the perf block,
 /// and folds the result with the resource readings into one [`E2eResult`].
 pub fn run_e2e(cli: &Path, cfg: &E2eConfig) -> Result<E2eResult, BenchError> {
-    // Pre-flight: model file must be reachable, version must be parseable.
     // Failures here surface as `BenchError`, never as a panic.
-    if !is_runnable_file(&cfg.model) {
-        return Err(BenchError::InvalidConfig(format!(
-            "model `{}` is not a readable file",
-            cfg.model.display()
-        )));
-    }
-    let engine = llama::llama_version(cli)?;
+    let engine = preflight(cli, &cfg.model)?;
 
     let args = build_e2e_args(cfg);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
 
     // Spawn first so we have the child's pid before the monitor starts.
+    let started = Instant::now();
     let mut guard = E2eGuard::spawn(cli, &arg_refs)?;
     let child_pid = guard.pid();
 
@@ -312,6 +345,7 @@ pub fn run_e2e(cli: &Path, cfg: &E2eConfig) -> Result<E2eResult, BenchError> {
     )?;
 
     let deadline_result = guard.wait_for(E2E_TIMEOUT);
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
     // Always stop the monitor — dropping `monitor` would also stop it, but
     // we want the readings *now*, before printing the timeout error.
     let resources = monitor.stop();
@@ -361,26 +395,8 @@ pub fn run_e2e(cli: &Path, cfg: &E2eConfig) -> Result<E2eResult, BenchError> {
         ram_peak_bytes: resources.ram_peak_bytes,
         cpu_avg_pct: resources.cpu_avg_pct,
         power_avg_watts: resources.power_avg_watts,
+        elapsed_ms,
     })
-}
-
-/// `true` when `path` is a runnable file on this OS. Copied from
-/// `llama.rs` rather than exposed there — keeping e2e.rs free of a
-/// `pub`-API dependency on the (deliberately) private resolver path.
-#[cfg(unix)]
-fn is_runnable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    match std::fs::metadata(path) {
-        Ok(meta) => meta.is_file() && meta.permissions().mode() & 0o111 != 0,
-        Err(_) => false,
-    }
-}
-
-#[cfg(not(unix))]
-fn is_runnable_file(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .map(|meta| meta.is_file())
-        .unwrap_or(false)
 }
 
 // ---- internal child guard (sibling of `llama::ChildGuard`) ---------------
@@ -594,6 +610,7 @@ mod tests {
             ram_peak_bytes: 0,
             cpu_avg_pct: 0.0,
             power_avg_watts: None,
+            elapsed_ms: 0.0,
         };
         assert!(complete.is_complete());
 
@@ -722,6 +739,7 @@ mod tests {
             ram_peak_bytes: 8_589_934_592,
             cpu_avg_pct: 75.0,
             power_avg_watts: Some(42.5),
+            elapsed_ms: 12_345.0,
         };
         let json = serde_json::to_string(&result).expect("serialize");
         for key in [
@@ -760,6 +778,104 @@ mod tests {
         }"#;
         let result: E2eResult = serde_json::from_str(json).expect("deserialize");
         assert_eq!(result.power_avg_watts, None);
+    }
+
+    // ---- pre-flight -------------------------------------------------------
+
+    #[test]
+    fn run_e2e_rejects_a_missing_model() {
+        let cfg = E2eConfig::new(PathBuf::from("definitely-not-a-real-model.gguf"));
+        let err = run_e2e(Path::new("definitely-not-a-real-llama-cli-path"), &cfg)
+            .expect_err("a missing model must be rejected");
+        assert!(err.to_string().contains("not a readable file"), "{err}");
+    }
+
+    #[test]
+    fn run_e2e_accepts_a_non_executable_model() {
+        // Regression for #27: a `0644` GGUF passes the model check, so the
+        // failure comes from the missing llama-cli instead.
+        let model =
+            std::env::temp_dir().join(format!("attune-e2e-readable-{}.gguf", std::process::id()));
+        std::fs::write(&model, b"GGUF").expect("write temp model");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod 0644");
+        }
+        let cfg = E2eConfig::new(model.clone());
+        let err = run_e2e(Path::new("definitely-not-a-real-llama-cli-path"), &cfg)
+            .expect_err("there is no llama-cli to run");
+        let _ = std::fs::remove_file(&model);
+        assert!(
+            !err.to_string().contains("not a readable file"),
+            "model check rejected a readable file: {err}"
+        );
+    }
+
+    #[test]
+    fn preflight_rejects_a_missing_model_before_the_version_probe() {
+        // The model check comes first, so no llama-cli is needed to fail.
+        let err = preflight(
+            Path::new("definitely-not-a-real-llama-cli-path"),
+            Path::new("definitely-not-a-real-model.gguf"),
+        )
+        .expect_err("a missing model must be rejected");
+        assert!(matches!(err, BenchError::InvalidConfig(_)), "{err:?}");
+    }
+
+    // ---- e2e as the load report (#31) -------------------------------------
+
+    fn e2e_sample() -> E2eResult {
+        E2eResult {
+            engine: "0.7.0-dev".to_string(),
+            model: "/models/qwen3-4b.gguf".to_string(),
+            prompt_tokens: 464,
+            eval_tokens: 128,
+            ttft_ms: 5_862.0,
+            tpot_ms: 125.0,
+            tok_s: 8.0,
+            ram_peak_bytes: 4_699_271_168,
+            cpu_avg_pct: 710.0,
+            power_avg_watts: None,
+            elapsed_ms: 26_000.0,
+        }
+    }
+
+    #[test]
+    fn load_report_is_built_from_the_e2e_run() {
+        let report = e2e_sample().load_report(Path::new("/opt/llama/llama-cli"));
+        assert_eq!(report.cli, "/opt/llama/llama-cli");
+        assert_eq!(report.version, "0.7.0-dev");
+        assert_eq!(report.model, "/models/qwen3-4b.gguf");
+        assert!(report.load_ok);
+        assert_eq!(report.elapsed_ms, 26_000.0);
+        let perf = report.perf.expect("timed run carries perf");
+        assert_eq!(perf.prompt_eval_ms, 5_862.0);
+        assert_eq!(perf.prompt_tokens, 464);
+        assert_eq!(perf.eval_ms, 16_000.0);
+        assert_eq!(perf.eval_tokens, 128);
+    }
+
+    #[test]
+    fn load_report_has_no_perf_when_the_run_printed_no_timings() {
+        let mut untimed = e2e_sample();
+        untimed.ttft_ms = 0.0;
+        untimed.eval_tokens = 0;
+        let report = untimed.load_report(Path::new("llama-cli"));
+        assert!(report.load_ok);
+        assert_eq!(report.perf, None);
+    }
+
+    #[test]
+    fn e2e_result_without_elapsed_still_parses() {
+        let json = r#"{
+            "engine": "3505", "model": "/m.gguf", "prompt_tokens": 7,
+            "eval_tokens": 6, "ttft_ms": 364.41, "tpot_ms": 86.24,
+            "tok_s": 11.6, "ram_peak_bytes": 1000, "cpu_avg_pct": 1.0
+        }"#;
+        let result: E2eResult = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(result.elapsed_ms, 0.0);
     }
 
     // ---- manual, real llama.cpp only --------------------------------------

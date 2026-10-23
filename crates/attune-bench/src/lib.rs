@@ -338,6 +338,7 @@ mod tests {
             ram_peak_bytes: 2_147_483_648,
             cpu_avg_pct: 70.0,
             power_avg_watts: None,
+            elapsed_ms: 0.0,
         }
     }
 

@@ -500,6 +500,7 @@ mod tests {
                 ram_peak_bytes: 1_073_741_824,
                 cpu_avg_pct: 70.0,
                 power_avg_watts: None,
+                elapsed_ms: 0.0,
             }),
         }
     }

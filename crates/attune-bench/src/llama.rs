@@ -217,7 +217,9 @@ pub struct LlamaProbeReport {
     pub model: String,
     /// Always `true` in a report: a failed load returns an error instead.
     pub load_ok: bool,
-    /// Wall-clock duration of the load test, in milliseconds.
+    /// Wall-clock duration of the llama.cpp run that proved the load, in
+    /// milliseconds: the 1-token probe in `--quick` mode, the whole e2e run
+    /// in full mode (see [`crate::e2e::E2eResult::load_report`]).
     pub elapsed_ms: f64,
     /// Timings from the run, when llama.cpp printed a `llama_perf` block.
     #[serde(default)]
@@ -337,6 +339,18 @@ pub fn is_runnable_file(path: &Path) -> bool {
     std::fs::metadata(path)
         .map(|meta| meta.is_file())
         .unwrap_or(false)
+}
+
+/// True when `path` is a regular file this process can open for reading.
+///
+/// This is the check for model weights. Unlike [`is_runnable_file`] it
+/// ignores the executable bit: a GGUF is data, and a normally downloaded one
+/// is `0644` on Unix.
+pub fn is_readable_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file())
+        .unwrap_or(false)
+        && std::fs::File::open(path).is_ok()
 }
 
 // ---- running the binary -----------------------------------------------------
@@ -751,7 +765,7 @@ pub fn probe_model(
 ) -> Result<LlamaProbeReport, BenchError> {
     // Check the model up front so a typo fails in milliseconds rather than
     // after the version probe.
-    if !is_runnable_file(model) {
+    if !is_readable_file(model) {
         return Err(BenchError::InvalidConfig(format!(
             "model `{}` is not a readable file",
             model.display()
@@ -1318,6 +1332,57 @@ llama_perf_context_print:        eval time =   999.00 ms /   99 runs   ( ... )
         )
         .expect_err("a missing model must be rejected");
         assert!(matches!(err, BenchError::InvalidConfig(_)), "{err:?}");
+    }
+
+    /// Write a small `0644` stand-in for a GGUF into the temp dir.
+    fn plain_model_file(tag: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("attune-llama-{tag}-{}.gguf", std::process::id()));
+        std::fs::write(&path, b"GGUF").expect("write temp model");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod 0644");
+        }
+        path
+    }
+
+    #[test]
+    fn a_non_executable_file_is_a_readable_model() {
+        let model = plain_model_file("readable");
+        assert!(is_readable_file(&model));
+        // The binary check must stay strict: the same file is not runnable.
+        #[cfg(unix)]
+        assert!(!is_runnable_file(&model));
+        let _ = std::fs::remove_file(&model);
+    }
+
+    #[test]
+    fn missing_paths_and_directories_are_not_readable_models() {
+        assert!(!is_readable_file(Path::new(
+            "definitely-not-a-real-model.gguf"
+        )));
+        assert!(!is_readable_file(&std::env::temp_dir()));
+    }
+
+    #[test]
+    fn probe_model_accepts_a_non_executable_model() {
+        // Regression for #27: a `0644` GGUF passes the model check, so the
+        // failure comes from the missing llama-cli instead.
+        let model = plain_model_file("probe");
+        let err = probe_model(
+            Path::new("definitely-not-a-real-llama-cli-path"),
+            &model,
+            Duration::from_millis(250),
+            None,
+        )
+        .expect_err("there is no llama-cli to run");
+        let _ = std::fs::remove_file(&model);
+        assert!(
+            !err.to_string().contains("not a readable file"),
+            "model check rejected a readable file: {err}"
+        );
     }
 
     // ---- JSON contract ------------------------------------------------------
