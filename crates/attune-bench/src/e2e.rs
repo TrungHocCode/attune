@@ -291,7 +291,7 @@ pub fn build_e2e_args(cfg: &E2eConfig) -> Vec<String> {
 pub fn run_e2e(cli: &Path, cfg: &E2eConfig) -> Result<E2eResult, BenchError> {
     // Pre-flight: model file must be reachable, version must be parseable.
     // Failures here surface as `BenchError`, never as a panic.
-    if !is_runnable_file(&cfg.model) {
+    if !llama::is_readable_file(&cfg.model) {
         return Err(BenchError::InvalidConfig(format!(
             "model `{}` is not a readable file",
             cfg.model.display()
@@ -362,25 +362,6 @@ pub fn run_e2e(cli: &Path, cfg: &E2eConfig) -> Result<E2eResult, BenchError> {
         cpu_avg_pct: resources.cpu_avg_pct,
         power_avg_watts: resources.power_avg_watts,
     })
-}
-
-/// `true` when `path` is a runnable file on this OS. Copied from
-/// `llama.rs` rather than exposed there — keeping e2e.rs free of a
-/// `pub`-API dependency on the (deliberately) private resolver path.
-#[cfg(unix)]
-fn is_runnable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    match std::fs::metadata(path) {
-        Ok(meta) => meta.is_file() && meta.permissions().mode() & 0o111 != 0,
-        Err(_) => false,
-    }
-}
-
-#[cfg(not(unix))]
-fn is_runnable_file(path: &Path) -> bool {
-    std::fs::metadata(path)
-        .map(|meta| meta.is_file())
-        .unwrap_or(false)
 }
 
 // ---- internal child guard (sibling of `llama::ChildGuard`) ---------------
@@ -760,6 +741,39 @@ mod tests {
         }"#;
         let result: E2eResult = serde_json::from_str(json).expect("deserialize");
         assert_eq!(result.power_avg_watts, None);
+    }
+
+    // ---- pre-flight -------------------------------------------------------
+
+    #[test]
+    fn run_e2e_rejects_a_missing_model() {
+        let cfg = E2eConfig::new(PathBuf::from("definitely-not-a-real-model.gguf"));
+        let err = run_e2e(Path::new("definitely-not-a-real-llama-cli-path"), &cfg)
+            .expect_err("a missing model must be rejected");
+        assert!(err.to_string().contains("not a readable file"), "{err}");
+    }
+
+    #[test]
+    fn run_e2e_accepts_a_non_executable_model() {
+        // Regression for #27: a `0644` GGUF passes the model check, so the
+        // failure comes from the missing llama-cli instead.
+        let model =
+            std::env::temp_dir().join(format!("attune-e2e-readable-{}.gguf", std::process::id()));
+        std::fs::write(&model, b"GGUF").expect("write temp model");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod 0644");
+        }
+        let cfg = E2eConfig::new(model.clone());
+        let err = run_e2e(Path::new("definitely-not-a-real-llama-cli-path"), &cfg)
+            .expect_err("there is no llama-cli to run");
+        let _ = std::fs::remove_file(&model);
+        assert!(
+            !err.to_string().contains("not a readable file"),
+            "model check rejected a readable file: {err}"
+        );
     }
 
     // ---- manual, real llama.cpp only --------------------------------------
