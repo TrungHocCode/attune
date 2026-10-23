@@ -217,7 +217,9 @@ pub struct LlamaProbeReport {
     pub model: String,
     /// Always `true` in a report: a failed load returns an error instead.
     pub load_ok: bool,
-    /// Wall-clock duration of the load test, in milliseconds.
+    /// Wall-clock duration of the llama.cpp run that proved the load, in
+    /// milliseconds: the 1-token probe in `--quick` mode, the whole e2e run
+    /// in full mode (see [`crate::e2e::E2eResult::load_report`]).
     pub elapsed_ms: f64,
     /// Timings from the run, when llama.cpp printed a `llama_perf` block.
     #[serde(default)]
