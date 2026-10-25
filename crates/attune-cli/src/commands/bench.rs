@@ -7,15 +7,16 @@
 //! and theoretical-FLOPS context. Both modes accept `--json` and print the
 //! same machine-readable shape the human output is rendered from (no surprises).
 //!
-//! `--model <PATH>` adds a llama.cpp smoke test (M2 slice 5) and, with
-//! slice 6, a full end-to-end decode run: it loads the model through
-//! `llama-cli`, scrapes the `llama_perf` block, and reports TTFT / decode
-//! tok/s / RAM peak / CPU avg. Both run *before* the kernels so a
-//! misconfigured backend fails in milliseconds instead of after a
-//! multi-second benchmark, and their results are printed as one extra
-//! block (human mode) or as an extra `"llama"` object plus an `"e2e"`
-//! nested key (JSON mode). Without `--model` nothing here changes from
-//! the slice-5 behaviour.
+//! `--model <PATH>` adds llama.cpp. In quick mode that is a 1-token load
+//! probe (M2 slice 5). In full mode it is the end-to-end decode run (slice
+//! 6): it loads the model through `llama-cli`, scrapes the `llama_perf`
+//! block, and reports TTFT / decode tok/s / RAM peak / CPU avg. The full
+//! mode does not also run the probe, so the model loads once (#31); a
+//! millisecond pre-flight (binary resolves, model readable, version parses)
+//! runs before the kernels so a misconfigured backend still fails fast. JSON
+//! output nests the results as a `"llama"` object plus an `"e2e"` key; in
+//! full mode the `"llama"` object is derived from the e2e run. Without
+//! `--model` nothing here changes.
 //!
 //! `--save <PATH>` writes the JSON report to a file in addition to
 //! printing it; the file is the JSON contract verbatim and lives
@@ -32,7 +33,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use attune_bench::bandwidth::{FullBandwidthResult, ReadResult};
-use attune_bench::e2e::{E2eConfig, E2eResult};
+use attune_bench::e2e::{preflight, E2eConfig, E2eResult};
 use attune_bench::flops::{FlopsResult, WARMUP_PASSES as FLOPS_WARMUP_PASSES};
 use attune_bench::llama::{probe_model, resolve_llama_cli, LlamaProbeReport, LOAD_TIMEOUT};
 use attune_bench::monitor::ResourceStats;
@@ -219,8 +220,7 @@ fn print_pretty_e2e(e2e: &E2eResult) {
 }
 
 /// Resolve `llama-cli` and load `model` through it (the slice-5 smoke
-/// test). The slice-6 e2e *also* calls `llama_version` on the same binary,
-/// so a missing or non-runnable binary only costs one resolution.
+/// test). Quick mode only: full mode lets the e2e run prove the load.
 fn probe_llama(llama_cli: Option<&Path>, model: &Path) -> Result<LlamaProbeReport> {
     let cli = resolve_llama_cli(llama_explicit(llama_cli)?)?;
     // `?` keeps `BenchError`'s Display message as the top-level error and its
@@ -378,20 +378,24 @@ pub fn run(
     ctx_size: Option<u32>,
     threads: Option<u32>,
 ) -> Result<()> {
-    // Probe first: a misconfigured llama.cpp should be reported in
-    // milliseconds, not after the kernels have burned their seconds.
-    let probe = match model {
-        Some(model_path) => Some(probe_llama(llama_cli, model_path)?),
-        None => None,
+    // Quick mode keeps the 1-token load probe: it is the only llama.cpp step
+    // there.
+    let probe = match (quick, model) {
+        (true, Some(model_path)) => Some(probe_llama(llama_cli, model_path)?),
+        _ => None,
     };
 
-    // Resolve llama-cli up-front for e2e too, so a missing backend fails
-    // fast (instead of after the bandwidth phase already burned its
-    // seconds). Resolution failures here only matter when `--model` is
-    // also passed; the no-model path is unaffected.
+    // Full mode skips the probe, because the e2e run loads the model itself
+    // (#31). The millisecond pre-flight (llama-cli resolves, model readable,
+    // version parses) still runs before the kernels, so a bad setup fails
+    // fast without loading the model twice.
     let e2e_cli = match model {
-        Some(_) => Some(resolve_e2e_cli(llama_cli)?),
-        None => None,
+        Some(model_path) if !quick => {
+            let cli = resolve_e2e_cli(llama_cli)?;
+            preflight(&cli, model_path)?;
+            Some(cli)
+        }
+        _ => None,
     };
     let e2e_cfg = model.map(|m| make_e2e_config(m, prompt_tokens, gen_tokens, ctx_size, threads));
 
@@ -427,25 +431,28 @@ pub fn run(
     let hw = HardwareInfo::detect()?;
     let report = run_full(&hw, e2e_cfg.as_ref(), e2e_cli.as_deref())?;
     let bw_value = bandwidth_value(&report.bandwidth, &report.flops);
+    // The e2e run stands in for the probe, so the `--model` JSON keeps its
+    // `{ "llama": …, "bench": … }` envelope.
+    let load = match (report.e2e.as_ref(), e2e_cli.as_deref()) {
+        (Some(e2e_block), Some(cli)) => Some(e2e_block.load_report(cli)),
+        _ => None,
+    };
     if json {
-        let value = match probe.as_ref() {
+        let value = match load.as_ref() {
             None => serde_json::to_value(&report)?,
-            Some(p) => json_envelope_with_model(p, &report, &bw_value)?,
+            Some(l) => json_envelope_with_model(l, &report, &bw_value)?,
         };
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         print_report_pretty(&report, &hw);
-        if let Some(p) = probe.as_ref() {
-            print_pretty_llama(p);
-        }
         if let Some(e2e_block) = report.e2e.as_ref() {
             print_pretty_e2e(e2e_block);
         }
     }
     if let Some(path) = save {
-        let value = match probe.as_ref() {
+        let value = match load.as_ref() {
             None => serde_json::to_value(&report)?,
-            Some(p) => json_envelope_with_model(p, &report, &bw_value)?,
+            Some(l) => json_envelope_with_model(l, &report, &bw_value)?,
         };
         write_json_value(path, &value)?;
     }
