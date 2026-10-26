@@ -98,11 +98,19 @@ pub fn detect() -> Result<CpuInfo, HalError> {
     })
 }
 
+/// Fallback CPU clock in GHz used when no real clock can be detected.
+///
+/// Callers that need a peak anyway (e.g. `attune estimate`) may compute with
+/// this baseline, but MUST surface a warning — a silent 1 GHz fallback once
+/// skewed prefill predictions 2.5x (see the TTFT calibration issue).
+pub const BASELINE_CLOCK_GHZ: f64 = 1.0;
+
 /// Pure: estimate theoretical FP32 peak in decimal GFLOPS for `cores`, a
 /// fixed vocabulary of SIMD flag strings, and a CPU clock in GHz.
 /// 0.0 when no FMA path is detected, the core count is zero, or the clock is
-/// unknown (`clock_ghz <= 0` / non-finite) — callers render that as
-/// `"theoretical: unknown"` rather than silently using a baseline clock.
+/// unknown (`clock_ghz <= 0` / non-finite) — callers either render that as
+/// `"theoretical: unknown"` or fall back to [`BASELINE_CLOCK_GHZ`] with an
+/// explicit warning, never silently.
 ///
 /// Math: 32 FLOPS/cycle/core × `cores` × `clock_ghz` GHz. Both AVX2 and
 /// AVX-512F land at 32 FLOPS/cycle/core: AVX2 uses 2 FMA ports × 8 lanes ×
@@ -392,6 +400,14 @@ mod tests {
         assert!((theoretical_fp32_gflops(8, &both, 4.0) - 1024.0).abs() < 1e-9);
         // The old 1 GHz baseline now has to be passed explicitly.
         assert!((theoretical_fp32_gflops(8, &avx2, 1.0) - 256.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn baseline_clock_is_one_ghz() {
+        assert_eq!(BASELINE_CLOCK_GHZ, 1.0);
+        // The pre-clock-convention peak: 8 cores × 32 × 1.0 GHz.
+        let avx2 = vec!["AVX2".to_string()];
+        assert!((theoretical_fp32_gflops(8, &avx2, BASELINE_CLOCK_GHZ) - 256.0).abs() < 1e-9);
     }
 
     #[test]
