@@ -66,10 +66,12 @@ pub enum Command {
             .args(["model", "params"])
     ))]
     Estimate {
-        /// Verified catalog model, e.g. `llama-3.1-8b` or `qwen3-8b`.
-        /// Supplies the parameter count and KV-cache shape; mutually
-        /// exclusive with `--params` / `--arch`.
-        #[arg(long, value_name = "NAME", conflicts_with = "arch")]
+        /// Verified catalog model (e.g. `llama-3.1-8b`, `qwen3-8b`) or an
+        /// existing `.gguf` file path. A catalog name supplies the parameter
+        /// count and KV-cache shape from the built-in table; a file is probed
+        /// from its header, with a catalog cross-check when the name matches.
+        /// Mutually exclusive with `--params` / `--arch`.
+        #[arg(long, value_name = "NAME_OR_PATH", conflicts_with = "arch")]
         model: Option<String>,
         /// Model size, e.g. `135M`, `1.2B` or `7000000`. Alternative to
         /// `--model` for models outside the catalog.

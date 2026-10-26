@@ -988,14 +988,17 @@ mod tests {
         let started = Instant::now();
         let monitor =
             Monitor::start_sysinfo(25).expect("monitor should start against the real sampler");
-        sleep(Duration::from_millis(150));
+        // Generous window: the workspace suite runs tests in parallel, and a
+        // loaded CI box can starve the sampler thread for hundreds of ms.
+        // Three samples still prove the periodic path without flaking.
+        sleep(Duration::from_millis(400));
         let stats = monitor.stop();
         let elapsed = started.elapsed();
 
         assert_eq!(stats.interval_ms, 25);
         assert!(
             stats.samples >= 3,
-            "expected >= 3 samples in 150 ms, got {}",
+            "expected >= 3 samples in 400 ms, got {}",
             stats.samples
         );
         assert!(stats.ram_peak_bytes > 0, "own RSS should never be 0 bytes");

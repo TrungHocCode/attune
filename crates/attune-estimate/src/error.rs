@@ -16,6 +16,9 @@ pub enum EstimateError {
     /// The model name is not one of the verified catalog entries.
     #[error("invalid catalog model: {0}")]
     InvalidModelName(String),
+    /// A GGUF file could not be opened or its header is malformed/unsupported.
+    #[error("invalid GGUF: {0}")]
+    InvalidGguf(String),
     /// A hardware input is missing, non-finite or non-positive.
     #[error("invalid hardware inputs: {0}")]
     BadHw(String),
