@@ -11,7 +11,7 @@
 //! value returns [`EstimateError::BadHw`] / [`EstimateError::InvalidModel`]
 //! instead of leaking `NaN` or `inf` into a report.
 
-use crate::EstimateError;
+use crate::{EstimateError, Quant};
 
 /// Predict prefill latency (TTFT) in milliseconds:
 ///
@@ -56,6 +56,28 @@ pub fn predict_prefill_ms(
         )));
     }
     Ok(ms)
+}
+
+/// Predict prefill latency including the per-format dequant cost.
+///
+/// Same FLOP math as [`predict_prefill_ms`], scaled by
+/// [`Quant::dequant_penalty`]: quantized weights must be unpacked during
+/// the compute-bound prefill, so lower precision is slower here even
+/// though it is faster at decode time.
+pub fn predict_prefill_ms_quant(
+    params: u64,
+    n_tokens: u64,
+    flops_gflops: f64,
+    quant: Quant,
+) -> Result<f64, EstimateError> {
+    let ms = predict_prefill_ms(params, n_tokens, flops_gflops)?;
+    let penalized = ms * quant.dequant_penalty();
+    if !penalized.is_finite() || penalized <= 0.0 {
+        return Err(EstimateError::BadHw(format!(
+            "penalized prefill prediction is not finite positive, got {penalized}"
+        )));
+    }
+    Ok(penalized)
 }
 
 #[cfg(test)]
@@ -117,5 +139,21 @@ mod tests {
                 assert!(ms.is_finite() && ms > 0.0, "got {ms}");
             }
         }
+    }
+
+    #[test]
+    fn quant_penalty_orders_fp16_above_q8_above_q4() {
+        let fp16 = predict_prefill_ms_quant(135_000_000, 512, 50.0, Quant::Fp16).expect("valid");
+        let q8 = predict_prefill_ms_quant(135_000_000, 512, 50.0, Quant::Q8_0).expect("valid");
+        let q4 = predict_prefill_ms_quant(135_000_000, 512, 50.0, Quant::Q4_K_M).expect("valid");
+        // 2764.8 ms base × penalty.
+        assert!((fp16 - 2764.8).abs() < 0.1, "got {fp16}");
+        assert!((q8 - 2764.8 * 1.15).abs() < 0.5, "got {q8}");
+        assert!((q4 - 2764.8 * 1.3).abs() < 0.5, "got {q4}");
+        assert!(
+            fp16 < q8 && q8 < q4,
+            "ranking must hold: {fp16} < {q8} < {q4}"
+        );
+        assert_eq!(Quant::Q4_0.dequant_penalty(), 1.3);
     }
 }

@@ -28,7 +28,7 @@ use anyhow::{anyhow, Context, Result};
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
     apply_decode, apply_prefill, classify, decode_ai, kv_bytes_per_token, parse_arch, parse_params,
-    parse_quants, predict_prefill_ms, ridge_ai, spread_pct_from_stats, CalibratedInputs,
+    parse_quants, predict_prefill_ms_quant, ridge_ai, spread_pct_from_stats, CalibratedInputs,
     CalibrationReport, Confidence, EstimateError, EstimateInputs, EstimateReport, HwInputs,
     MultiEstimateReport, Quant, RamFit,
 };
@@ -317,7 +317,8 @@ fn build_report(ctx: &ReportContext<'_>, quant: Quant) -> Result<EstimateReport,
         ctx.kv_per_token,
         ctx.ctx,
     )?;
-    let prefill_ms_ttft = predict_prefill_ms(ctx.params, ctx.prompt_tokens, ctx.hw.flops_gflops)?;
+    let prefill_ms_ttft =
+        predict_prefill_ms_quant(ctx.params, ctx.prompt_tokens, ctx.hw.flops_gflops, quant)?;
     let ai_star = ridge_ai(ctx.hw.flops_gflops, ctx.hw.bw_gbps)?;
     let workload_ai = decode_ai(bytes_per_param)?;
     let (bottleneck, margin_pct) = classify(workload_ai, ai_star);

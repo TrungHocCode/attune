@@ -88,6 +88,20 @@ impl Quant {
             Quant::Q4_K_M => "q4_k_m",
         }
     }
+
+    /// Heuristic prefill slowdown from dequantizing weights on the fly.
+    ///
+    /// FP16 needs none (1.0); quantized formats pay for unpacking blocks
+    /// during the compute-bound prefill. These are initial values to be
+    /// tuned against measured prefill per quant — they rank formats
+    /// correctly today, they do not claim to be measured constants.
+    pub fn dequant_penalty(self) -> f64 {
+        match self {
+            Quant::Fp16 => 1.0,
+            Quant::Q8_0 => 1.15,
+            Quant::Q4_0 | Quant::Q4_K_M => 1.3,
+        }
+    }
 }
 
 impl std::fmt::Display for Quant {
