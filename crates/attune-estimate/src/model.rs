@@ -6,6 +6,10 @@
 
 use crate::EstimateError;
 
+pub mod catalog;
+
+pub use catalog::{parse_model, ModelEntry, MODEL_CATALOG};
+
 /// Supported weight formats. The JSON names are pinned explicitly so a
 /// future variant rename cannot silently change the report contract.
 // The variant names mirror the GGUF quant labels users type (`q4_k_m`); the

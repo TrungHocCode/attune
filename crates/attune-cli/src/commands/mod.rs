@@ -6,7 +6,7 @@ mod detect;
 mod estimate;
 
 use anyhow::Result;
-use clap::Subcommand;
+use clap::{ArgGroup, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Subcommand)]
@@ -60,10 +60,21 @@ pub enum Command {
     /// confidence intervals (M3 slices 1-4). Without overrides, bandwidth
     /// comes from a quick bench and the FP32 peak from `attune detect`.
     /// Comma-separated `--quant` compares several weight formats.
+    #[command(group(
+        ArgGroup::new("model_source")
+            .required(true)
+            .args(["model", "params"])
+    ))]
     Estimate {
-        /// Model size, e.g. `135M`, `1.2B` or `7000000`
+        /// Verified catalog model, e.g. `llama-3.1-8b` or `qwen3-8b`.
+        /// Supplies the parameter count and KV-cache shape; mutually
+        /// exclusive with `--params` / `--arch`.
+        #[arg(long, value_name = "NAME", conflicts_with = "arch")]
+        model: Option<String>,
+        /// Model size, e.g. `135M`, `1.2B` or `7000000`. Alternative to
+        /// `--model` for models outside the catalog.
         #[arg(long, value_name = "SIZE")]
-        params: String,
+        params: Option<String>,
         /// Weight format(s): `fp16`, `q8_0`, `q4_0` or `q4_k_m`.
         /// Comma-separate to compare configs, e.g. `fp16,q8_0,q4_k_m`
         #[arg(long, value_name = "QUANT[,QUANT...]")]
@@ -81,7 +92,7 @@ pub enum Command {
         gflops: Option<f64>,
         /// Architecture preset for KV-cache sizing: `llama-3.1-8b`,
         /// `llama-3.1-70b` or `qwen2.5-7b`. Omit to exclude KV from the
-        /// decode prediction (a warning says so).
+        /// decode prediction (a warning says so). Not used with `--model`.
         #[arg(long, value_name = "NAME")]
         arch: Option<String>,
         /// Prompt/prefill token count used for TTFT (default 512)
@@ -141,6 +152,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             threads,
         ),
         Command::Estimate {
+            model,
             params,
             quant,
             bandwidth_gbps,
@@ -155,7 +167,8 @@ pub fn dispatch(command: Command) -> Result<()> {
             bench_quant,
             json,
         } => estimate::run(
-            &params,
+            model.as_deref(),
+            params.as_deref(),
             &quant,
             bandwidth_gbps,
             spread_pct,

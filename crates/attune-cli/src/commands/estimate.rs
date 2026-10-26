@@ -28,9 +28,9 @@ use anyhow::{anyhow, Context, Result};
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
     apply_decode, apply_prefill, clamped, classify, decode_ai, kv_bytes_per_token, parse_arch,
-    parse_params, parse_quants, predict_prefill_ms_quant, ridge_ai, spread_pct_from_stats,
-    CalibratedInputs, CalibrationReport, Confidence, EstimateError, EstimateInputs, EstimateReport,
-    HwInputs, MultiEstimateReport, Quant, RamFit,
+    parse_model, parse_params, parse_quants, predict_prefill_ms_quant, ridge_ai,
+    spread_pct_from_stats, CalibratedInputs, CalibrationReport, Confidence, EstimateError,
+    EstimateInputs, EstimateReport, HwInputs, MultiEstimateReport, Quant, RamFit,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
@@ -206,6 +206,50 @@ fn resolve_kv(arch: Option<&str>) -> Result<KvResolution, EstimateError> {
             warning: Some(KV_EXCLUDED_WARNING),
         }),
     }
+}
+
+/// Model inputs resolved from either `--model` or `--params` + `--arch`.
+struct ModelResolution<'a> {
+    /// Report label: catalog name or the literal `--params` text.
+    label: &'a str,
+    /// Parameter count used for the weight footprint.
+    params: u64,
+    /// KV-cache traffic for the resolved architecture.
+    kv: KvResolution,
+}
+
+/// Resolve `--model` first, then fall back to `--params` + `--arch`.
+///
+/// The catalog supplies the parameter count and the verified KV shape; the two
+/// flags stay the escape hatch for models outside it. Clap makes `--model`
+/// mutually exclusive with `--params` / `--arch`, so the paths cannot silently
+/// disagree. The catalog's `ctx_default` is deliberately not applied here yet:
+/// `--ctx` remains the context source until the wiring slice consumes it.
+fn resolve_model<'a>(
+    model: Option<&'a str>,
+    params: Option<&'a str>,
+    arch: Option<&str>,
+) -> Result<ModelResolution<'a>> {
+    if let Some(name) = model {
+        let entry = parse_model(name).map_err(|err| {
+            anyhow!("{err}; pass --params <SIZE> --arch <NAME> for a model outside the catalog")
+        })?;
+        return Ok(ModelResolution {
+            label: entry.name,
+            params: entry.params,
+            kv: KvResolution {
+                per_token: kv_bytes_per_token(&entry.arch),
+                warning: None,
+            },
+        });
+    }
+
+    let params = params.ok_or_else(|| anyhow!("pass --model <NAME> or --params <SIZE>"))?;
+    Ok(ModelResolution {
+        label: params.trim(),
+        params: parse_params(params)?,
+        kv: resolve_kv(arch)?,
+    })
 }
 
 /// Best-effort available RAM for the OOM check. `None` when the HAL cannot
@@ -566,7 +610,8 @@ fn print_table(reports: &[EstimateReport], prompt_tokens: u64, clock_fallback: b
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
-    params: &str,
+    model: Option<&str>,
+    params: Option<&str>,
     quant: &str,
     bandwidth_gbps: Option<f64>,
     spread_pct: Option<f64>,
@@ -580,9 +625,12 @@ pub fn run(
     calibrate: bool,
     json: bool,
 ) -> Result<()> {
-    let params_count = parse_params(params)?;
+    let ModelResolution {
+        label,
+        params: params_count,
+        kv,
+    } = resolve_model(model, params, arch)?;
     let quants = parse_quants(quant)?;
-    let kv = resolve_kv(arch)?;
     // The bench's own quant is only known when the user states it; without
     // the flag no quant-mismatch warning can be produced (and none is).
     let bench_quant = bench_quant
@@ -607,7 +655,7 @@ pub fn run(
         flops_gflops: compute.gflops,
     };
     let context = ReportContext {
-        label: params.trim(),
+        label,
         params: params_count,
         prompt_tokens,
         ctx,
@@ -652,7 +700,7 @@ pub fn run(
     sort_by_decode(&mut reports);
 
     if json {
-        println!("{}", render_json(params.trim(), &reports)?);
+        println!("{}", render_json(label, &reports)?);
         return Ok(());
     }
 
@@ -972,6 +1020,49 @@ mod tests {
         assert_eq!(unknown.warning, Some(KV_EXCLUDED_WARNING));
 
         assert!(resolve_kv(Some("not-a-model")).is_err());
+    }
+
+    #[test]
+    fn resolve_model_prefers_the_catalog_entry() {
+        let resolved = resolve_model(Some("Llama-3.1-8B"), None, None).expect("catalog model");
+        assert_eq!(resolved.label, "llama-3.1-8b");
+        assert_eq!(resolved.params, 8_030_000_000);
+        assert_eq!(resolved.kv.per_token, 131_072.0);
+        assert_eq!(resolved.kv.warning, None);
+    }
+
+    #[test]
+    fn resolve_model_falls_back_to_params_and_arch() {
+        let resolved =
+            resolve_model(None, Some("8.03B"), Some("llama-3.1-8b")).expect("explicit flags");
+        assert_eq!(resolved.label, "8.03B");
+        assert_eq!(resolved.params, 8_030_000_000);
+        assert_eq!(resolved.kv.per_token, 131_072.0);
+        assert_eq!(resolved.kv.warning, None);
+
+        let weights_only = resolve_model(None, Some("135M"), None).expect("no arch");
+        assert_eq!(weights_only.params, 135_000_000);
+        assert_eq!(weights_only.kv.per_token, 0.0);
+        assert_eq!(weights_only.kv.warning, Some(KV_EXCLUDED_WARNING));
+    }
+
+    #[test]
+    fn resolve_model_paths_resolve_to_the_same_inputs() {
+        let via_model = resolve_model(Some("llama-3.1-8b"), None, None).expect("catalog");
+        let via_flags =
+            resolve_model(None, Some("8.03B"), Some("llama-3.1-8b")).expect("explicit flags");
+        assert_eq!(via_model.params, via_flags.params);
+        assert_eq!(via_model.kv.per_token, via_flags.kv.per_token);
+    }
+
+    #[test]
+    fn resolve_model_unknown_name_suggests_params() {
+        let err = resolve_model(Some("not-a-model"), None, None)
+            .err()
+            .expect("unknown model must fail");
+        let message = err.to_string();
+        assert!(message.contains("not-a-model"), "message: {message}");
+        assert!(message.contains("--params"), "message: {message}");
     }
 
     #[test]

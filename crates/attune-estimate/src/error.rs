@@ -13,6 +13,9 @@ pub enum EstimateError {
     /// The architecture preset name is not one of the documented names.
     #[error("invalid architecture: {0}")]
     InvalidArch(String),
+    /// The model name is not one of the verified catalog entries.
+    #[error("invalid catalog model: {0}")]
+    InvalidModelName(String),
     /// A hardware input is missing, non-finite or non-positive.
     #[error("invalid hardware inputs: {0}")]
     BadHw(String),
