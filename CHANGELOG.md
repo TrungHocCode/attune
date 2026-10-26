@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-10-26
+
+Correctness pass over `attune estimate` so M4 tune can safely suggest
+models to users. No new commands; predictions get louder about degraded
+inputs instead of printing confident wrong numbers.
+
+### Fixed
+- Unknown CPU clock falls back to the 1 GHz baseline with an explicit
+  warning (pretty + `warnings` report field) instead of refusing to run;
+  `--gflops` still overrides everything (#35).
+- Decode prediction includes KV-cache bytes (`--arch` presets,
+  `--ctx` now honored); a missing `--arch` warns loudly (#37).
+- Prefill TTFT scales per quant (`fp16` 1.0, `q8_0` 1.15, `q4` 1.3 as
+  initial heuristics) so multi-quant tables rank formats correctly (#38).
+
+### Added
+- RAM fit check: `RamFit` block (`weight + kv` vs 90% of available RAM)
+  with `OOM: need …, have …` warning instead of tok/s for models that
+  cannot load (#36).
+- Cross-workload calibration warnings (quant/prompt mismatch, clamped
+  eta) plus `--bench-quant` flag; missing `e2e` still reports
+  `CalibrationUnavailable` (#39).
+- `warnings` report field (omitted when empty; old JSON still parses).
+
 ## [0.3.0] - 2026-10-22
 
 Closes **M3 — `attune estimate`**. Roofline decode/prefill prediction,
