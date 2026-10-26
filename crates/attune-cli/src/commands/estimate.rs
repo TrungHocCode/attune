@@ -32,6 +32,7 @@ use attune_estimate::{
     Confidence, EstimateError, EstimateInputs, EstimateReport, HwInputs, MultiEstimateReport,
     Quant,
 };
+use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
 
 /// Resolved FP32 peak plus the detected max clock it came from.
@@ -40,16 +41,35 @@ struct ComputeResolution {
     /// Max CPU clock in GHz, or 0.0 when the user supplied `--gflops` (the
     /// override skips detection) or no clock could be read.
     clock_ghz: f64,
+    /// True when the peak fell back to [`BASELINE_CLOCK_GHZ`] because the
+    /// clock is unknown. The warning in [`CLOCK_FALLBACK_WARNING`] must be
+    /// surfaced then — a silent baseline once skewed TTFT 2.5x.
+    clock_fallback: bool,
+}
+
+/// Warning attached to every report (pretty + JSON) built on the 1 GHz
+/// baseline fallback.
+pub const CLOCK_FALLBACK_WARNING: &str =
+    "clock unknown, assuming 1 GHz baseline — pass --gflops for real numbers";
+
+/// Peak from the 1 GHz baseline for CPUs whose clock is unknown but whose
+/// SIMD path is known. `None` when even the baseline yields nothing (no FMA
+/// path), in which case the caller keeps the loud `--gflops` error.
+fn baseline_peak(physical_cores: u32, simd_flags: &[String]) -> Option<f64> {
+    let peak = theoretical_fp32_gflops(physical_cores, simd_flags, BASELINE_CLOCK_GHZ);
+    (peak.is_finite() && peak > 0.0).then_some(peak)
 }
 
 /// Resolve the FP32 peak: explicit override first, then the HAL estimate
-/// (cores × SIMD path × detected max clock), then a clean error that names
-/// the fix.
+/// (cores × SIMD path × detected max clock), then the 1 GHz baseline with a
+/// loud warning when only the clock is missing, then a clean error naming
+/// the fix when not even the baseline applies (no FMA SIMD path).
 fn resolve_compute(gflops: Option<f64>) -> Result<ComputeResolution> {
     match gflops {
         Some(value) => Ok(ComputeResolution {
             gflops: value,
             clock_ghz: 0.0,
+            clock_fallback: false,
         }),
         None => {
             let hw = HardwareInfo::detect()?;
@@ -58,6 +78,13 @@ fn resolve_compute(gflops: Option<f64>) -> Result<ComputeResolution> {
                 Ok(ComputeResolution {
                     gflops: theoretical,
                     clock_ghz: hw.cpu.clock_ghz,
+                    clock_fallback: false,
+                })
+            } else if let Some(peak) = baseline_peak(hw.cpu.physical_cores, &hw.cpu.simd_flags) {
+                Ok(ComputeResolution {
+                    gflops: peak,
+                    clock_ghz: BASELINE_CLOCK_GHZ,
+                    clock_fallback: true,
                 })
             } else {
                 Err(anyhow!(
@@ -295,8 +322,12 @@ fn format_interval(value: f64, lo: Option<f64>, hi: Option<f64>) -> String {
 
 /// Human-readable peak line. A non-zero clock means the HAL derived the
 /// GFLOPS from the detected max clock; 0.0 means the user passed `--gflops`.
-fn format_peak(gflops: f64, clock_ghz: f64) -> String {
-    if clock_ghz.is_finite() && clock_ghz > 0.0 {
+/// A fallback peak is labelled as a baseline so it is never mistaken for a
+/// measured max clock.
+fn format_peak(gflops: f64, clock_ghz: f64, clock_fallback: bool) -> String {
+    if clock_fallback {
+        format!("{gflops:.1} GFLOPS @ {clock_ghz:.2} GHz baseline (clock unknown)")
+    } else if clock_ghz.is_finite() && clock_ghz > 0.0 {
         format!("{gflops:.1} GFLOPS @ {clock_ghz:.2} GHz max")
     } else {
         format!("{gflops:.1} GFLOPS (explicit --gflops)")
@@ -305,7 +336,8 @@ fn format_peak(gflops: f64, clock_ghz: f64) -> String {
 
 /// Existing single-config human output. Interval lines are only added when a
 /// measured spread produced bounds, so the no-spread output is unchanged.
-fn print_single(report: &EstimateReport, prompt_tokens: u64) {
+/// Warnings print last so a degraded input is impossible to miss.
+fn print_single(report: &EstimateReport, prompt_tokens: u64, clock_fallback: bool) {
     let bw_gbps = report.inputs.map_or(0.0, |inputs| inputs.bw_gbps);
     let flops_gflops = report.inputs.map_or(0.0, |inputs| inputs.gflops);
     let clock_ghz = report.inputs.map_or(0.0, |inputs| inputs.clock_ghz);
@@ -352,22 +384,33 @@ fn print_single(report: &EstimateReport, prompt_tokens: u64) {
         "Bottleneck:  {} (decode AI {:.2} vs ridge {:.2} FLOP/byte, {:.1}% off)",
         report.bottleneck, workload_ai, ai_star, margin_pct,
     );
-    println!("Peak:        {}", format_peak(flops_gflops, clock_ghz));
+    println!(
+        "Peak:        {}",
+        format_peak(flops_gflops, clock_ghz, clock_fallback)
+    );
     println!(
         "Ridge:       {:.2} FLOP/byte ({:.1} GFLOPS / {:.1} GB/s)",
         ai_star, flops_gflops, bw_gbps,
     );
+    print_warnings(report);
+}
+
+/// Print the report's non-fatal notices, if any.
+fn print_warnings(report: &EstimateReport) {
+    for warning in &report.warnings {
+        println!("Warning:     {warning}");
+    }
 }
 
 /// Multi-config human output, already sorted fastest-first by the caller.
-fn print_table(reports: &[EstimateReport], prompt_tokens: u64) {
+fn print_table(reports: &[EstimateReport], prompt_tokens: u64, clock_fallback: bool) {
     let model = reports.first().map_or("", |report| report.model.as_str());
     println!("Model:  {model} (prompt {prompt_tokens} tok)");
     if let Some(inputs) = reports.first().and_then(|report| report.inputs) {
         println!(
             "Inputs: {:.1} GB/s, {}",
             inputs.bw_gbps,
-            format_peak(inputs.gflops, inputs.clock_ghz)
+            format_peak(inputs.gflops, inputs.clock_ghz, clock_fallback)
         );
     }
     println!();
@@ -406,6 +449,13 @@ fn print_table(reports: &[EstimateReport], prompt_tokens: u64) {
         .and_then(|report| report.confidence.as_ref())
     {
         println!("\nConfidence: {} ({})", confidence.level, confidence.method);
+    }
+    // Warnings are input-level (identical across configs), so the first
+    // report represents all of them.
+    if let Some(first) = reports.first() {
+        for warning in &first.warnings {
+            println!("Warning:     {warning}");
+        }
     }
 }
 
@@ -455,6 +505,9 @@ pub fn run(
     let mut reports = Vec::with_capacity(quants.len());
     for quant in quants {
         let mut report = build_report(&ctx, quant)?;
+        if compute.clock_fallback {
+            report = report.with_warning(CLOCK_FALLBACK_WARNING);
+        }
         if calibrate {
             let bench = bench.as_ref().ok_or_else(|| {
                 anyhow!("--calibrate requires --bench-json <PATH> with an e2e block")
@@ -481,9 +534,9 @@ pub fn run(
     }
 
     if let [report] = reports.as_slice() {
-        print_single(report, prompt_tokens);
+        print_single(report, prompt_tokens, compute.clock_fallback);
     } else {
-        print_table(&reports, prompt_tokens);
+        print_table(&reports, prompt_tokens, compute.clock_fallback);
     }
     Ok(())
 }
@@ -632,12 +685,32 @@ mod tests {
 
     #[test]
     fn format_peak_names_the_clock_or_the_override() {
-        assert_eq!(format_peak(1024.0, 4.0), "1024.0 GFLOPS @ 4.00 GHz max");
-        assert_eq!(format_peak(50.0, 0.0), "50.0 GFLOPS (explicit --gflops)");
         assert_eq!(
-            format_peak(50.0, f64::NAN),
+            format_peak(1024.0, 4.0, false),
+            "1024.0 GFLOPS @ 4.00 GHz max"
+        );
+        assert_eq!(
+            format_peak(50.0, 0.0, false),
             "50.0 GFLOPS (explicit --gflops)"
         );
+        assert_eq!(
+            format_peak(50.0, f64::NAN, false),
+            "50.0 GFLOPS (explicit --gflops)"
+        );
+        assert_eq!(
+            format_peak(256.0, 1.0, true),
+            "256.0 GFLOPS @ 1.00 GHz baseline (clock unknown)"
+        );
+    }
+
+    #[test]
+    fn baseline_peak_matches_the_1ghz_convention() {
+        let avx2 = vec!["AVX2".to_string()];
+        assert_eq!(baseline_peak(8, &avx2), Some(256.0));
+        // No FMA path: even the baseline yields nothing, so the caller keeps
+        // the loud --gflops error.
+        assert_eq!(baseline_peak(8, &[]), None);
+        assert_eq!(baseline_peak(0, &avx2), None);
     }
 
     #[test]

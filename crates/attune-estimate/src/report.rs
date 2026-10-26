@@ -221,6 +221,11 @@ pub struct EstimateReport {
     /// Interval provenance / confidence level (M3 slice 4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<Confidence>,
+    /// Non-fatal notices about the prediction (e.g. a fallback clock, a
+    /// cross-workload calibration). Empty in the common case and omitted
+    /// from JSON then, so old consumers see no shape change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl EstimateReport {
@@ -244,6 +249,7 @@ impl EstimateReport {
             inputs: None,
             calibration: None,
             confidence: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -298,6 +304,13 @@ impl EstimateReport {
     /// Attach the interval provenance / confidence level.
     pub fn with_confidence(mut self, confidence: Confidence) -> Self {
         self.confidence = Some(confidence);
+        self
+    }
+
+    /// Attach a non-fatal notice (fallback input, cross-workload eta).
+    /// Warnings never fail the prediction; they keep a degraded input loud.
+    pub fn with_warning(mut self, warning: impl Into<String>) -> Self {
+        self.warnings.push(warning.into());
         self
     }
 }
@@ -401,7 +414,26 @@ mod tests {
 
         let back: EstimateReport = serde_json::from_str(&json).expect("deserialize EstimateReport");
         assert_eq!(back, report);
-        assert_eq!(back.schema, SCHEMA);
+    }
+
+    #[test]
+    fn warnings_default_empty_and_roundtrip() {
+        assert!(sample().warnings.is_empty());
+        let json = serde_json::to_string(&sample()).expect("serialize");
+        assert!(
+            !json.contains("warnings"),
+            "empty warnings must be omitted: {json}"
+        );
+        let warned = sample().with_warning("clock unknown, assuming 1 GHz baseline");
+        let json = serde_json::to_string(&warned).expect("serialize");
+        assert!(json.contains("\"warnings\""), "missing warnings: {json}");
+        let back: EstimateReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, warned);
+        // Pre-warnings JSON still parses with empty warnings.
+        let old =
+            r#"{"schema":"attune-estimate/1","model":"135M","quant":"q4_k_m","decode_tps":1.0}"#;
+        let back: EstimateReport = serde_json::from_str(old).expect("deserialize old");
+        assert!(back.warnings.is_empty());
     }
 
     #[test]
