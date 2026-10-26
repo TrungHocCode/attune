@@ -167,6 +167,96 @@ pub struct EstimateInputs {
     pub clock_ghz: f64,
 }
 
+/// Whether the model fits in the RAM available on this machine.
+///
+/// `peak_bytes` is weights plus the KV cache at the requested context:
+/// a model can look fine on disk and still fail to load or OOM while
+/// decoding. `fits` requires [`RamFit::HEADROOM`] of slack so a prediction
+/// does not claim fit at the exact edge of available memory.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RamFit {
+    /// Weight footprint in bytes.
+    #[serde(default)]
+    pub weight_bytes: f64,
+    /// KV-cache footprint at the requested context, in bytes.
+    #[serde(default)]
+    pub kv_bytes: f64,
+    /// `weight_bytes + kv_bytes`.
+    #[serde(default)]
+    pub peak_bytes: f64,
+    /// Available RAM reported by the HAL, in bytes.
+    #[serde(default)]
+    pub avail_bytes: f64,
+    /// True when `peak_bytes < avail_bytes × HEADROOM`.
+    #[serde(default)]
+    pub fits: bool,
+}
+
+impl RamFit {
+    /// Fraction of available RAM a model may use and still count as fitting.
+    pub const HEADROOM: f64 = 0.9;
+
+    /// Build a fit check, or `None` when any input is unusable.
+    ///
+    /// Zero/unknown available RAM (the HAL reports 0 when it cannot read it)
+    /// yields `None` rather than a false OOM claim. Negative or non-finite
+    /// footprints are likewise rejected.
+    pub fn new(weight_bytes: f64, kv_bytes: f64, avail_bytes: f64) -> Option<Self> {
+        if !weight_bytes.is_finite()
+            || weight_bytes < 0.0
+            || !kv_bytes.is_finite()
+            || kv_bytes < 0.0
+            || !avail_bytes.is_finite()
+            || avail_bytes <= 0.0
+        {
+            return None;
+        }
+
+        let peak_bytes = weight_bytes + kv_bytes;
+        if !peak_bytes.is_finite() {
+            return None;
+        }
+
+        Some(Self {
+            weight_bytes,
+            kv_bytes,
+            peak_bytes,
+            avail_bytes,
+            fits: peak_bytes < avail_bytes * Self::HEADROOM,
+        })
+    }
+
+    /// Size the footprint from a model spec plus a KV-per-token figure.
+    ///
+    /// Keeps the weight/KV arithmetic in the library so the CLI only passes
+    /// the parsed model, the resolved KV size and the detected available RAM.
+    pub fn for_model(
+        params: u64,
+        quant: Quant,
+        kv_per_token: f64,
+        ctx: u32,
+        avail_bytes: f64,
+    ) -> Option<Self> {
+        let weight_bytes = params as f64 * quant.bytes_per_param();
+        let kv_bytes = kv_per_token * ctx as f64;
+        Self::new(weight_bytes, kv_bytes, avail_bytes)
+    }
+
+    /// The loud notice to attach when the peak does not fit.
+    ///
+    /// Decimal GB matches the model-size labels users see; the text is
+    /// intentionally one line so it survives table and JSON output.
+    pub fn warning(&self) -> Option<String> {
+        (!self.fits).then(|| {
+            format!(
+                "OOM: need {:.0}GB, have {:.0}GB",
+                self.peak_bytes / 1e9,
+                self.avail_bytes / 1e9,
+            )
+        })
+    }
+}
+
 /// One `attune estimate` result.
 ///
 /// `serde(default)` is on every field except the schema stamp so a future
@@ -218,6 +308,10 @@ pub struct EstimateReport {
     /// Calibration against a saved bench report, when requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calibration: Option<CalibrationReport>,
+    /// Weight + KV footprint versus available RAM, when RAM detection
+    /// succeeded. Absent from older JSON and when the HAL could not read RAM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_fit: Option<RamFit>,
     /// Interval provenance / confidence level (M3 slice 4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<Confidence>,
@@ -248,6 +342,7 @@ impl EstimateReport {
             margin_pct: None,
             inputs: None,
             calibration: None,
+            ram_fit: None,
             confidence: None,
             warnings: Vec::new(),
         }
@@ -281,6 +376,17 @@ impl EstimateReport {
     /// Attach the calibration block produced by `--calibrate`.
     pub fn with_calibration(mut self, calibration: CalibrationReport) -> Self {
         self.calibration = Some(calibration);
+        self
+    }
+
+    /// Attach the RAM fit check. A model that does not fit also appends the
+    /// [`RamFit::warning`] notice, so the OOM is never silent in either
+    /// output mode.
+    pub fn with_ram_fit(mut self, ram_fit: RamFit) -> Self {
+        if let Some(warning) = ram_fit.warning() {
+            self.warnings.push(warning);
+        }
+        self.ram_fit = Some(ram_fit);
         self
     }
 
@@ -365,6 +471,7 @@ mod tests {
         assert_eq!(report.margin_pct, None);
         assert_eq!(report.inputs, None);
         assert_eq!(report.calibration, None);
+        assert_eq!(report.ram_fit, None);
         assert_eq!(report.confidence, None);
     }
 
@@ -489,6 +596,7 @@ mod tests {
         assert_eq!(back.margin_pct, None);
         assert_eq!(back.inputs, None);
         assert_eq!(back.calibration, None);
+        assert_eq!(back.ram_fit, None);
         assert_eq!(back.confidence, None);
     }
 
@@ -530,6 +638,7 @@ mod tests {
         assert_eq!(back.margin_pct, None);
         assert_eq!(back.inputs, None);
         assert_eq!(back.calibration, None);
+        assert_eq!(back.ram_fit, None);
         assert_eq!(back.confidence, None);
     }
 
@@ -563,6 +672,92 @@ mod tests {
 
         let back: EstimateReport = serde_json::from_str(&json).expect("deserialize EstimateReport");
         assert_eq!(back, report);
+    }
+
+    #[test]
+    fn ram_fit_flags_a_70b_q4_on_16gb_with_a_warning() {
+        let arch = crate::model::parse_arch("llama-3.1-70b").expect("preset");
+        let kv_per_token = crate::model::kv_bytes_per_token(arch);
+        let fit = RamFit::for_model(70_000_000_000, Quant::Q4_K_M, kv_per_token, 2048, 16e9)
+            .expect("valid inputs");
+
+        assert!(!fit.fits, "70B Q4 + 2k ctx must not fit in 16 GB");
+        assert!(
+            (fit.peak_bytes - (fit.weight_bytes + fit.kv_bytes)).abs() < 1e-6,
+            "peak must be weights + KV"
+        );
+
+        let report = sample().with_ram_fit(fit);
+        assert_eq!(report.ram_fit, Some(fit));
+        let warning = report
+            .warnings
+            .iter()
+            .find(|warning| warning.starts_with("OOM:"))
+            .expect("OOM warning");
+        assert!(warning.contains("need 43GB"), "warning: {warning}");
+        assert!(warning.contains("have 16GB"), "warning: {warning}");
+    }
+
+    #[test]
+    fn ram_fit_accepts_a_small_model_and_emits_no_warning() {
+        let arch = crate::model::Arch {
+            name: "test-135m",
+            n_layer: 30,
+            n_kv_heads: 5,
+            head_dim: 64,
+        };
+        let kv_per_token = crate::model::kv_bytes_per_token(&arch);
+        let fit = RamFit::for_model(135_000_000, Quant::Q4_K_M, kv_per_token, 2048, 16e9)
+            .expect("valid inputs");
+
+        assert!(fit.fits, "135M Q4 + 2k ctx should fit in 16 GB");
+        let report = sample().with_ram_fit(fit);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    #[test]
+    fn ram_fit_is_none_for_unknown_ram_or_bad_footprints() {
+        for (weight, kv, avail) in [
+            (1.0, 1.0, 0.0),
+            (1.0, 1.0, -1.0),
+            (1.0, 1.0, f64::NAN),
+            (-1.0, 1.0, 16e9),
+            (1.0, -1.0, 16e9),
+            (f64::INFINITY, 1.0, 16e9),
+        ] {
+            assert!(
+                RamFit::new(weight, kv, avail).is_none(),
+                "({weight}, {kv}, {avail}) should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn ram_fit_json_roundtrips_and_old_json_omits_it() {
+        let fit = RamFit::new(4.0e9, 1.0e9, 16e9).expect("valid");
+        let report = sample().with_ram_fit(fit);
+        let json = serde_json::to_string(&report).expect("serialize");
+        for key in [
+            "ram_fit",
+            "weight_bytes",
+            "kv_bytes",
+            "peak_bytes",
+            "avail_bytes",
+        ] {
+            assert!(
+                json.contains(&format!("\"{key}\"")),
+                "missing {key}: {json}"
+            );
+        }
+        let back: EstimateReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.ram_fit, Some(fit));
+
+        // A report without the block still parses and omits the field.
+        let plain = serde_json::to_string(&sample()).expect("serialize plain");
+        assert!(
+            !plain.contains("ram_fit"),
+            "absent ram_fit must be omitted: {plain}"
+        );
     }
 
     #[test]
