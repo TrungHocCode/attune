@@ -27,7 +27,7 @@ pub use model::{
     kv_bytes_per_token, kv_total_bytes, parse_arch, parse_params, parse_quants, Arch, ModelSpec,
     Quant, ARCH_PRESETS, BITS_PER_WEIGHT,
 };
-pub use prefill::predict_prefill_ms;
+pub use prefill::{predict_prefill_ms, predict_prefill_ms_quant};
 pub use report::{
     interval, spread_pct_from_stats, Bottleneck, CalibrationReport, Confidence, EstimateInputs,
     EstimateReport, MultiEstimateReport, RamFit,
