@@ -23,13 +23,16 @@ pub mod roofline;
 pub use bottleneck::{classify, decode_ai, prefill_ai, ridge_ai};
 pub use calibrate::{apply_decode, apply_prefill, fit_eta, CalibratedInputs, MAX_ETA, MIN_ETA};
 pub use error::EstimateError;
-pub use model::{parse_params, parse_quants, ModelSpec, Quant, BITS_PER_WEIGHT};
+pub use model::{
+    kv_bytes_per_token, kv_total_bytes, parse_arch, parse_params, parse_quants, Arch, ModelSpec,
+    Quant, ARCH_PRESETS, BITS_PER_WEIGHT,
+};
 pub use prefill::predict_prefill_ms;
 pub use report::{
     interval, spread_pct_from_stats, Bottleneck, CalibrationReport, Confidence, EstimateInputs,
-    EstimateReport, MultiEstimateReport,
+    EstimateReport, MultiEstimateReport, RamFit,
 };
-pub use roofline::{predict_decode_tps, HwInputs};
+pub use roofline::{predict_decode_tps, predict_decode_tps_with_kv, HwInputs};
 
 /// Schema stamped on every [`EstimateReport`] so consumers can tell a
 /// slice-1 (M3) document from anything older.

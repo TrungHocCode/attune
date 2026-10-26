@@ -11,10 +11,16 @@
 //!   scales inversely, so the calibrated time is `raw_ms / eta_comp`.
 //!
 //! Both factors are clamped to [`MIN_ETA`]..=[`MAX_ETA`], so a bogus bench (or
-//! a wildly different workload) cannot turn a report into nonsense. The
-//! roofline's decode bytes are deliberately weights-only: the KV cache grows
-//! with context and is not modelled yet; `eta_mem` absorbs it (plus every
-//! other per-token overhead) for this slice.
+//! a wildly different workload) cannot turn a report into nonsense. Decode can
+//! model the KV cache when an architecture preset is supplied (see
+//! [`crate::predict_decode_tps_with_kv`]); `eta_mem` still absorbs kernel
+//! overhead and residual per-token traffic.
+//!
+//! **Do not reuse a pre-KV `eta_mem` across context sizes.** A factor fitted
+//! before the KV term was modelled folds the KV read into `eta_mem`, so it is
+//! only valid at the bench's context length; applying it to a larger `ctx`
+//! double-counts (or hides) KV traffic. Re-fit against a bench run at the
+//! target context.
 //!
 //! Everything here is pure: no I/O, no clock, no allocation beyond the error
 //! strings. The CLI reads the bench JSON and feeds the numbers in.
@@ -163,6 +169,36 @@ mod tests {
         // exactly why slice 3 adds calibration.
         let stale = rel_err_pct(246.9, 55.6);
         assert!(stale > 25.0, "fixture should need calibration: {stale}%");
+    }
+
+    #[test]
+    fn kv_aware_roofline_refits_a_stale_eta_toward_one() {
+        use crate::model::{kv_bytes_per_token, Arch, Quant};
+        use crate::roofline::{predict_decode_tps, predict_decode_tps_with_kv};
+
+        // Synthetic 30-layer / 5-KV-head / head_dim-64 shape, matching the
+        // issue's 135M fixture (~180.5 tok/s at 2k ctx on 29.1 GB/s).
+        let arch = Arch {
+            name: "test-135m-kv",
+            n_layer: 30,
+            n_kv_heads: 5,
+            head_dim: 64,
+        };
+        let bpp = Quant::Q4_K_M.bytes_per_param();
+        let kv_aware =
+            predict_decode_tps_with_kv(135_000_000, bpp, 29.1, kv_bytes_per_token(&arch), 2048)
+                .expect("kv-aware prediction");
+        let weights_only =
+            predict_decode_tps(135_000_000, bpp, 29.1).expect("weights-only prediction");
+
+        let re_fitted = fit_eta(kv_aware, 148.0).expect("valid fixture");
+        let stale = fit_eta(weights_only, 148.0).expect("valid fixture");
+
+        // The measured 148 tok/s sits much closer to the KV-aware roofline:
+        // eta moves from ~0.42 to ~0.82 (inside 0.5..1.0, not pinned exactly).
+        assert!(re_fitted > 0.5 && re_fitted < 1.0, "eta {re_fitted}");
+        assert!((re_fitted - 0.82).abs() < 0.03, "eta {re_fitted}");
+        assert!(re_fitted > stale, "KV-aware {re_fitted} vs stale {stale}");
     }
 
     #[test]

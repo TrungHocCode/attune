@@ -47,9 +47,11 @@ pub enum Quant {
 /// k-quant whose measured effective rate is 4.8944 bits/weight.
 ///
 /// **Scope:** [`Quant::bytes_per_param`] is weights only. Decode also streams
-/// the KV cache, which grows with context size and is not modelled yet; the
-/// calibration factor `eta_mem` absorbs that (and any other per-token
-/// overhead) when a real `attune bench` report is supplied.
+/// the KV cache, which grows with context size. Pass an [`Arch`] to
+/// [`crate::predict_decode_tps_with_kv`] to include it; when the architecture
+/// is unknown the KV term is omitted and the prediction is optimistic at
+/// large context sizes. `eta_mem` still absorbs kernel overhead and any
+/// residual per-token traffic.
 pub const BITS_PER_WEIGHT: [(Quant, f64); 4] = [
     (Quant::Fp16, 16.0),
     (Quant::Q8_0, 8.5008),
@@ -106,6 +108,90 @@ impl std::str::FromStr for Quant {
             other => Err(EstimateError::InvalidQuant(other.to_string())),
         }
     }
+}
+
+/// KV-cache shape of a known transformer architecture.
+///
+/// Only the fields that size the KV cache are carried: per layer the cache
+/// stores one K and one V tensor, each `n_kv_heads × head_dim` values. Values
+/// are pinned in [`ARCH_PRESETS`] and unit-tested, so a typo cannot silently
+/// skew the decode estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Arch {
+    /// Canonical preset name accepted by `--arch` (case-insensitive).
+    pub name: &'static str,
+    /// Number of transformer layers.
+    pub n_layer: u32,
+    /// Number of key/value heads (GQA/MQA), not the attention-head count.
+    pub n_kv_heads: u32,
+    /// Per-head dimension of K/V.
+    pub head_dim: u32,
+}
+
+/// Documented architecture presets.
+///
+/// Keep this list short and certain: every entry below is pinned by a unit
+/// test. To add one, verify all three values against the model's published
+/// `config.json` (`num_hidden_layers`, `num_key_value_heads`, `head_dim`),
+/// then extend this table and its test. The KV math is
+/// [`kv_bytes_per_token`].
+pub const ARCH_PRESETS: &[Arch] = &[
+    Arch {
+        name: "llama-3.1-8b",
+        // Llama-3.1-8B config.json: 32 layers, 8 KV heads, head_dim 128.
+        n_layer: 32,
+        n_kv_heads: 8,
+        head_dim: 128,
+    },
+    Arch {
+        name: "llama-3.1-70b",
+        // Llama-3.1-70B config.json: 80 layers, 8 KV heads, head_dim 128.
+        n_layer: 80,
+        n_kv_heads: 8,
+        head_dim: 128,
+    },
+    Arch {
+        name: "qwen2.5-7b",
+        // Qwen2.5-7B config.json: 28 layers, 4 KV heads, head_dim 128.
+        n_layer: 28,
+        n_kv_heads: 4,
+        head_dim: 128,
+    },
+];
+
+/// Resolve an `--arch` preset name, case-insensitively.
+///
+/// The error names the accepted presets so a typo is actionable.
+pub fn parse_arch(input: &str) -> Result<&'static Arch, EstimateError> {
+    let name = input.trim();
+    ARCH_PRESETS
+        .iter()
+        .find(|arch| arch.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            let known = ARCH_PRESETS
+                .iter()
+                .map(|arch| arch.name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            EstimateError::InvalidArch(format!("{name} (known: {known})"))
+        })
+}
+
+/// Bytes of KV cache read per generated token for `arch`, assuming f16 K/V.
+///
+/// ```text
+/// 2 (K + V) × n_layer × n_kv_heads × head_dim × 2 bytes (f16)
+/// ```
+///
+/// This is the per-token KV *read* that decode adds on top of the weights;
+/// multiply by the context length with [`kv_total_bytes`].
+pub fn kv_bytes_per_token(arch: &Arch) -> f64 {
+    2.0 * arch.n_layer as f64 * arch.n_kv_heads as f64 * arch.head_dim as f64 * 2.0
+}
+
+/// Total KV-cache bytes for a context of `ctx` tokens: per-token × ctx.
+pub fn kv_total_bytes(arch: &Arch, ctx: u32) -> f64 {
+    kv_bytes_per_token(arch) * ctx as f64
 }
 
 /// A parsed model description: parameter count plus weight format.
@@ -304,5 +390,56 @@ mod tests {
             quant: Quant::Fp16,
         };
         assert_eq!(spec.weight_bytes(), 14_000_000_000.0);
+    }
+
+    #[test]
+    fn arch_presets_pin_the_published_shapes() {
+        let llama_8b = parse_arch("llama-3.1-8b").expect("llama-3.1-8b");
+        assert_eq!(
+            (llama_8b.n_layer, llama_8b.n_kv_heads, llama_8b.head_dim),
+            (32, 8, 128)
+        );
+
+        let llama_70b = parse_arch("llama-3.1-70b").expect("llama-3.1-70b");
+        assert_eq!(
+            (llama_70b.n_layer, llama_70b.n_kv_heads, llama_70b.head_dim),
+            (80, 8, 128)
+        );
+
+        let qwen = parse_arch("qwen2.5-7b").expect("qwen2.5-7b");
+        assert_eq!((qwen.n_layer, qwen.n_kv_heads, qwen.head_dim), (28, 4, 128));
+    }
+
+    #[test]
+    fn arch_lookup_is_case_insensitive_and_rejects_unknown_names() {
+        assert_eq!(
+            parse_arch("Llama-3.1-70B").expect("mixed case").name,
+            "llama-3.1-70b"
+        );
+        assert_eq!(
+            parse_arch("  qwen2.5-7b  ").expect("trimmed").name,
+            "qwen2.5-7b"
+        );
+        let err = parse_arch("smollm2-135m").expect_err("unknown arch");
+        assert!(matches!(err, EstimateError::InvalidArch(_)), "got {err:?}");
+        let message = err.to_string();
+        assert!(message.contains("llama-3.1-8b"), "message: {message}");
+    }
+
+    #[test]
+    fn kv_bytes_follow_the_documented_formula() {
+        let llama_8b = parse_arch("llama-3.1-8b").expect("preset");
+        // 2 (K+V) × 32 × 8 × 128 × 2 bytes = 131_072 B/token (128 KiB).
+        assert_eq!(kv_bytes_per_token(llama_8b), 131_072.0);
+        assert_eq!(kv_total_bytes(llama_8b, 2048), 268_435_456.0);
+
+        let llama_70b = parse_arch("llama-3.1-70b").expect("preset");
+        // 2 × 80 × 8 × 128 × 2 = 327_680 B/token.
+        assert_eq!(kv_bytes_per_token(llama_70b), 327_680.0);
+
+        let qwen = parse_arch("qwen2.5-7b").expect("preset");
+        // 2 × 28 × 4 × 128 × 2 = 57_344 B/token.
+        assert_eq!(kv_bytes_per_token(qwen), 57_344.0);
+        assert_eq!(kv_total_bytes(qwen, 0), 0.0);
     }
 }

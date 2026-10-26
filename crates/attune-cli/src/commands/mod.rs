@@ -79,6 +79,11 @@ pub enum Command {
         /// Override the FP32 peak (decimal GFLOPS); skips the HAL estimate
         #[arg(long, value_name = "GFLOPS")]
         gflops: Option<f64>,
+        /// Architecture preset for KV-cache sizing: `llama-3.1-8b`,
+        /// `llama-3.1-70b` or `qwen2.5-7b`. Omit to exclude KV from the
+        /// decode prediction (a warning says so).
+        #[arg(long, value_name = "NAME")]
+        arch: Option<String>,
         /// Prompt/prefill token count used for TTFT (default 512)
         #[arg(long, value_name = "N", default_value_t = 512)]
         prompt_tokens: u64,
@@ -86,7 +91,7 @@ pub enum Command {
         /// slice 3 calibration output)
         #[arg(long, value_name = "N", default_value_t = 128)]
         gen_tokens: u64,
-        /// Context window size (default 2048; reserved for slice 3/4)
+        /// Context window size used for KV-cache sizing (default 2048)
         #[arg(long, value_name = "N", default_value_t = 2048)]
         ctx: u32,
         /// Saved `attune bench --json` report to calibrate against. Accepts
@@ -136,6 +141,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             bandwidth_gbps,
             spread_pct,
             gflops,
+            arch,
             prompt_tokens,
             gen_tokens,
             ctx,
@@ -148,6 +154,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             bandwidth_gbps,
             spread_pct,
             gflops,
+            arch.as_deref(),
             prompt_tokens,
             gen_tokens,
             ctx,

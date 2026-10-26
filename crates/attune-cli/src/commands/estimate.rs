@@ -27,10 +27,10 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
-    apply_decode, apply_prefill, classify, decode_ai, parse_params, parse_quants,
-    predict_prefill_ms, ridge_ai, spread_pct_from_stats, CalibratedInputs, CalibrationReport,
-    Confidence, EstimateError, EstimateInputs, EstimateReport, HwInputs, MultiEstimateReport,
-    Quant,
+    apply_decode, apply_prefill, classify, decode_ai, kv_bytes_per_token, parse_arch, parse_params,
+    parse_quants, predict_prefill_ms, ridge_ai, spread_pct_from_stats, CalibratedInputs,
+    CalibrationReport, Confidence, EstimateError, EstimateInputs, EstimateReport, HwInputs,
+    MultiEstimateReport, Quant, RamFit,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
@@ -51,6 +51,10 @@ struct ComputeResolution {
 /// baseline fallback.
 pub const CLOCK_FALLBACK_WARNING: &str =
     "clock unknown, assuming 1 GHz baseline — pass --gflops for real numbers";
+
+/// Notice attached when no `--arch` was supplied: the decode prediction then
+/// omits the KV-cache read, which is optimistic at large contexts.
+pub const KV_EXCLUDED_WARNING: &str = "KV excluded, unknown arch (pass --arch)";
 
 /// Peak from the 1 GHz baseline for CPUs whose clock is unknown but whose
 /// SIMD path is known. `None` when even the baseline yields nothing (no FMA
@@ -179,6 +183,41 @@ fn resolve_bandwidth(
     })
 }
 
+/// KV-cache traffic resolved from an optional `--arch` preset.
+struct KvResolution {
+    /// Bytes of KV cache read per generated token; 0 when unknown.
+    per_token: f64,
+    /// Notice explaining the omission, when no preset was supplied.
+    warning: Option<&'static str>,
+}
+
+/// Resolve `--arch` into a per-token KV size.
+///
+/// Omitting the flag is allowed but never silent: the decode prediction then
+/// ignores KV traffic and carries [`KV_EXCLUDED_WARNING`].
+fn resolve_kv(arch: Option<&str>) -> Result<KvResolution, EstimateError> {
+    match arch {
+        Some(name) => Ok(KvResolution {
+            per_token: kv_bytes_per_token(parse_arch(name)?),
+            warning: None,
+        }),
+        None => Ok(KvResolution {
+            per_token: 0.0,
+            warning: Some(KV_EXCLUDED_WARNING),
+        }),
+    }
+}
+
+/// Best-effort available RAM for the OOM check. `None` when the HAL cannot
+/// read it (0), in which case the report simply omits `ram_fit` rather than
+/// claiming an OOM from unknown numbers.
+fn detect_available_ram_bytes() -> Option<f64> {
+    attune_hal::memory::detect()
+        .ok()
+        .map(|memory| memory.available_bytes as f64)
+        .filter(|bytes| bytes.is_finite() && *bytes > 0.0)
+}
+
 /// Parse the text of a saved bench report.
 ///
 /// `attune bench --save` writes a bare [`BenchReport`] when it runs the
@@ -256,24 +295,34 @@ struct ReportContext<'a> {
     label: &'a str,
     params: u64,
     prompt_tokens: u64,
+    /// Context length used for KV sizing.
+    ctx: u32,
+    /// Bytes of KV cache read per generated token; 0 when `--arch` is absent.
+    kv_per_token: f64,
     hw: HwInputs,
     /// Max CPU clock behind `hw.flops_gflops`; 0.0 for an explicit override.
     clock_ghz: f64,
+    /// Available RAM for the OOM check, when detection succeeded.
+    ram_avail_bytes: Option<f64>,
     spread_pct: Option<f64>,
     spread_method: &'a str,
 }
 
 /// Build one config's report by calling the pure `attune-estimate` math.
 fn build_report(ctx: &ReportContext<'_>, quant: Quant) -> Result<EstimateReport, EstimateError> {
-    let decode_tps = ctx
-        .hw
-        .predict_decode_tps(ctx.params, quant.bytes_per_param())?;
+    let bytes_per_param = quant.bytes_per_param();
+    let decode_tps = ctx.hw.predict_decode_tps_with_kv(
+        ctx.params,
+        bytes_per_param,
+        ctx.kv_per_token,
+        ctx.ctx,
+    )?;
     let prefill_ms_ttft = predict_prefill_ms(ctx.params, ctx.prompt_tokens, ctx.hw.flops_gflops)?;
     let ai_star = ridge_ai(ctx.hw.flops_gflops, ctx.hw.bw_gbps)?;
-    let workload_ai = decode_ai(quant.bytes_per_param())?;
+    let workload_ai = decode_ai(bytes_per_param)?;
     let (bottleneck, margin_pct) = classify(workload_ai, ai_star);
 
-    let report = EstimateReport::new(ctx.label, quant, decode_tps)
+    let mut report = EstimateReport::new(ctx.label, quant, decode_tps)
         .with_inputs(EstimateInputs {
             bw_gbps: ctx.hw.bw_gbps,
             gflops: ctx.hw.flops_gflops,
@@ -282,6 +331,16 @@ fn build_report(ctx: &ReportContext<'_>, quant: Quant) -> Result<EstimateReport,
         .with_prefill_ms(prefill_ms_ttft)
         .with_ridge(ai_star, margin_pct)
         .with_bottleneck(bottleneck);
+
+    // Weights + KV must fit in RAM before tok/s means anything. Sizing lives
+    // in `attune-estimate`; the CLI only supplies the detected available RAM.
+    if let Some(avail_bytes) = ctx.ram_avail_bytes {
+        if let Some(ram_fit) =
+            RamFit::for_model(ctx.params, quant, ctx.kv_per_token, ctx.ctx, avail_bytes)
+        {
+            report = report.with_ram_fit(ram_fit);
+        }
+    }
 
     Ok(match ctx.spread_pct {
         Some(spread) => report
@@ -392,6 +451,16 @@ fn print_single(report: &EstimateReport, prompt_tokens: u64, clock_fallback: boo
         "Ridge:       {:.2} FLOP/byte ({:.1} GFLOPS / {:.1} GB/s)",
         ai_star, flops_gflops, bw_gbps,
     );
+    if let Some(fit) = report.ram_fit {
+        println!(
+            "RAM:         {:.1} GB needed (weights {:.1} + KV {:.1}), {:.1} GB available ({})",
+            fit.peak_bytes / 1e9,
+            fit.weight_bytes / 1e9,
+            fit.kv_bytes / 1e9,
+            fit.avail_bytes / 1e9,
+            if fit.fits { "fits" } else { "OOM" },
+        );
+    }
     print_warnings(report);
 }
 
@@ -466,15 +535,17 @@ pub fn run(
     bandwidth_gbps: Option<f64>,
     spread_pct: Option<f64>,
     gflops: Option<f64>,
+    arch: Option<&str>,
     prompt_tokens: u64,
     _gen_tokens: u64,
-    _ctx: u32,
+    ctx: u32,
     bench_json: Option<&Path>,
     calibrate: bool,
     json: bool,
 ) -> Result<()> {
     let params_count = parse_params(params)?;
     let quants = parse_quants(quant)?;
+    let kv = resolve_kv(arch)?;
 
     // Resolve the compute peak before the ~1 s bandwidth probe so a missing
     // theoretical peak fails fast.
@@ -492,19 +563,25 @@ pub fn run(
         bw_gbps: bandwidth.gbps,
         flops_gflops: compute.gflops,
     };
-    let ctx = ReportContext {
+    let context = ReportContext {
         label: params.trim(),
         params: params_count,
         prompt_tokens,
+        ctx,
+        kv_per_token: kv.per_token,
         hw,
         clock_ghz: compute.clock_ghz,
+        ram_avail_bytes: detect_available_ram_bytes(),
         spread_pct: bandwidth.spread_pct,
         spread_method: &bandwidth.method,
     };
 
     let mut reports = Vec::with_capacity(quants.len());
     for quant in quants {
-        let mut report = build_report(&ctx, quant)?;
+        let mut report = build_report(&context, quant)?;
+        if let Some(warning) = kv.warning {
+            report = report.with_warning(warning);
+        }
         if compute.clock_fallback {
             report = report.with_warning(CLOCK_FALLBACK_WARNING);
         }
@@ -673,11 +750,14 @@ mod tests {
             label: "135M",
             params: 135_000_000,
             prompt_tokens: 512,
+            ctx: 2048,
+            kv_per_token: 0.0,
             hw: HwInputs {
                 bw_gbps: 20.0,
                 flops_gflops: 50.0,
             },
             clock_ghz: 4.0,
+            ram_avail_bytes: None,
             spread_pct,
             spread_method,
         }
@@ -711,6 +791,75 @@ mod tests {
         // the loud --gflops error.
         assert_eq!(baseline_peak(8, &[]), None);
         assert_eq!(baseline_peak(0, &avx2), None);
+    }
+
+    #[test]
+    fn resolve_kv_uses_the_preset_or_warns_loudly() {
+        let known = resolve_kv(Some("llama-3.1-8b")).expect("known preset");
+        assert_eq!(known.per_token, 131_072.0);
+        assert_eq!(known.warning, None);
+
+        let unknown = resolve_kv(None).expect("omitting --arch is allowed");
+        assert_eq!(unknown.per_token, 0.0);
+        assert_eq!(unknown.warning, Some(KV_EXCLUDED_WARNING));
+
+        assert!(resolve_kv(Some("not-a-model")).is_err());
+    }
+
+    #[test]
+    fn build_report_includes_kv_and_lowers_raw_decode() {
+        let mut ctx = context(None, "unavailable: test");
+        ctx.kv_per_token = 38_400.0;
+
+        let report = build_report(&ctx, Quant::Q4_K_M).expect("report");
+        let bytes_per_param = Quant::Q4_K_M.bytes_per_param();
+        let weights_only = ctx
+            .hw
+            .predict_decode_tps(ctx.params, bytes_per_param)
+            .expect("weights-only prediction");
+        let expected = ctx
+            .hw
+            .predict_decode_tps_with_kv(ctx.params, bytes_per_param, ctx.kv_per_token, ctx.ctx)
+            .expect("kv prediction");
+
+        assert_eq!(report.decode_tps, expected);
+        assert!(
+            report.decode_tps < weights_only,
+            "KV must lower decode: {} vs {}",
+            report.decode_tps,
+            weights_only
+        );
+    }
+
+    #[test]
+    fn build_report_flags_oom_when_the_peak_exceeds_ram() {
+        let mut ctx = context(None, "unavailable: test");
+        ctx.params = 70_000_000_000;
+        ctx.kv_per_token = kv_bytes_per_token(parse_arch("llama-3.1-70b").expect("preset"));
+        ctx.ram_avail_bytes = Some(16e9);
+
+        let report = build_report(&ctx, Quant::Q4_K_M).expect("report");
+        let fit = report.ram_fit.expect("ram fit should be attached");
+        assert!(!fit.fits, "70B Q4 must not fit in 16 GB");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.starts_with("OOM:")),
+            "warnings: {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn build_report_marks_a_small_model_as_fitting() {
+        let mut ctx = context(None, "unavailable: test");
+        ctx.ram_avail_bytes = Some(16e9);
+
+        let report = build_report(&ctx, Quant::Q4_K_M).expect("report");
+        let fit = report.ram_fit.expect("ram fit should be attached");
+        assert!(fit.fits, "135M Q4 should fit in 16 GB");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
 
     #[test]

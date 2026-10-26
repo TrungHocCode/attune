@@ -10,6 +10,9 @@ pub enum EstimateError {
     /// The quantization label is not one of the supported names.
     #[error("invalid quantization: {0}")]
     InvalidQuant(String),
+    /// The architecture preset name is not one of the documented names.
+    #[error("invalid architecture: {0}")]
+    InvalidArch(String),
     /// A hardware input is missing, non-finite or non-positive.
     #[error("invalid hardware inputs: {0}")]
     BadHw(String),
