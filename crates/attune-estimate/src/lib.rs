@@ -26,8 +26,9 @@ pub use calibrate::{
 };
 pub use error::EstimateError;
 pub use model::{
-    kv_bytes_per_token, kv_total_bytes, parse_arch, parse_model, parse_params, parse_quants, Arch,
-    ModelEntry, ModelSpec, Quant, ARCH_PRESETS, BITS_PER_WEIGHT, MODEL_CATALOG,
+    kv_bytes_per_token, kv_total_bytes, parse_arch, parse_model, parse_params, parse_quants,
+    probe_gguf, probe_gguf_file, Arch, GgufFacts, GgufProbe, ModelEntry, ModelSpec, Quant,
+    ARCH_PRESETS, BITS_PER_WEIGHT, MAX_HEADER_BYTES, MODEL_CATALOG,
 };
 pub use prefill::{predict_prefill_ms, predict_prefill_ms_quant};
 pub use report::{

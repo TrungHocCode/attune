@@ -1,14 +1,18 @@
-//! Model-size and quantization parsing.
+//! Model-size, quantization and GGUF-header parsing.
 //!
-//! Everything here is pure: no allocation beyond the error strings, no I/O,
-//! no hardware access. The CLI feeds user text in and the roofline module
-//! consumes the resulting [`ModelSpec`].
+//! The catalog, quantization and architecture pieces are pure: no I/O and no
+//! hardware access. The [`gguf`] submodule is the one bounded exception — it
+//! reads at most [`gguf::MAX_HEADER_BYTES`] from a file to recover model facts.
+//! The CLI feeds user text in and the roofline module consumes the resulting
+//! [`ModelSpec`].
 
 use crate::EstimateError;
 
 pub mod catalog;
+pub mod gguf;
 
 pub use catalog::{parse_model, ModelEntry, MODEL_CATALOG};
+pub use gguf::{probe_gguf, probe_gguf_file, GgufFacts, GgufProbe, MAX_HEADER_BYTES};
 
 /// Supported weight formats. The JSON names are pinned explicitly so a
 /// future variant rename cannot silently change the report contract.

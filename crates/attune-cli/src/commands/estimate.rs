@@ -28,9 +28,9 @@ use anyhow::{anyhow, Context, Result};
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
     apply_decode, apply_prefill, clamped, classify, decode_ai, kv_bytes_per_token, parse_arch,
-    parse_model, parse_params, parse_quants, predict_prefill_ms_quant, ridge_ai,
+    parse_model, parse_params, parse_quants, predict_prefill_ms_quant, probe_gguf_file, ridge_ai,
     spread_pct_from_stats, CalibratedInputs, CalibrationReport, Confidence, EstimateError,
-    EstimateInputs, EstimateReport, HwInputs, MultiEstimateReport, Quant, RamFit,
+    EstimateInputs, EstimateReport, GgufProbe, HwInputs, MultiEstimateReport, Quant, RamFit,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
@@ -55,6 +55,10 @@ pub const CLOCK_FALLBACK_WARNING: &str =
 /// Notice attached when no `--arch` was supplied: the decode prediction then
 /// omits the KV-cache read, which is optimistic at large contexts.
 pub const KV_EXCLUDED_WARNING: &str = "KV excluded, unknown arch (pass --arch)";
+
+/// Notice attached when a probed GGUF has no usable attention head count, so
+/// the KV-cache shape cannot be derived from the header.
+pub const GGUF_KV_EXCLUDED_WARNING: &str = "KV excluded, GGUF has no usable attention head count";
 
 /// Peak from the 1 GHz baseline for CPUs whose clock is unknown but whose
 /// SIMD path is known. `None` when even the baseline yields nothing (no FMA
@@ -210,27 +214,71 @@ fn resolve_kv(arch: Option<&str>) -> Result<KvResolution, EstimateError> {
 
 /// Model inputs resolved from either `--model` or `--params` + `--arch`.
 struct ModelResolution<'a> {
-    /// Report label: catalog name or the literal `--params` text.
+    /// Report label: catalog name, GGUF path or the literal `--params` text.
     label: &'a str,
     /// Parameter count used for the weight footprint.
     params: u64,
     /// KV-cache traffic for the resolved architecture.
     kv: KvResolution,
+    /// Probe result when `--model` was a `.gguf` file path. Drives the
+    /// human-readable probe line and the catalog mismatch warning.
+    gguf: Option<GgufProbe>,
+}
+
+/// True when `--model` points at an existing `.gguf` file (case-insensitive
+/// extension), which is probed instead of being looked up as a catalog name.
+fn as_gguf_path(value: &str) -> Option<&Path> {
+    let path = Path::new(value.trim());
+    let is_gguf = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"));
+    (is_gguf && path.is_file()).then_some(path)
 }
 
 /// Resolve `--model` first, then fall back to `--params` + `--arch`.
 ///
-/// The catalog supplies the parameter count and the verified KV shape; the two
-/// flags stay the escape hatch for models outside it. Clap makes `--model`
-/// mutually exclusive with `--params` / `--arch`, so the paths cannot silently
-/// disagree. The catalog's `ctx_default` is deliberately not applied here yet:
-/// `--ctx` remains the context source until the wiring slice consumes it.
+/// An existing `.gguf` file is probed from its header: `general.parameter_count`
+/// supplies the size when present, otherwise a catalog entry inferred from the
+/// file name does. The file's KV shape wins over a catalog disagreement, which
+/// is recorded as a warning. Plain names keep the catalog path; the two flags
+/// stay the escape hatch for models outside both. Clap makes `--model` mutually
+/// exclusive with `--params` / `--arch`, so the paths cannot silently disagree.
+/// The catalog's `ctx_default` is deliberately not applied here yet: `--ctx`
+/// remains the context source until the wiring slice consumes it.
 fn resolve_model<'a>(
     model: Option<&'a str>,
     params: Option<&'a str>,
     arch: Option<&str>,
 ) -> Result<ModelResolution<'a>> {
     if let Some(name) = model {
+        if let Some(path) = as_gguf_path(name) {
+            let probe = probe_gguf_file(path)
+                .map_err(|err| anyhow!("failed to probe {}: {err}", path.display()))?;
+            let params = probe.params().ok_or_else(|| {
+                anyhow!(
+                    "{} has no general.parameter_count and no catalog match; use --params <SIZE> --arch <NAME> instead of --model",
+                    path.display()
+                )
+            })?;
+            let kv = match probe.arch {
+                Some(arch) => KvResolution {
+                    per_token: kv_bytes_per_token(&arch),
+                    warning: None,
+                },
+                None => KvResolution {
+                    per_token: 0.0,
+                    warning: Some(GGUF_KV_EXCLUDED_WARNING),
+                },
+            };
+            return Ok(ModelResolution {
+                label: name,
+                params,
+                kv,
+                gguf: Some(probe),
+            });
+        }
+
         let entry = parse_model(name).map_err(|err| {
             anyhow!("{err}; pass --params <SIZE> --arch <NAME> for a model outside the catalog")
         })?;
@@ -241,6 +289,7 @@ fn resolve_model<'a>(
                 per_token: kv_bytes_per_token(&entry.arch),
                 warning: None,
             },
+            gguf: None,
         });
     }
 
@@ -249,6 +298,7 @@ fn resolve_model<'a>(
         label: params.trim(),
         params: parse_params(params)?,
         kv: resolve_kv(arch)?,
+        gguf: None,
     })
 }
 
@@ -467,6 +517,39 @@ fn format_peak(gflops: f64, clock_ghz: f64, clock_fallback: bool) -> String {
     }
 }
 
+/// Compact parameter label for the probe line (`135M`, `8.03B`, …).
+fn format_params(params: u64) -> String {
+    if params >= 1_000_000_000 {
+        format!("{:.2}B", params as f64 / 1_000_000_000.0)
+    } else if params >= 1_000_000 {
+        format!("{:.0}M", params as f64 / 1_000_000.0)
+    } else {
+        params.to_string()
+    }
+}
+
+/// Human-readable summary of a probed GGUF header.
+///
+/// Shows the facts the file won with; `(catalog)` marks a parameter count that
+/// came from the catalog because the file did not store
+/// `general.parameter_count`.
+fn print_probe(probe: &GgufProbe, params: u64) {
+    let facts = &probe.facts;
+    let source = if facts.param_estimate == 0 {
+        " (catalog)"
+    } else {
+        ""
+    };
+    println!(
+        "Probed:      {} | {} blocks | {} KV heads | {} params{}",
+        facts.architecture,
+        facts.block_count,
+        facts.n_kv_heads,
+        format_params(params),
+        source,
+    );
+}
+
 /// Existing single-config human output. Interval lines are only added when a
 /// measured spread produced bounds, so the no-spread output is unchanged.
 /// Warnings print last so a degraded input is impossible to miss.
@@ -629,6 +712,7 @@ pub fn run(
         label,
         params: params_count,
         kv,
+        gguf,
     } = resolve_model(model, params, arch)?;
     let quants = parse_quants(quant)?;
     // The bench's own quant is only known when the user states it; without
@@ -670,6 +754,11 @@ pub fn run(
     let mut reports = Vec::with_capacity(quants.len());
     for quant in quants {
         let mut report = build_report(&context, quant)?;
+        if let Some(probe) = gguf.as_ref() {
+            if let Some(warning) = probe.warning.as_deref() {
+                report = report.with_warning(warning);
+            }
+        }
         if let Some(warning) = kv.warning {
             report = report.with_warning(warning);
         }
@@ -704,6 +793,9 @@ pub fn run(
         return Ok(());
     }
 
+    if let Some(probe) = gguf.as_ref() {
+        print_probe(probe, params_count);
+    }
     if let [report] = reports.as_slice() {
         print_single(report, prompt_tokens, compute.clock_fallback);
     } else {
@@ -718,6 +810,94 @@ mod tests {
 
     use attune_bench::bandwidth::{FullBandwidthResult, KernelStats, ReadResult};
     use attune_bench::e2e::E2eResult;
+
+    const TYPE_STRING: u32 = 8;
+    const TYPE_UINT32: u32 = 4;
+    const TYPE_UINT64: u32 = 10;
+
+    fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_string(bytes: &mut Vec<u8>, value: &str) {
+        push_u64(bytes, value.len() as u64);
+        bytes.extend_from_slice(value.as_bytes());
+    }
+
+    fn push_key(bytes: &mut Vec<u8>, key: &str, value_type: u32) {
+        push_string(bytes, key);
+        push_u32(bytes, value_type);
+    }
+
+    /// Build a fake GGUF header (no tensor payload) for the CLI tests.
+    fn fake_gguf(
+        architecture: &str,
+        block_count: u32,
+        embedding_length: u32,
+        head_count: u32,
+        kv_heads: Option<u32>,
+        params: Option<u64>,
+    ) -> Vec<u8> {
+        let kv_count =
+            4 + if kv_heads.is_some() { 1 } else { 0 } + if params.is_some() { 1 } else { 0 };
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"GGUF");
+        push_u32(&mut bytes, 3);
+        push_u64(&mut bytes, 0); // tensor_count
+        push_u64(&mut bytes, kv_count);
+
+        push_key(&mut bytes, "general.architecture", TYPE_STRING);
+        push_string(&mut bytes, architecture);
+        push_key(
+            &mut bytes,
+            &format!("{architecture}.block_count"),
+            TYPE_UINT32,
+        );
+        push_u32(&mut bytes, block_count);
+        push_key(
+            &mut bytes,
+            &format!("{architecture}.embedding_length"),
+            TYPE_UINT32,
+        );
+        push_u32(&mut bytes, embedding_length);
+        push_key(
+            &mut bytes,
+            &format!("{architecture}.attention.head_count"),
+            TYPE_UINT32,
+        );
+        push_u32(&mut bytes, head_count);
+        if let Some(kv_heads) = kv_heads {
+            push_key(
+                &mut bytes,
+                &format!("{architecture}.attention.head_count_kv"),
+                TYPE_UINT32,
+            );
+            push_u32(&mut bytes, kv_heads);
+        }
+        if let Some(params) = params {
+            push_key(&mut bytes, "general.parameter_count", TYPE_UINT64);
+            push_u64(&mut bytes, params);
+        }
+        bytes
+    }
+
+    fn write_temp_gguf(tag: &str, name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("attune-cli-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).expect("write fake GGUF");
+        path
+    }
+
+    fn cleanup_temp_gguf(path: &Path) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 
     /// Canned bench report with an e2e block — no real JSON file is committed.
     fn bench_with_e2e(tok_s: f64, ttft_ms: f64) -> BenchReport {
@@ -1063,6 +1243,68 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("not-a-model"), "message: {message}");
         assert!(message.contains("--params"), "message: {message}");
+    }
+
+    #[test]
+    fn resolve_model_probes_a_gguf_file_without_params() {
+        let bytes = fake_gguf("llama", 36, 4096, 32, Some(8), Some(8_200_000_000));
+        let path = write_temp_gguf("probe", "local-model.gguf", &bytes);
+        let name = path.to_str().expect("temp path is UTF-8");
+
+        let resolved = resolve_model(Some(name), None, None).expect("GGUF file should resolve");
+        assert_eq!(resolved.label, name);
+        assert_eq!(resolved.params, 8_200_000_000);
+        // 2 (K+V) × 36 layers × 8 KV heads × (4096/32) × 2 bytes.
+        assert_eq!(resolved.kv.per_token, 2.0 * 36.0 * 8.0 * 128.0 * 2.0);
+        assert_eq!(resolved.kv.warning, None);
+
+        let probe = resolved.gguf.as_ref().expect("probe result");
+        assert_eq!(probe.facts.architecture, "llama");
+        assert_eq!(probe.facts.block_count, 36);
+        assert_eq!(probe.facts.n_kv_heads, 8);
+        assert_eq!(probe.warning, None);
+        cleanup_temp_gguf(&path);
+    }
+
+    #[test]
+    fn resolve_model_file_mismatch_warns_and_file_wins() {
+        // No `general.parameter_count`: the catalog supplies 8.03B, while the
+        // file says 36 layers against the catalog's 32.
+        let bytes = fake_gguf("llama", 36, 4096, 32, Some(8), None);
+        let path = write_temp_gguf("mismatch", "llama-3.1-8b.gguf", &bytes);
+        let name = path.to_str().expect("temp path is UTF-8");
+
+        let resolved = resolve_model(Some(name), None, None).expect("GGUF file should resolve");
+        assert_eq!(resolved.params, 8_030_000_000);
+        assert_eq!(
+            resolved
+                .gguf
+                .as_ref()
+                .and_then(|probe| probe.warning.as_deref()),
+            Some("catalog says 32 layers, file has 36")
+        );
+        // The file's 36 layers drive the KV size, not the catalog's 32.
+        assert_eq!(resolved.kv.per_token, 2.0 * 36.0 * 8.0 * 128.0 * 2.0);
+        cleanup_temp_gguf(&path);
+    }
+
+    #[test]
+    fn resolve_model_corrupt_gguf_is_a_clean_error() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"NOPE");
+        push_u32(&mut bytes, 3);
+        push_u64(&mut bytes, 0);
+        push_u64(&mut bytes, 0);
+        let path = write_temp_gguf("corrupt", "bad.gguf", &bytes);
+        let name = path.to_str().expect("temp path is UTF-8");
+
+        let err = resolve_model(Some(name), None, None)
+            .err()
+            .expect("corrupt header must fail");
+        let message = err.to_string();
+        assert!(message.contains("failed to probe"), "message: {message}");
+        assert!(message.contains("magic"), "message: {message}");
+        cleanup_temp_gguf(&path);
     }
 
     #[test]
