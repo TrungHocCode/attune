@@ -21,7 +21,9 @@ pub mod report;
 pub mod roofline;
 
 pub use bottleneck::{classify, decode_ai, prefill_ai, ridge_ai};
-pub use calibrate::{apply_decode, apply_prefill, fit_eta, CalibratedInputs, MAX_ETA, MIN_ETA};
+pub use calibrate::{
+    apply_decode, apply_prefill, clamped, fit_eta, CalibratedInputs, MAX_ETA, MIN_ETA,
+};
 pub use error::EstimateError;
 pub use model::{
     kv_bytes_per_token, kv_total_bytes, parse_arch, parse_params, parse_quants, Arch, ModelSpec,

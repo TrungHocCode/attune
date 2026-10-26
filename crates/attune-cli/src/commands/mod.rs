@@ -104,6 +104,11 @@ pub enum Command {
         /// contain an `e2e` block with a measured tok/s)
         #[arg(long, requires = "bench_json")]
         calibrate: bool,
+        /// Weight format the `--bench-json` run measured (e.g. `q4_k_m`).
+        /// The bench report carries no quant, so without this flag no
+        /// cross-quant warning can be produced. Used only with `--calibrate`.
+        #[arg(long, value_name = "QUANT", requires = "bench_json")]
+        bench_quant: Option<String>,
         /// Output machine-readable JSON instead of the human lines
         #[arg(long)]
         json: bool,
@@ -147,6 +152,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             ctx,
             bench_json,
             calibrate,
+            bench_quant,
             json,
         } => estimate::run(
             &params,
@@ -159,6 +165,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             gen_tokens,
             ctx,
             bench_json.as_deref(),
+            bench_quant.as_deref(),
             calibrate,
             json,
         ),

@@ -27,10 +27,10 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
-    apply_decode, apply_prefill, classify, decode_ai, kv_bytes_per_token, parse_arch, parse_params,
-    parse_quants, predict_prefill_ms_quant, ridge_ai, spread_pct_from_stats, CalibratedInputs,
-    CalibrationReport, Confidence, EstimateError, EstimateInputs, EstimateReport, HwInputs,
-    MultiEstimateReport, Quant, RamFit,
+    apply_decode, apply_prefill, clamped, classify, decode_ai, kv_bytes_per_token, parse_arch,
+    parse_params, parse_quants, predict_prefill_ms_quant, ridge_ai, spread_pct_from_stats,
+    CalibratedInputs, CalibrationReport, Confidence, EstimateError, EstimateInputs, EstimateReport,
+    HwInputs, MultiEstimateReport, Quant, RamFit,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
@@ -245,11 +245,21 @@ fn load_bench_report(path: &Path) -> Result<BenchReport> {
 /// (see [`CalibratedInputs::fit`]). A missing or unusable `e2e` block is an
 /// expected condition and returns [`EstimateError::CalibrationUnavailable`] —
 /// never a panic.
+///
+/// Cross-workload application is allowed but loud: `bench_quant` (the format
+/// the bench measured, when the user passes `--bench-quant`) and the bench's
+/// prompt length are compared against this estimate, and any mismatch — or
+/// an eta sitting exactly on a clamp bound — becomes a `warnings` entry
+/// instead of a silent mis-calibration.
+#[allow(clippy::too_many_arguments)]
 fn calibrate_with_bench(
     bench: &BenchReport,
     roofline_decode_tps: f64,
     roofline_prefill_ms: f64,
     path: &Path,
+    bench_quant: Option<Quant>,
+    estimate_quant: Quant,
+    estimate_prompt_tokens: u64,
 ) -> Result<CalibrationReport, EstimateError> {
     let e2e = bench.e2e.as_ref().ok_or_else(|| {
         EstimateError::CalibrationUnavailable(format!(
@@ -281,12 +291,31 @@ fn calibrate_with_bench(
     let calibrated_prefill_ms_ttft =
         measured_ttft_ms.map(|_| apply_prefill(roofline_prefill_ms, inputs.eta_comp));
 
+    let mut warnings = Vec::new();
+    if let Some(bench_quant) = bench_quant {
+        if bench_quant != estimate_quant {
+            warnings.push(format!(
+                "eta from {bench_quant} applied to {estimate_quant}"
+            ));
+        }
+    }
+    if e2e.prompt_tokens != estimate_prompt_tokens {
+        warnings.push(format!(
+            "prompt mismatch {} vs {}",
+            e2e.prompt_tokens, estimate_prompt_tokens
+        ));
+    }
+    if clamped(inputs.eta_mem) || (measured_ttft_ms.is_some() && clamped(inputs.eta_comp)) {
+        warnings.push("eta clamped, unreliable".to_string());
+    }
+
     Ok(CalibrationReport {
         inputs,
         measured_decode_tps: e2e.tok_s,
         calibrated_decode_tps,
         measured_ttft_ms,
         calibrated_prefill_ms_ttft,
+        warnings,
     })
 }
 
@@ -465,10 +494,16 @@ fn print_single(report: &EstimateReport, prompt_tokens: u64, clock_fallback: boo
     print_warnings(report);
 }
 
-/// Print the report's non-fatal notices, if any.
+/// Print the report's non-fatal notices, if any — report-level first, then
+/// the calibration block's (same strings as the JSON `warnings` fields).
 fn print_warnings(report: &EstimateReport) {
     for warning in &report.warnings {
         println!("Warning:     {warning}");
+    }
+    if let Some(calibration) = report.calibration.as_ref() {
+        for warning in &calibration.warnings {
+            println!("Warning:     {warning}");
+        }
     }
 }
 
@@ -541,12 +576,19 @@ pub fn run(
     _gen_tokens: u64,
     ctx: u32,
     bench_json: Option<&Path>,
+    bench_quant: Option<&str>,
     calibrate: bool,
     json: bool,
 ) -> Result<()> {
     let params_count = parse_params(params)?;
     let quants = parse_quants(quant)?;
     let kv = resolve_kv(arch)?;
+    // The bench's own quant is only known when the user states it; without
+    // the flag no quant-mismatch warning can be produced (and none is).
+    let bench_quant = bench_quant
+        .map(str::parse::<Quant>)
+        .transpose()
+        .map_err(|e: EstimateError| anyhow!("{e}"))?;
 
     // Resolve the compute peak before the ~1 s bandwidth probe so a missing
     // theoretical peak fails fast.
@@ -598,6 +640,9 @@ pub fn run(
                 report.decode_tps,
                 report.prefill_ms_ttft.unwrap_or(0.0),
                 path,
+                bench_quant,
+                quant,
+                prompt_tokens,
             )?;
             report = report.with_calibration(calibration);
         }
@@ -691,9 +736,16 @@ mod tests {
     #[test]
     fn calibration_fixture_matches_measured_by_construction() {
         let bench = bench_with_e2e(55.6, 120.0);
-        let calibration = calibrate_with_bench(&bench, 246.9, 2764.8, Path::new("bench.json"))
-            .expect("calibration should succeed");
-
+        let calibration = calibrate_with_bench(
+            &bench,
+            246.9,
+            2764.8,
+            Path::new("bench.json"),
+            None,
+            Quant::Q4_K_M,
+            128,
+        )
+        .expect("calibration should succeed");
         // 55.6 / 246.9 = 0.22519…
         assert!(
             (calibration.inputs.eta_mem - 0.225).abs() < 0.001,
@@ -711,14 +763,113 @@ mod tests {
         assert_eq!(calibration.inputs.eta_comp, attune_estimate::MAX_ETA);
         assert_eq!(calibration.measured_ttft_ms, Some(120.0));
         assert!(calibration.calibrated_prefill_ms_ttft.is_some());
+        // The clamped prefill eta must warn (bench prompt 128 matches the
+        // estimate prompt here, so clamping is the only warning).
+        assert_eq!(
+            calibration.warnings,
+            vec!["eta clamped, unreliable".to_string()]
+        );
+    }
+
+    #[test]
+    fn matching_workload_calibrates_without_warnings() {
+        // eta_mem = 55.6/246.9 ≈ 0.225 (unclamped); eta_comp neutral via
+        // missing TTFT, so nothing is clamped and prompts match (128).
+        let bench = bench_with_e2e(55.6, 0.0);
+        let calibration = calibrate_with_bench(
+            &bench,
+            246.9,
+            2764.8,
+            Path::new("bench.json"),
+            None,
+            Quant::Q4_K_M,
+            128,
+        )
+        .expect("calibration should succeed");
+        assert!(
+            calibration.warnings.is_empty(),
+            "got {:?}",
+            calibration.warnings
+        );
+    }
+
+    #[test]
+    fn quant_mismatch_warns_but_still_calibrates() {
+        let bench = bench_with_e2e(55.6, 120.0);
+        let calibration = calibrate_with_bench(
+            &bench,
+            246.9,
+            2764.8,
+            Path::new("bench.json"),
+            Some(Quant::Q4_K_M),
+            Quant::Fp16,
+            128,
+        )
+        .expect("mismatch must warn, not fail");
+        assert!(
+            calibration
+                .warnings
+                .iter()
+                .any(|w| w == "eta from q4_k_m applied to fp16"),
+            "got {:?}",
+            calibration.warnings
+        );
+        // Same quant on both sides: no quant warning (clamp warning may
+        // still apply — here eta_comp is clamped, so exactly one remains).
+        let same = calibrate_with_bench(
+            &bench,
+            246.9,
+            2764.8,
+            Path::new("bench.json"),
+            Some(Quant::Q4_K_M),
+            Quant::Q4_K_M,
+            128,
+        )
+        .expect("same quant should succeed");
+        assert!(
+            !same.warnings.iter().any(|w| w.contains("applied to")),
+            "got {:?}",
+            same.warnings
+        );
+    }
+
+    #[test]
+    fn prompt_mismatch_warns_with_both_lengths() {
+        let bench = bench_with_e2e(55.6, 120.0);
+        let calibration = calibrate_with_bench(
+            &bench,
+            246.9,
+            2764.8,
+            Path::new("bench.json"),
+            None,
+            Quant::Q4_K_M,
+            512,
+        )
+        .expect("mismatch must warn, not fail");
+        assert!(
+            calibration
+                .warnings
+                .iter()
+                .any(|w| w == "prompt mismatch 128 vs 512"),
+            "got {:?}",
+            calibration.warnings
+        );
     }
 
     #[test]
     fn missing_e2e_block_is_a_clean_error() {
         let mut bench = bench_with_e2e(55.6, 120.0);
         bench.e2e = None;
-        let err = calibrate_with_bench(&bench, 246.9, 2764.8, Path::new("bench.json"))
-            .expect_err("missing e2e must be an error");
+        let err = calibrate_with_bench(
+            &bench,
+            246.9,
+            2764.8,
+            Path::new("bench.json"),
+            None,
+            Quant::Q4_K_M,
+            128,
+        )
+        .expect_err("missing e2e must be an error");
         assert!(
             matches!(err, EstimateError::CalibrationUnavailable(_)),
             "got {err:?}"
@@ -728,8 +879,16 @@ mod tests {
     #[test]
     fn zero_decode_rate_is_a_clean_error() {
         let bench = bench_with_e2e(0.0, 120.0);
-        let err = calibrate_with_bench(&bench, 246.9, 2764.8, Path::new("bench.json"))
-            .expect_err("zero tok/s must be an error");
+        let err = calibrate_with_bench(
+            &bench,
+            246.9,
+            2764.8,
+            Path::new("bench.json"),
+            None,
+            Quant::Q4_K_M,
+            128,
+        )
+        .expect_err("zero tok/s must be an error");
         assert!(
             matches!(err, EstimateError::CalibrationUnavailable(_)),
             "got {err:?}"
@@ -739,8 +898,16 @@ mod tests {
     #[test]
     fn missing_ttft_only_skips_prefill_calibration() {
         let bench = bench_with_e2e(55.6, 0.0);
-        let calibration = calibrate_with_bench(&bench, 246.9, 2764.8, Path::new("bench.json"))
-            .expect("decode-only calibration should succeed");
+        let calibration = calibrate_with_bench(
+            &bench,
+            246.9,
+            2764.8,
+            Path::new("bench.json"),
+            None,
+            Quant::Q4_K_M,
+            128,
+        )
+        .expect("decode-only calibration should succeed");
         assert_eq!(calibration.inputs.eta_comp, 1.0);
         assert_eq!(calibration.measured_ttft_ms, None);
         assert_eq!(calibration.calibrated_prefill_ms_ttft, None);
