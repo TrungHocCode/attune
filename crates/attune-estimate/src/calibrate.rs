@@ -105,6 +105,17 @@ pub fn fit_eta(predicted: f64, measured: f64) -> Result<f64, EstimateError> {
     Ok((measured / predicted).clamp(MIN_ETA, MAX_ETA))
 }
 
+/// Whether a fitted eta sits exactly on a clamp bound, meaning the raw
+/// ratio fell outside [`MIN_ETA`]..=[`MAX_ETA`].
+///
+/// An exact-bound eta is measure-zero for a genuine fit, so callers treat
+/// it as "clamped, unreliable" and warn rather than silently trusting it.
+/// (A truly broken measurement that lands exactly on the bound warns too —
+/// harmless, since such a calibration deserves scrutiny anyway.)
+pub fn clamped(eta: f64) -> bool {
+    eta.is_finite() && (eta == MIN_ETA || eta == MAX_ETA)
+}
+
 /// Scale a decode throughput prediction by `eta_mem`.
 ///
 /// Returns `0.0` for non-finite inputs instead of leaking `NaN` into a report.
@@ -232,6 +243,16 @@ mod tests {
                 "measured {measured} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn clamped_flags_exact_bounds_only() {
+        assert!(clamped(MIN_ETA));
+        assert!(clamped(MAX_ETA));
+        assert!(!clamped(0.42));
+        assert!(!clamped(1.0));
+        assert!(!clamped(f64::NAN));
+        assert!(!clamped(f64::INFINITY));
     }
 
     #[test]

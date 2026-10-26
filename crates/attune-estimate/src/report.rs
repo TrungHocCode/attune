@@ -51,6 +51,11 @@ pub struct CalibrationReport {
     /// Roofline prefill latency divided by `eta_comp`, in milliseconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calibrated_prefill_ms_ttft: Option<f64>,
+    /// Non-fatal cross-workload notices (quant/prompt mismatch, clamped
+    /// eta). Empty when the bench workload matches the estimate; omitted
+    /// from JSON then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// How much trust to put in the prediction interval (M3 slice 4).
@@ -653,6 +658,7 @@ mod tests {
             calibrated_decode_tps: 55.5525,
             measured_ttft_ms: Some(120.0),
             calibrated_prefill_ms_ttft: Some(5529.6),
+            warnings: vec!["eta from q4 applied to fp16".to_string()],
         });
         let json = serde_json::to_string(&report).expect("serialize EstimateReport");
         for key in [
@@ -663,6 +669,7 @@ mod tests {
             "calibrated_decode_tps",
             "measured_ttft_ms",
             "calibrated_prefill_ms_ttft",
+            "warnings",
         ] {
             assert!(
                 json.contains(&format!("\"{key}\"")),
