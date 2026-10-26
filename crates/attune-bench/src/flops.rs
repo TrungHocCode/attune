@@ -100,8 +100,8 @@ pub struct FlopsResult {
     pub threads: usize,
     /// Timed passes (warm-up excluded).
     pub reps: usize,
-    /// Theoretical FP32 peak in GFLOPS for the detected cores × SIMD path
-    /// at a 1 GHz baseline. 0.0 = unknown (caller renders this as
+    /// Theoretical FP32 peak in GFLOPS for the detected cores × SIMD path ×
+    /// max CPU clock. 0.0 = unknown (caller renders this as
     /// `"theoretical: unknown"`).
     pub theoretical_gflops: f64,
     /// 0.0 when `theoretical_gflops` is 0.0 / invalid; otherwise
@@ -247,7 +247,8 @@ pub fn measure_flops(cfg: &FlopsConfig) -> Result<FlopsResult, BenchError> {
 
     let median = median_f64(&mut samples);
     let best = samples.iter().copied().fold(0.0_f64, f64::max);
-    let theoretical = theoretical_fp32_gflops(hw.cpu.physical_cores, &hw.cpu.simd_flags);
+    let theoretical =
+        theoretical_fp32_gflops(hw.cpu.physical_cores, &hw.cpu.simd_flags, hw.cpu.clock_ghz);
     let pct = pct_of_theoretical(median, theoretical);
 
     Ok(FlopsResult {
