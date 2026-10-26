@@ -160,6 +160,11 @@ pub struct EstimateInputs {
     /// FP32 peak in decimal GFLOPS.
     #[serde(default)]
     pub gflops: f64,
+    /// Max CPU clock in GHz used to derive `gflops`. 0.0 when the caller
+    /// supplied an explicit peak or the clock could not be detected.
+    /// `serde(default)` keeps older report JSON without this field parseable.
+    #[serde(default)]
+    pub clock_ghz: f64,
 }
 
 /// One `attune estimate` result.
@@ -356,6 +361,7 @@ mod tests {
             .with_inputs(EstimateInputs {
                 bw_gbps: 20.0,
                 gflops: 50.0,
+                clock_ghz: 4.0,
             })
             .with_prefill_ms(2764.8)
             .with_ridge(2.5, 33.333_333)
@@ -365,7 +371,9 @@ mod tests {
         assert_eq!(report.prefill_ms_ttft, Some(2764.8));
         assert_eq!(report.ridge_ai, Some(2.5));
         assert_eq!(report.margin_pct, Some(33.333_333));
-        assert_eq!(report.inputs.expect("inputs").bw_gbps, 20.0);
+        let inputs = report.inputs.expect("inputs");
+        assert_eq!(inputs.bw_gbps, 20.0);
+        assert_eq!(inputs.clock_ghz, 4.0);
     }
 
     #[test]
@@ -402,6 +410,7 @@ mod tests {
             .with_inputs(EstimateInputs {
                 bw_gbps: 20.0,
                 gflops: 50.0,
+                clock_ghz: 4.0,
             })
             .with_prefill_ms(2764.8)
             .with_ridge(2.5, 33.333_333);
@@ -413,6 +422,7 @@ mod tests {
             "inputs",
             "bw_gbps",
             "gflops",
+            "clock_ghz",
         ] {
             assert!(
                 json.contains(&format!("\"{key}\"")),
@@ -448,6 +458,26 @@ mod tests {
         assert_eq!(back.inputs, None);
         assert_eq!(back.calibration, None);
         assert_eq!(back.confidence, None);
+    }
+
+    #[test]
+    fn slice_two_inputs_without_clock_still_parse() {
+        // Slice-2/3 reports had `inputs` without `clock_ghz`; the new field
+        // must default to 0.0 so those documents keep loading.
+        let old_json = r#"{
+            "schema": "attune-estimate/1",
+            "model": "135M",
+            "quant": "q4_k_m",
+            "decode_tps": 246.91358,
+            "bottleneck": "memory_bandwidth",
+            "inputs": { "bw_gbps": 20.0, "gflops": 50.0 }
+        }"#;
+        let back: EstimateReport =
+            serde_json::from_str(old_json).expect("deserialize pre-clock JSON");
+        let inputs = back.inputs.expect("inputs");
+        assert_eq!(inputs.bw_gbps, 20.0);
+        assert_eq!(inputs.gflops, 50.0);
+        assert_eq!(inputs.clock_ghz, 0.0);
     }
 
     #[test]

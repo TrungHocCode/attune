@@ -34,19 +34,34 @@ use attune_estimate::{
 };
 use attune_hal::HardwareInfo;
 
-/// Resolve the FP32 peak: explicit override first, then the HAL's theoretical
-/// estimate, then a clean error that names the fix.
-fn resolve_gflops(gflops: Option<f64>) -> Result<f64> {
+/// Resolved FP32 peak plus the detected max clock it came from.
+struct ComputeResolution {
+    gflops: f64,
+    /// Max CPU clock in GHz, or 0.0 when the user supplied `--gflops` (the
+    /// override skips detection) or no clock could be read.
+    clock_ghz: f64,
+}
+
+/// Resolve the FP32 peak: explicit override first, then the HAL estimate
+/// (cores × SIMD path × detected max clock), then a clean error that names
+/// the fix.
+fn resolve_compute(gflops: Option<f64>) -> Result<ComputeResolution> {
     match gflops {
-        Some(value) => Ok(value),
+        Some(value) => Ok(ComputeResolution {
+            gflops: value,
+            clock_ghz: 0.0,
+        }),
         None => {
             let hw = HardwareInfo::detect()?;
             let theoretical = hw.cpu.theoretical_fp32_gflops;
             if theoretical.is_finite() && theoretical > 0.0 {
-                Ok(theoretical)
+                Ok(ComputeResolution {
+                    gflops: theoretical,
+                    clock_ghz: hw.cpu.clock_ghz,
+                })
             } else {
                 Err(anyhow!(
-                    "this CPU exposes no theoretical FP32 peak; pass --gflops <GFLOPS>"
+                    "cannot derive an FP32 peak from this CPU (unknown clock or no FMA SIMD path); pass --gflops <GFLOPS>"
                 ))
             }
         }
@@ -215,6 +230,8 @@ struct ReportContext<'a> {
     params: u64,
     prompt_tokens: u64,
     hw: HwInputs,
+    /// Max CPU clock behind `hw.flops_gflops`; 0.0 for an explicit override.
+    clock_ghz: f64,
     spread_pct: Option<f64>,
     spread_method: &'a str,
 }
@@ -233,6 +250,7 @@ fn build_report(ctx: &ReportContext<'_>, quant: Quant) -> Result<EstimateReport,
         .with_inputs(EstimateInputs {
             bw_gbps: ctx.hw.bw_gbps,
             gflops: ctx.hw.flops_gflops,
+            clock_ghz: ctx.clock_ghz,
         })
         .with_prefill_ms(prefill_ms_ttft)
         .with_ridge(ai_star, margin_pct)
@@ -275,11 +293,22 @@ fn format_interval(value: f64, lo: Option<f64>, hi: Option<f64>) -> String {
     }
 }
 
+/// Human-readable peak line. A non-zero clock means the HAL derived the
+/// GFLOPS from the detected max clock; 0.0 means the user passed `--gflops`.
+fn format_peak(gflops: f64, clock_ghz: f64) -> String {
+    if clock_ghz.is_finite() && clock_ghz > 0.0 {
+        format!("{gflops:.1} GFLOPS @ {clock_ghz:.2} GHz max")
+    } else {
+        format!("{gflops:.1} GFLOPS (explicit --gflops)")
+    }
+}
+
 /// Existing single-config human output. Interval lines are only added when a
 /// measured spread produced bounds, so the no-spread output is unchanged.
 fn print_single(report: &EstimateReport, prompt_tokens: u64) {
     let bw_gbps = report.inputs.map_or(0.0, |inputs| inputs.bw_gbps);
     let flops_gflops = report.inputs.map_or(0.0, |inputs| inputs.gflops);
+    let clock_ghz = report.inputs.map_or(0.0, |inputs| inputs.clock_ghz);
     let ai_star = report.ridge_ai.unwrap_or(0.0);
     let margin_pct = report.margin_pct.unwrap_or(0.0);
     let workload_ai = decode_ai(report.quant.bytes_per_param()).unwrap_or(0.0);
@@ -323,6 +352,7 @@ fn print_single(report: &EstimateReport, prompt_tokens: u64) {
         "Bottleneck:  {} (decode AI {:.2} vs ridge {:.2} FLOP/byte, {:.1}% off)",
         report.bottleneck, workload_ai, ai_star, margin_pct,
     );
+    println!("Peak:        {}", format_peak(flops_gflops, clock_ghz));
     println!(
         "Ridge:       {:.2} FLOP/byte ({:.1} GFLOPS / {:.1} GB/s)",
         ai_star, flops_gflops, bw_gbps,
@@ -335,8 +365,9 @@ fn print_table(reports: &[EstimateReport], prompt_tokens: u64) {
     println!("Model:  {model} (prompt {prompt_tokens} tok)");
     if let Some(inputs) = reports.first().and_then(|report| report.inputs) {
         println!(
-            "Inputs: {:.1} GB/s, {:.1} GFLOPS",
-            inputs.bw_gbps, inputs.gflops
+            "Inputs: {:.1} GB/s, {}",
+            inputs.bw_gbps,
+            format_peak(inputs.gflops, inputs.clock_ghz)
         );
     }
     println!();
@@ -397,7 +428,7 @@ pub fn run(
 
     // Resolve the compute peak before the ~1 s bandwidth probe so a missing
     // theoretical peak fails fast.
-    let flops_gflops = resolve_gflops(gflops)?;
+    let compute = resolve_compute(gflops)?;
 
     // A supplied bench report is also the confidence-spread source, so load it
     // before resolving bandwidth.
@@ -409,13 +440,14 @@ pub fn run(
 
     let hw = HwInputs {
         bw_gbps: bandwidth.gbps,
-        flops_gflops,
+        flops_gflops: compute.gflops,
     };
     let ctx = ReportContext {
         label: params.trim(),
         params: params_count,
         prompt_tokens,
         hw,
+        clock_ghz: compute.clock_ghz,
         spread_pct: bandwidth.spread_pct,
         spread_method: &bandwidth.method,
     };
@@ -592,9 +624,20 @@ mod tests {
                 bw_gbps: 20.0,
                 flops_gflops: 50.0,
             },
+            clock_ghz: 4.0,
             spread_pct,
             spread_method,
         }
+    }
+
+    #[test]
+    fn format_peak_names_the_clock_or_the_override() {
+        assert_eq!(format_peak(1024.0, 4.0), "1024.0 GFLOPS @ 4.00 GHz max");
+        assert_eq!(format_peak(50.0, 0.0), "50.0 GFLOPS (explicit --gflops)");
+        assert_eq!(
+            format_peak(50.0, f64::NAN),
+            "50.0 GFLOPS (explicit --gflops)"
+        );
     }
 
     #[test]

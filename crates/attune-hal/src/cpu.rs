@@ -25,12 +25,21 @@ pub struct CpuInfo {
     /// M1 stub JSON shape.
     #[serde(default)]
     pub simd_flags: Vec<String>,
-    /// Best-effort estimate of theoretical FP32 peak in decimal GFLOPS,
-    /// derived from the detected SIMD FMA path × physical cores (with a
-    /// 1 GHz baseline — multiply by clock GHz for the real peak). 0.0 when
-    /// no FMA path (SSE-only, no AVX) is detected, or `physical_cores == 0`.
+    /// Best-effort CPU clock in GHz. 0.0 means unknown.
+    ///
+    /// This is the *maximum* (boost) clock reported by the OS, not the base
+    /// clock: the roofline prefill/TTFT model wants the compute ceiling and
+    /// real inference runs ramp into the turbo bin. Sustained clocks are
+    /// lower (thermals, all-core limits), so treat this as an upper bound.
     /// `serde(default)` keeps old JSON without the field parseable.
-    /// TODO(M2+): plumb CPU base/boost clocks for a tighter estimate.
+    #[serde(default)]
+    pub clock_ghz: f64,
+    /// Best-effort estimate of theoretical FP32 peak in decimal GFLOPS,
+    /// derived from the detected SIMD FMA path × physical cores ×
+    /// [`CpuInfo::clock_ghz`] (max/boost clock — see its docs). 0.0 when
+    /// no FMA path (SSE-only, no AVX) is detected, `physical_cores == 0`,
+    /// or the clock is unknown.
+    /// `serde(default)` keeps old JSON without the field parseable.
     #[serde(default)]
     pub theoretical_fp32_gflops: f64,
 }
@@ -74,7 +83,8 @@ pub fn detect() -> Result<CpuInfo, HalError> {
         Vec::new(),
     );
 
-    let theoretical_fp32_gflops = theoretical_fp32_gflops(physical_cores, &simd_flags);
+    let clock_ghz = detect_clock_ghz();
+    let theoretical_fp32_gflops = theoretical_fp32_gflops(physical_cores, &simd_flags, clock_ghz);
 
     Ok(CpuInfo {
         brand,
@@ -83,21 +93,25 @@ pub fn detect() -> Result<CpuInfo, HalError> {
         logical_cores,
         simd,
         simd_flags,
+        clock_ghz,
         theoretical_fp32_gflops,
     })
 }
 
-/// Pure: estimate theoretical FP32 peak in decimal GFLOPS for `cores` and a
-/// fixed vocabulary of SIMD flag strings. 0.0 when no FMA path is detected
-/// (caller can render this as `"theoretical: unknown"`).
+/// Pure: estimate theoretical FP32 peak in decimal GFLOPS for `cores`, a
+/// fixed vocabulary of SIMD flag strings, and a CPU clock in GHz.
+/// 0.0 when no FMA path is detected, the core count is zero, or the clock is
+/// unknown (`clock_ghz <= 0` / non-finite) — callers render that as
+/// `"theoretical: unknown"` rather than silently using a baseline clock.
 ///
-/// Math: 1 FMA / cycle/core × `lanes` × 2 ops/FMA, with cycles counted as
-/// 1 ns (i.e. 1 GHz baseline — multiply by clock GHz for the real peak).
-/// Both AVX2 and AVX-512F land at 32 FLOPS/cycle/core: AVX2 uses 2 FMA
-/// ports × 8 lanes; AVX-512F uses 1 FMA port × 16 lanes (Intel disables
-/// one of the two FMA ports when AVX-512 is in flight on consumer cores).
-pub fn theoretical_fp32_gflops(physical_cores: u32, simd_flags: &[String]) -> f64 {
-    if physical_cores == 0 {
+/// Math: 32 FLOPS/cycle/core × `cores` × `clock_ghz` GHz. Both AVX2 and
+/// AVX-512F land at 32 FLOPS/cycle/core: AVX2 uses 2 FMA ports × 8 lanes ×
+/// 2 ops/FMA; AVX-512F uses 1 FMA port × 16 lanes × 2 ops/FMA (Intel
+/// disables one of the two FMA ports when AVX-512 is in flight on consumer
+/// cores). `clock_ghz` should be the **max/boost** clock: the roofline is a
+/// ceiling, while sustained clocks are lower under thermal/all-core limits.
+pub fn theoretical_fp32_gflops(physical_cores: u32, simd_flags: &[String], clock_ghz: f64) -> f64 {
+    if physical_cores == 0 || !clock_ghz.is_finite() || clock_ghz <= 0.0 {
         return 0.0;
     }
     let per_core: f64 = if simd_flags.iter().any(|f| f == "AVX-512F") {
@@ -110,7 +124,163 @@ pub fn theoretical_fp32_gflops(physical_cores: u32, simd_flags: &[String]) -> f6
         // No FMA path detected — peak is unknown, leave it to the caller.
         return 0.0;
     };
-    f64::from(physical_cores) * per_core
+    f64::from(physical_cores) * per_core * clock_ghz
+}
+
+/// Best-effort max CPU clock in GHz; 0.0 when the platform has no probe or
+/// the probe failed. Kept separate from [`detect`] so the parsing helpers
+/// below stay platform-independent and unit-testable everywhere.
+fn detect_clock_ghz() -> f64 {
+    #[cfg(target_os = "linux")]
+    {
+        linux_clock_ghz()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows_clock_ghz()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        // TODO(M2+): read the maximum clock on macOS / other targets.
+        0.0
+    }
+}
+
+/// Linux: max `cpu*/cpufreq/cpuinfo_max_freq` (kHz), falling back to the
+/// maximum `cpu MHz` line in `/proc/cpuinfo`. These are plain sysfs/procfs
+/// reads (no subprocess) and any failure yields 0.0.
+#[cfg(target_os = "linux")]
+fn linux_clock_ghz() -> f64 {
+    use std::fs;
+    use std::path::Path;
+
+    let mut max_ghz = 0.0_f64;
+    if let Ok(entries) = fs::read_dir(Path::new("/sys/devices/system/cpu")) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(suffix) = name.strip_prefix("cpu") else {
+                continue;
+            };
+            if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let path = entry.path().join("cpufreq/cpuinfo_max_freq");
+            if let Ok(text) = fs::read_to_string(path) {
+                if let Some(ghz) = parse_cpufreq_max_ghz(&text) {
+                    max_ghz = max_ghz.max(ghz);
+                }
+            }
+        }
+    }
+    if max_ghz > 0.0 {
+        return max_ghz;
+    }
+
+    fs::read_to_string("/proc/cpuinfo")
+        .map(|text| parse_cpuinfo_max_ghz(&text))
+        .unwrap_or(0.0)
+}
+
+/// Pure: parse a Linux `cpuinfo_max_freq` file (kHz) into GHz.
+/// Returns `None` for empty, non-numeric, zero, or non-finite input.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_cpufreq_max_ghz(text: &str) -> Option<f64> {
+    let khz: f64 = text.trim().parse().ok()?;
+    if !khz.is_finite() || khz <= 0.0 {
+        return None;
+    }
+    Some(khz / 1_000_000.0)
+}
+
+/// Pure: max `cpu MHz` value in `/proc/cpuinfo`, converted to GHz.
+/// Returns 0.0 when the text carries no usable clock line.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_cpuinfo_max_ghz(text: &str) -> f64 {
+    let max_mhz = text
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("cpu MHz"))
+        .filter_map(|rest| rest.split_once(':').map(|(_, value)| value.trim()))
+        .filter_map(|value| value.parse::<f64>().ok())
+        .filter(|mhz| mhz.is_finite() && *mhz > 0.0)
+        .fold(0.0_f64, f64::max);
+    max_mhz / 1000.0
+}
+
+/// Windows: best-effort `Win32_Processor.MaxClockSpeed` (MHz) via CIM,
+/// mirroring the DRAM probe in `memory.rs`. A stuck or absent
+/// `powershell.exe` is bounded by a short timeout and never blocks `detect`.
+#[cfg(target_os = "windows")]
+fn windows_clock_ghz() -> f64 {
+    let script = "$cim = @(Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue); \
+                  $max = 0; \
+                  foreach ($c in $cim) { \
+                    if ($null -ne $c.MaxClockSpeed -and [int64]$c.MaxClockSpeed -gt $max) { \
+                      $max = [int64]$c.MaxClockSpeed \
+                    } \
+                  }; \
+                  if ($max -gt 0) { Write-Output $max }";
+
+    match run_powershell(script, std::time::Duration::from_secs(3)) {
+        Some(stdout) => parse_cim_max_clock_ghz(&stdout),
+        None => 0.0,
+    }
+}
+
+/// Run a PowerShell command with a hard timeout, returning stdout on success.
+/// `None` covers spawn failure, a timeout, and non-UTF-8 output.
+#[cfg(target_os = "windows")]
+fn run_powershell(script: &str, timeout: std::time::Duration) -> Option<String> {
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    let mut child = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child.wait_with_output().ok()?;
+                return String::from_utf8(output.stdout).ok();
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
+/// Pure: parse the CIM output (MHz, one or more whitespace-separated values)
+/// into the maximum GHz. Returns 0.0 for empty or non-numeric input.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn parse_cim_max_clock_ghz(text: &str) -> f64 {
+    let max_mhz = text
+        .split_whitespace()
+        .filter_map(|token| token.parse::<u64>().ok())
+        .fold(0_u64, u64::max);
+    max_mhz as f64 / 1000.0
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -204,28 +374,78 @@ mod tests {
         let cpu: CpuInfo = serde_json::from_str(old_json).expect("deserialize old CpuInfo JSON");
         assert_eq!(cpu.physical_cores, 8);
         assert_eq!(cpu.logical_cores, 16);
+        assert_eq!(cpu.clock_ghz, 0.0);
         assert_eq!(cpu.theoretical_fp32_gflops, 0.0);
     }
 
     #[test]
-    fn theoretical_fp32_gflops_for_known_paths() {
-        // 8 cores × 32 GFLOPS/core on any FMA path = 256 GFLOPS.
+    fn theoretical_fp32_gflops_scales_with_the_max_clock() {
+        // 8 cores × 32 FLOPS/cycle/core × 4.0 GHz = 1024 GFLOPS.
         let avx2 = vec!["AVX2".to_string()];
-        assert_eq!(theoretical_fp32_gflops(8, &avx2), 256.0);
+        assert!((theoretical_fp32_gflops(8, &avx2, 4.0) - 1024.0).abs() < 1e-9);
         let avx512 = vec!["AVX-512F".to_string()];
-        assert_eq!(theoretical_fp32_gflops(8, &avx512), 256.0);
+        assert!((theoretical_fp32_gflops(8, &avx512, 4.0) - 1024.0).abs() < 1e-9);
         // AVX-512F beats AVX2 on a tie-break (consumer cores have 1 FMA port
         // × 16 lanes vs 2 × 8 — same FLOPS/cycle, but the lane width is
         // higher so any FMA-heavy roofline prefers AVX-512F).
         let both = vec!["AVX2".to_string(), "AVX-512F".to_string()];
-        assert_eq!(theoretical_fp32_gflops(8, &both), 256.0);
+        assert!((theoretical_fp32_gflops(8, &both, 4.0) - 1024.0).abs() < 1e-9);
+        // The old 1 GHz baseline now has to be passed explicitly.
+        assert!((theoretical_fp32_gflops(8, &avx2, 1.0) - 256.0).abs() < 1e-9);
     }
 
     #[test]
-    fn theoretical_fp32_gflops_unknown_for_sse_only_or_no_cores() {
+    fn theoretical_fp32_gflops_unknown_when_clock_or_path_is_missing() {
+        let avx2 = vec!["AVX2".to_string()];
+        // No guessed 1 GHz fallback: an unknown clock means an unknown peak.
+        for clock in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(theoretical_fp32_gflops(8, &avx2, clock), 0.0);
+        }
         let sse = vec!["SSE4.2".to_string()];
-        assert_eq!(theoretical_fp32_gflops(8, &sse), 0.0);
-        assert_eq!(theoretical_fp32_gflops(0, &["AVX2".to_string()]), 0.0);
-        assert_eq!(theoretical_fp32_gflops(8, &[]), 0.0);
+        assert_eq!(theoretical_fp32_gflops(8, &sse, 4.0), 0.0);
+        assert_eq!(theoretical_fp32_gflops(0, &avx2, 4.0), 0.0);
+        assert_eq!(theoretical_fp32_gflops(8, &[], 4.0), 0.0);
+    }
+
+    #[test]
+    fn parse_cpufreq_max_ghz_reads_khz() {
+        assert_eq!(parse_cpufreq_max_ghz("4470000\n"), Some(4.47));
+        assert_eq!(parse_cpufreq_max_ghz("  3200000 "), Some(3.2));
+        assert_eq!(parse_cpufreq_max_ghz(""), None);
+        assert_eq!(parse_cpufreq_max_ghz("nope"), None);
+        assert_eq!(parse_cpufreq_max_ghz("0"), None);
+        assert_eq!(parse_cpufreq_max_ghz("-1"), None);
+    }
+
+    #[test]
+    fn parse_cpuinfo_max_ghz_takes_the_maximum_mhz() {
+        let canned = "\
+processor\t: 0
+cpu MHz\t\t: 1200.000
+processor\t: 1
+cpu MHz\t\t: 4470.123
+processor\t: 2
+model name\t: Example CPU
+";
+        assert!((parse_cpuinfo_max_ghz(canned) - 4.470_123).abs() < 1e-9);
+        assert_eq!(parse_cpuinfo_max_ghz("model name\t: Example CPU\n"), 0.0);
+        assert_eq!(parse_cpuinfo_max_ghz(""), 0.0);
+    }
+
+    #[test]
+    fn parse_cim_max_clock_ghz_converts_and_takes_the_maximum() {
+        assert!((parse_cim_max_clock_ghz("4470\n") - 4.47).abs() < 1e-9);
+        assert!((parse_cim_max_clock_ghz("3300\n4200\n") - 4.2).abs() < 1e-9);
+        assert_eq!(parse_cim_max_clock_ghz(""), 0.0);
+        assert_eq!(parse_cim_max_clock_ghz("nope"), 0.0);
+    }
+
+    #[test]
+    fn cpu_json_includes_the_clock_field() {
+        let cpu = detect().expect("cpu detect");
+        let json = serde_json::to_string(&cpu).expect("serialize CpuInfo");
+        assert!(json.contains("\"clock_ghz\""), "missing clock_ghz: {json}");
+        let back: CpuInfo = serde_json::from_str(&json).expect("deserialize CpuInfo");
+        assert_eq!(back.clock_ghz, cpu.clock_ghz);
     }
 }

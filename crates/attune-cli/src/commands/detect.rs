@@ -50,6 +50,14 @@ fn print_pretty(hw: &HardwareInfo) {
         l = hw.cpu.logical_cores,
     );
     println!("SIMD:       {}", hw.cpu.simd);
+    println!(
+        "Clock:      {}",
+        if hw.cpu.clock_ghz.is_finite() && hw.cpu.clock_ghz > 0.0 {
+            format!("{:.2} GHz max (best-effort)", hw.cpu.clock_ghz)
+        } else {
+            "unknown (best-effort)".to_string()
+        }
+    );
     println!("Cache:      {}", render_cache(&hw.cache));
     println!(
         "NUMA:       {} node{} ({})",
