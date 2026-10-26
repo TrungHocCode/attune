@@ -9,6 +9,8 @@ profiles/*.json
 models/
 *.gguf
 bench-*.json
+# On-disk model catalog cache (online config fetch); machine-local.
+.attune/
 
 # Local plan — keep private, only AGENTS.md is pushed (per user decision)
 attune-plan.md

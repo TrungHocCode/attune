@@ -122,6 +122,11 @@ pub enum Command {
         /// cross-quant warning can be produced. Used only with `--calibrate`.
         #[arg(long, value_name = "QUANT", requires = "bench_json")]
         bench_quant: Option<String>,
+        /// Force a refetch of an `org/model` config instead of using the
+        /// 30-day cache. A failed refetch still falls back to the cache or the
+        /// embedded catalog.
+        #[arg(long)]
+        refresh_catalog: bool,
         /// Output machine-readable JSON instead of the human lines
         #[arg(long)]
         json: bool,
@@ -167,6 +172,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             bench_json,
             calibrate,
             bench_quant,
+            refresh_catalog,
             json,
         } => estimate::run(
             model.as_deref(),
@@ -182,6 +188,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             bench_json.as_deref(),
             bench_quant.as_deref(),
             calibrate,
+            refresh_catalog,
             json,
         ),
     }

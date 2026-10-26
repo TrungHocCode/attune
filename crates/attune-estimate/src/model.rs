@@ -1,17 +1,24 @@
 //! Model-size, quantization and GGUF-header parsing.
 //!
 //! The catalog, quantization and architecture pieces are pure: no I/O and no
-//! hardware access. The [`gguf`] submodule is the one bounded exception — it
-//! reads at most [`gguf::MAX_HEADER_BYTES`] from a file to recover model facts.
-//! The CLI feeds user text in and the roofline module consumes the resulting
-//! [`ModelSpec`].
+//! hardware access. Two submodules are bounded exceptions: [`gguf`] reads at
+//! most [`gguf::MAX_HEADER_BYTES`] from a file to recover model facts, and
+//! [`fetch`] performs one HTTPS request to Hugging Face plus a small cache
+//! write under `.attune/`. The CLI feeds user text in and the roofline module
+//! consumes the resulting [`ModelSpec`].
 
 use crate::EstimateError;
 
 pub mod catalog;
+pub mod fetch;
 pub mod gguf;
 
 pub use catalog::{parse_model, ModelEntry, MODEL_CATALOG};
+pub use fetch::{
+    cache_is_fresh, cache_path, fetch_config, is_hf_id, parse_config_json, read_cache,
+    resolve_hf_model, write_cache, CachedConfig, ConfigSource, FetchedConfig, ResolvedHfModel,
+    CACHE_DIR, CACHE_FILE, CACHE_MAX_AGE_SECS, FETCH_TIMEOUT_SECS,
+};
 pub use gguf::{probe_gguf, probe_gguf_file, GgufFacts, GgufProbe, MAX_HEADER_BYTES};
 
 /// Supported weight formats. The JSON names are pinned explicitly so a

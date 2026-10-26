@@ -10,8 +10,10 @@ description = "Roofline performance estimates for Attune (M3)"
 attune-bench = { path = "../attune-bench" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
-
-# serde_json is only needed by the tests that pin the report's JSON contract;
-# the CLI owns serialization for the end user.
-[dev-dependencies]
+# config.json parsing + the on-disk catalog cache (the CLI still owns
+# serializing the estimate report for the end user).
 serde_json = "1"
+# AGENTS §3 justification: sync-only HTTP client without an async runtime for
+# ~2 KB config.json fetches. Default features are off and only `rustls` is
+# enabled (TLS + webpki roots); gzip/brotli/charset/cookies are unnecessary.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
