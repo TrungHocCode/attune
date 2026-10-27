@@ -67,6 +67,11 @@
 - `attune serve --profile <file>`: launch llama-server with profile flags,
   health-check the model load, proxy an OpenAI-compatible API, show live
   metrics (TTFT, tok/s, RAM).
+- Metrics API for local + remote observation, measured at the proxy (no
+  engine instrumentation): `GET /v1/metrics` (JSON: ttft/tpot/tok_s, RAM,
+  uptime, request counts with mean/p50/p95) and `GET /metrics`
+  (Prometheus text for Grafana). Binds `127.0.0.1` by default; remote
+  needs explicit `--listen` plus `--api-key`.
 - Acceptance: install-to-first-inference under 5 minutes; profile apply
   success > 95%.
 
