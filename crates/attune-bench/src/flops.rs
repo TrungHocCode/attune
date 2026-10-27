@@ -600,8 +600,12 @@ mod tests {
         );
         assert_eq!(result.threads, 1);
         assert_eq!(result.reps, 1);
+        // Generous wall-clock bound: CI Windows runners share cores with
+        // parallel test threads (one run took 10.6 s), so 10 s is too tight
+        // to distinguish "hung" from "loaded". The kernel itself takes ~1 s;
+        // 30 s still catches a real hang.
         assert!(
-            elapsed < std::time::Duration::from_secs(10),
+            elapsed < std::time::Duration::from_secs(30),
             "smoke took {elapsed:?}"
         );
     }
