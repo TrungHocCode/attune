@@ -1,0 +1,19 @@
+[package]
+name = "attune-tune"
+version = "0.1.0"
+edition = "2021"
+description = "Estimate-only config ranking for Attune (M4)"
+
+[dependencies]
+# Plan §7: attune-tune builds the sweep/score layer on top of the roofline
+# predictions from attune-estimate (and, in later slices, measured inputs from
+# attune-bench). No clap/anyhow here — the CLI owns arg parsing.
+attune-estimate = { path = "../attune-estimate" }
+attune-bench = { path = "../attune-bench" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+
+[dev-dependencies]
+# AGENTS §3: the JSON contract is the public output, so its roundtrip is
+# tested here. Runtime code only exposes serde types; the CLI serializes.
+serde_json = "1"
