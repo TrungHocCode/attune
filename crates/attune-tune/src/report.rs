@@ -134,6 +134,13 @@ mod tests {
             "decode_tps",
             "ttft_ms",
             "fits",
+            "n_ubatch",
+            "n_gpu_layers",
+            "mmap",
+            "flash_attn",
+            "numa",
+            "cache_type_k",
+            "cache_type_v",
         ] {
             assert!(
                 json.contains(&format!("\"{key}\"")),

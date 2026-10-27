@@ -1,8 +1,9 @@
-//! `attune tune` — estimate-only config ranking (M4 slice 1).
+//! `attune tune` — estimate-only config ranking (M4 slices 1–2).
 //!
-//! Thin CLI: resolve the model, expand a small grid, call the pure
-//! `attune-tune` ranking and render either the JSON contract or a human table.
-//! No llama.cpp process is spawned and no file is written in this slice.
+//! Thin CLI: resolve the model, expand the full thread/context/batch/KV grid,
+//! prune candidates that cannot run, call the pure `attune-tune` ranking and
+//! render either the JSON contract or a human table. No llama.cpp process is
+//! spawned and no file is written in this slice.
 //!
 //! Model resolution mirrors `attune estimate` (GGUF file -> `org/model`
 //! fetch/cache -> catalog name -> manual `--params`/`--arch`). The resolver is
@@ -16,26 +17,30 @@ use anyhow::{anyhow, Context, Result};
 use attune_bench::{run_quick, BandwidthReport};
 use attune_estimate::{
     is_hf_id, parse_arch, parse_model, parse_params, parse_quants, probe_gguf_file,
-    resolve_hf_model, Arch, HwInputs, Quant,
+    resolve_hf_model, Arch, HwInputs,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
-use attune_tune::{expand_grid, rank_by_estimate, Objective, TuneError, TuneReport};
+use attune_tune::{
+    expand_full_grid_with_quants, prune, rank_by_estimate, stars, Objective, PruneReason,
+    TuneConfig, TuneError, TuneReport,
+};
 
-/// Context windows the slice-1 sweep tries. Kept small so the estimate-only
-/// ranking finishes instantly; later slices add explicit `--ctx` flags.
-const CTX_GRID: &[u32] = &[2_048, 4_096];
-/// Prompt batch sizes the slice-1 sweep tries. `n_batch` is carried into the
-/// report but does not change the roofline score yet.
-const BATCH_GRID: &[u32] = &[512];
-/// KV-cache formats the slice-1 sweep tries. Carried into the report; the
-/// weights-only prediction does not read it yet.
-const KV_GRID: &[Quant] = &[Quant::Fp16];
+/// Prompt length assumed by the prune check. The slice-1 sweep ranks the full
+/// context as TTFT, so this is only used to drop a context window that cannot
+/// hold a realistic prompt + generation.
+const PROMPT_TOKENS: u64 = 512;
+/// Decode length assumed by the prune check.
+const GEN_TOKENS: u64 = 128;
 
 /// Warning attached to every report (pretty + JSON) built on the 1 GHz
 /// baseline fallback. Same text as `attune estimate` so users see one story.
 const CLOCK_FALLBACK_WARNING: &str =
     "clock unknown, assuming 1 GHz baseline — pass --gflops for real numbers";
+
+/// Warning attached when transient available RAM would prune every candidate.
+const TOTAL_RAM_FALLBACK_WARNING: &str =
+    "available RAM can hold no candidate; planning against total RAM — runtime may still OOM";
 
 /// Model inputs resolved from GGUF, fetch/cache, catalog or manual flags.
 struct ModelResolution {
@@ -159,28 +164,37 @@ struct HardwareResolution {
     gflops: f64,
     clock_fallback: bool,
     avail_bytes: Option<f64>,
+    total_bytes: Option<f64>,
+    physical_cores: u32,
 }
 
-/// Resolve the FP32 peak and available RAM in one detection pass.
+/// Resolve the FP32 peak, memory limits and physical core count in one pass.
 ///
-/// An explicit `--gflops` skips the CPU probe but still reads available RAM.
-/// Otherwise [`HardwareInfo::detect`] supplies both the peak and the memory
-/// figure, so the CLI never detects the same hardware twice.
+/// An explicit `--gflops` skips the CPU peak probe but still reads memory and
+/// the physical core count (needed to build and prune the grid). Otherwise
+/// [`HardwareInfo::detect`] supplies all of them, so the CLI never detects the
+/// same hardware twice.
 fn resolve_hardware(gflops: Option<f64>) -> Result<HardwareResolution> {
     if let Some(value) = gflops {
         if !value.is_finite() || value <= 0.0 {
             return Err(anyhow!("--gflops must be a finite number > 0"));
         }
+        let (avail_bytes, total_bytes) = detect_memory_limits();
         return Ok(HardwareResolution {
             gflops: value,
             clock_fallback: false,
-            avail_bytes: detect_available_ram_bytes(),
+            avail_bytes,
+            total_bytes,
+            physical_cores: detect_physical_cores(),
         });
     }
 
     let hw = HardwareInfo::detect()?;
     let available = hw.memory.available_bytes as f64;
     let avail_bytes = (available.is_finite() && available > 0.0).then_some(available);
+    let total = hw.memory.total_bytes as f64;
+    let total_bytes = (total.is_finite() && total > 0.0).then_some(total);
+    let physical_cores = hw.cpu.physical_cores.max(1);
 
     let theoretical = hw.cpu.theoretical_fp32_gflops;
     if theoretical.is_finite() && theoretical > 0.0 {
@@ -188,6 +202,8 @@ fn resolve_hardware(gflops: Option<f64>) -> Result<HardwareResolution> {
             gflops: theoretical,
             clock_fallback: false,
             avail_bytes,
+            total_bytes,
+            physical_cores,
         });
     }
 
@@ -201,6 +217,8 @@ fn resolve_hardware(gflops: Option<f64>) -> Result<HardwareResolution> {
             gflops: baseline,
             clock_fallback: true,
             avail_bytes,
+            total_bytes,
+            physical_cores,
         });
     }
 
@@ -209,24 +227,40 @@ fn resolve_hardware(gflops: Option<f64>) -> Result<HardwareResolution> {
     ))
 }
 
-/// Best-effort available RAM for the OOM check. `None` when the HAL cannot
-/// read it (0), in which case the ranking skips the fit check rather than
-/// claiming an OOM from unknown numbers.
-fn detect_available_ram_bytes() -> Option<f64> {
-    attune_hal::memory::detect()
-        .ok()
-        .map(|memory| memory.available_bytes as f64)
-        .filter(|bytes| bytes.is_finite() && *bytes > 0.0)
+/// Best-effort `(available, total)` RAM for the OOM check.
+///
+/// Each value is `None` when the HAL reports 0/unusable, in which case the
+/// ranking skips the fit check rather than claiming an OOM from unknown
+/// numbers. The total is only used by the CLI's all-pruned fallback.
+fn detect_memory_limits() -> (Option<f64>, Option<f64>) {
+    match attune_hal::memory::detect() {
+        Ok(memory) => {
+            let available = memory.available_bytes as f64;
+            let total = memory.total_bytes as f64;
+            (
+                (available.is_finite() && available > 0.0).then_some(available),
+                (total.is_finite() && total > 0.0).then_some(total),
+            )
+        }
+        Err(_) => (None, None),
+    }
 }
 
-/// Default thread count for the grid. Slice-1 roofline math has no thread
-/// model, so one value is enough; using the machine's parallelism keeps the
-/// reported config realistic.
-fn default_threads() -> u32 {
-    std::thread::available_parallelism()
+/// Best-effort physical core count for the thread axis and prune check.
+///
+/// Falls back to the logical parallelism (then 1) when the HAL cannot report
+/// physical cores, so the grid always has at least one valid thread value.
+fn detect_physical_cores() -> u32 {
+    attune_hal::cpu::detect()
         .ok()
-        .and_then(|parallelism| u32::try_from(parallelism.get()).ok())
-        .unwrap_or(8)
+        .map(|cpu| cpu.physical_cores)
+        .filter(|cores| *cores > 0)
+        .or_else(|| {
+            std::thread::available_parallelism()
+                .ok()
+                .and_then(|parallelism| u32::try_from(parallelism.get()).ok())
+        })
+        .unwrap_or(1)
 }
 
 /// Compact parameter label (`135M`, `8.00B`, ...).
@@ -242,7 +276,7 @@ fn format_params(params: u64) -> String {
 
 /// Human-readable rank table. The score column prints `-inf` for OOM configs
 /// (the JSON contract writes those as `null`).
-fn print_table(report: &TuneReport, resolution: &ModelResolution) {
+fn print_table(report: &TuneReport, resolution: &ModelResolution, total_ram_fallback: bool) {
     let arch = resolution.arch.map_or("unknown", |arch| arch.name);
     println!(
         "Model:  {} ({}) | Arch: {arch}",
@@ -253,23 +287,29 @@ fn print_table(report: &TuneReport, resolution: &ModelResolution) {
         "Inputs: {:.1} GB/s, {:.1} GFLOPS | Objective: {}",
         report.bw_gbps, report.gflops, report.objective
     );
-    match report.avail_bytes {
-        Some(avail) => println!("RAM:    {:.1} GB available", avail / 1e9),
-        None => println!("RAM:    unknown (fit check skipped)"),
+    match (report.avail_bytes, total_ram_fallback) {
+        (Some(ram), true) => println!(
+            "RAM:    {:.1} GB total (fallback; available RAM was too low)",
+            ram / 1e9
+        ),
+        (Some(ram), false) => println!("RAM:    {:.1} GB available", ram / 1e9),
+        (None, _) => println!("RAM:    unknown (fit check skipped)"),
     }
     println!();
     println!(
-        "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<5} Score",
-        "Rank", "Quant", "Ctx", "Threads", "Batch", "KV", "Decode tok/s", "TTFT ms", "Fit"
+        "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<5} {:<6} Score",
+        "Rank", "Quant", "Ctx", "Threads", "Batch", "KV", "Decode tok/s", "TTFT ms", "Fit", "Stars"
     );
+    let total = report.configs.len();
     for (index, ranked) in report.configs.iter().enumerate() {
         let score = if ranked.score.is_finite() {
             format!("{:.4}", ranked.score)
         } else {
             "-inf".to_string()
         };
+        let star_marks = "*".repeat(usize::from(stars(index, total)));
         println!(
-            "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<5} {}",
+            "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<5} {:<6} {}",
             index + 1,
             ranked.config.quant.as_str(),
             ranked.config.n_ctx,
@@ -279,6 +319,7 @@ fn print_table(report: &TuneReport, resolution: &ModelResolution) {
             ranked.decode_tps,
             ranked.ttft_ms,
             if ranked.fits { "yes" } else { "OOM" },
+            star_marks,
             score,
         );
     }
@@ -291,6 +332,33 @@ fn print_table(report: &TuneReport, resolution: &ModelResolution) {
     }
 }
 
+/// Print the one-line prune summary shown before the table.
+///
+/// `cap_from_expand` counts points already dropped by the 64-point full-grid
+/// guard; the rest come from [`prune`] and are counted by reason.
+fn print_pruned(pruned: &[(TuneConfig, PruneReason)], cap_from_expand: usize) {
+    let mut oom = 0;
+    let mut ctx = 0;
+    let mut threads = 0;
+    let mut cap = cap_from_expand;
+    for (_, reason) in pruned {
+        match reason {
+            PruneReason::Oom => oom += 1,
+            PruneReason::CtxOverflow => ctx += 1,
+            PruneReason::TooManyThreads => threads += 1,
+            PruneReason::OverCap => cap += 1,
+        }
+    }
+    println!(
+        "pruned {} ({} OOM, {} ctx-overflow, {} threads, {} cap)",
+        oom + ctx + threads + cap,
+        oom,
+        ctx,
+        threads,
+        cap
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     model: Option<&str>,
@@ -300,8 +368,13 @@ pub fn run(
     objective: &str,
     bandwidth_gbps: Option<f64>,
     gflops: Option<f64>,
+    max_configs: usize,
     json: bool,
 ) -> Result<()> {
+    if max_configs == 0 {
+        return Err(anyhow!("--max-configs must be > 0"));
+    }
+
     let resolution = resolve_model(model, params, arch)?;
     let quants = parse_quants(quant)?;
     let objective: Objective = objective
@@ -320,7 +393,7 @@ pub fn run(
     // The CPU/RAM probe and the bandwidth kernel are independent, so run
     // them concurrently: the live path then costs one probe, not their sum,
     // and still spawns no subprocess. `resolve_hardware` reuses a single HAL
-    // detection for both the FP32 peak and available RAM.
+    // detection for the FP32 peak, available RAM and physical core count.
     let (hardware, bw_gbps) = std::thread::scope(|scope| -> Result<(HardwareResolution, f64)> {
         let hardware = scope.spawn(move || resolve_hardware(gflops));
         let bandwidth = resolve_bandwidth(bandwidth_gbps);
@@ -333,18 +406,65 @@ pub fn run(
         gflops,
         clock_fallback,
         avail_bytes,
+        total_bytes,
+        physical_cores,
     } = hardware;
     let hw = HwInputs {
         bw_gbps,
         flops_gflops: gflops,
     };
 
-    let grid = expand_grid(&quants, CTX_GRID, &[default_threads()], BATCH_GRID, KV_GRID);
-    let ranked = rank_by_estimate(
+    // Full slice-2 grid (threads/ctx/batch/KV) restricted to the requested
+    // formats, then prune by OOM, context fit, thread count and the cap.
+    let (grid, cap_from_expand) = expand_full_grid_with_quants(physical_cores, &quants);
+    let (mut kept, mut pruned) = prune(
         &grid,
         resolution.params,
-        hw,
         avail_bytes.unwrap_or(0.0),
+        PROMPT_TOKENS,
+        GEN_TOKENS,
+        physical_cores,
+        max_configs,
+    );
+    let mut effective_avail = avail_bytes;
+    let mut total_ram_fallback = false;
+    // A busy machine can report almost no *available* RAM even though the
+    // model would fit once the user frees memory. If the OOM check would drop
+    // every candidate, plan against total RAM instead and say so loudly rather
+    // than returning an empty table.
+    if kept.is_empty() {
+        if let Some(total) =
+            total_bytes.filter(|total| avail_bytes.is_none_or(|avail| *total > avail))
+        {
+            let (fallback_kept, fallback_pruned) = prune(
+                &grid,
+                resolution.params,
+                total,
+                PROMPT_TOKENS,
+                GEN_TOKENS,
+                physical_cores,
+                max_configs,
+            );
+            if !fallback_kept.is_empty() {
+                kept = fallback_kept;
+                pruned = fallback_pruned;
+                effective_avail = Some(total);
+                total_ram_fallback = true;
+            }
+        }
+    }
+    if kept.is_empty() {
+        return Err(anyhow!(
+            "every candidate config was pruned ({} before the cap); try a smaller --quant, a lower context, or a larger --max-configs",
+            grid.len().saturating_add(cap_from_expand)
+        ));
+    }
+
+    let ranked = rank_by_estimate(
+        &kept,
+        resolution.params,
+        hw,
+        effective_avail.unwrap_or(0.0),
         objective,
     )?;
 
@@ -352,12 +472,15 @@ pub fn run(
     if clock_fallback {
         warnings.push(CLOCK_FALLBACK_WARNING.to_string());
     }
+    if total_ram_fallback {
+        warnings.push(TOTAL_RAM_FALLBACK_WARNING.to_string());
+    }
     let report = TuneReport::new(
         resolution.label.clone(),
         resolution.params,
         objective,
         hw,
-        avail_bytes,
+        effective_avail,
         ranked,
     )
     .with_warnings(warnings);
@@ -367,6 +490,7 @@ pub fn run(
         return Ok(());
     }
 
-    print_table(&report, &resolution);
+    print_pruned(&pruned, cap_from_expand);
+    print_table(&report, &resolution, total_ram_fallback);
     Ok(())
 }
