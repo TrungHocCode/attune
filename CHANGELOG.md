@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2026-10-27
+
+Model-resolution wiring for `attune estimate` (closes #48). One resolver now
+feeds the single- and multi-quant paths, so parameters, KV shape, context and
+warnings cannot diverge between them.
+
+### Added
+- Resolution order: existing `.gguf` file (header probe) > `org/model`
+  Hugging Face id (30-day cache/fetch) > built-in catalog short name >
+  manual `--params` (+ optional `--arch`).
+- Context resolution: an explicit `--ctx` always wins; otherwise the
+  source's documented default (`config.json` `max_position_embeddings` or
+  the catalog entry) is used; otherwise the historical 2048.
+- `inputs.arch` and `inputs.ctx` in the JSON contract (`serde(default)`;
+  older reports still parse), echoing the resolved KV shape and context.
+- Pretty `Model: <provider>/<name> (<params>) | Fit: …` line for both the
+  single report and the multi-quant table, reusing the existing `RamFit`.
+
+### Changed
+- The resolved architecture now drives `kv_per_token`, and the resolved
+  context drives both the decode prediction and the RAM-fit check for every
+  source — including catalog names and fetched configs, which previously
+  ran weights-only.
+- `--ctx` is an optional flag instead of a clap default, so omission can be
+  told apart from an explicit `2048`.
+
+### Notes
+- No new dependencies and no network in tests; fetch/cache policy stays
+  covered by the deterministic offline fixtures.
+
 ## [0.3.1] - 2026-10-26
 
 Correctness pass over `attune estimate` so M4 tune can safely suggest

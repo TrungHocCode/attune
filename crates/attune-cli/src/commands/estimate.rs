@@ -29,8 +29,8 @@ use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
     apply_decode, apply_prefill, clamped, classify, decode_ai, is_hf_id, kv_bytes_per_token,
     parse_arch, parse_model, parse_params, parse_quants, predict_prefill_ms_quant, probe_gguf_file,
-    resolve_hf_model, ridge_ai, spread_pct_from_stats, CalibratedInputs, CalibrationReport,
-    Confidence, EstimateError, EstimateInputs, EstimateReport, GgufProbe, HwInputs,
+    resolve_hf_model, ridge_ai, spread_pct_from_stats, Arch, CalibratedInputs, CalibrationReport,
+    Confidence, ConfigSource, EstimateError, EstimateInputs, EstimateReport, GgufProbe, HwInputs,
     MultiEstimateReport, Quant, RamFit,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
@@ -188,44 +188,55 @@ fn resolve_bandwidth(
     })
 }
 
-/// KV-cache traffic resolved from an optional `--arch` preset.
-struct KvResolution {
-    /// Bytes of KV cache read per generated token; 0 when unknown.
-    per_token: f64,
-    /// Notice explaining the omission, when no preset was supplied.
-    warning: Option<&'static str>,
-}
+/// Context window used when neither `--ctx` nor the model source supplies a
+/// default. Kept at the historical 2048 so explicit `--params` runs do not
+/// silently change.
+pub const DEFAULT_CTX: u32 = 2048;
 
-/// Resolve `--arch` into a per-token KV size.
+/// Where the resolved model facts came from.
 ///
-/// Omitting the flag is allowed but never silent: the decode prediction then
-/// ignores KV traffic and carries [`KV_EXCLUDED_WARNING`].
-fn resolve_kv(arch: Option<&str>) -> Result<KvResolution, EstimateError> {
-    match arch {
-        Some(name) => Ok(KvResolution {
-            per_token: kv_bytes_per_token(parse_arch(name)?),
-            warning: None,
-        }),
-        None => Ok(KvResolution {
-            per_token: 0.0,
-            warning: Some(KV_EXCLUDED_WARNING),
-        }),
-    }
+/// The resolution order is fixed (see [`resolve_model`]): an existing `.gguf`
+/// file wins, then an `org/model` fetch/cache, then a catalog short name, then
+/// manual `--params` (+ optional `--arch`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelProvenance {
+    /// Facts read from a `.gguf` header.
+    Gguf,
+    /// Facts fetched from Hugging Face (fresh fetch or disk cache).
+    Fetched,
+    /// Facts from the embedded catalog (direct name or offline fallback).
+    Catalog,
+    /// Facts from `--params` / `--arch`.
+    Manual,
 }
 
-/// Model inputs resolved from either `--model` or `--params` + `--arch`.
+/// Model inputs resolved from GGUF, fetch/cache, catalog or manual flags.
+///
+/// One resolver feeds both the single- and multi-quant paths, so the KV shape,
+/// context and warnings cannot diverge between them.
 struct ModelResolution {
     /// Report label: catalog name, GGUF path or the literal `--params` text.
     label: String,
+    /// Human-readable source label for the pretty `Model:` line
+    /// (`provider/name`, an `org/model` id, a path or the `--params` text).
+    display: String,
     /// Parameter count used for the weight footprint.
     params: u64,
-    /// KV-cache traffic for the resolved architecture.
-    kv: KvResolution,
+    /// Resolved KV-cache shape, when the source had one.
+    arch: Option<Arch>,
+    /// KV-cache traffic per generated token; 0 when `arch` is unknown.
+    kv_per_token: f64,
+    /// Context window documented by the source (catalog entry or fetched
+    /// `config.json`), if any. An explicit `--ctx` always wins over this.
+    ctx_default: Option<u32>,
+    /// Which source supplied the facts.
+    provenance: ModelProvenance,
     /// Probe result when `--model` was a `.gguf` file path. Drives the
-    /// human-readable probe line and the catalog mismatch warning.
+    /// human-readable probe line.
     gguf: Option<GgufProbe>,
-    /// Notices from online config resolution (`offline, using …`).
-    model_warnings: Vec<String>,
+    /// Every non-fatal notice from resolution (fetch fallbacks, catalog/file
+    /// disagreement, omitted KV).
+    warnings: Vec<String>,
 }
 
 /// True when `--model` points at an existing `.gguf` file (case-insensitive
@@ -239,20 +250,29 @@ fn as_gguf_path(value: &str) -> Option<&Path> {
     (is_gguf && path.is_file()).then_some(path)
 }
 
-/// Resolve `--model` first, then fall back to `--params` + `--arch`.
+/// Resolve the context window for KV sizing.
 ///
-/// An existing `.gguf` file is probed from its header: `general.parameter_count`
-/// supplies the size when present, otherwise a catalog entry inferred from the
-/// file name does. The file's KV shape wins over a catalog disagreement, which
-/// is recorded as a warning. A catalog name is looked up in the embedded table.
-/// An `org/name` Hugging Face id outside the catalog fetches `config.json`,
-/// using the 30-day cache and degrading to stale cache / embedded catalog when
-/// offline (`--refresh-catalog` forces that refetch). Short unknown names are
-/// never guessed into an organization. The two flags stay the escape hatch for
-/// everything else, and clap makes `--model` mutually exclusive with
-/// `--params` / `--arch`, so the paths cannot silently disagree. The catalog's
-/// `ctx_default` is deliberately not applied here yet: `--ctx` remains the
-/// context source until the wiring slice consumes it.
+/// Rule (documented in the CLI help): an explicitly passed `--ctx` always
+/// wins; otherwise the model source's documented default is used; otherwise
+/// [`DEFAULT_CTX`]. The chosen value is echoed in `inputs.ctx`.
+fn resolve_ctx(explicit: Option<u32>, source_default: Option<u32>) -> u32 {
+    explicit.or(source_default).unwrap_or(DEFAULT_CTX)
+}
+
+/// Resolve model facts from GGUF, fetch/cache, catalog or manual flags.
+///
+/// Order is deliberate and identical for every quant in the report:
+///
+/// 1. an existing `.gguf` file, probed from its header;
+/// 2. an `org/model` Hugging Face id, resolved from the 30-day cache or a
+///    fetch (with stale-cache / embedded-catalog fallbacks);
+/// 3. a built-in catalog short name;
+/// 4. manual `--params` plus an optional `--arch`.
+///
+/// The first three sources carry a KV shape, so the decode and RAM-fit paths
+/// use it automatically; manual `--params` without `--arch` keeps the old
+/// weights-only prediction and warns. Clap makes `--model` mutually exclusive
+/// with `--params` / `--arch`, so the sources cannot silently disagree.
 fn resolve_model(
     model: Option<&str>,
     params: Option<&str>,
@@ -269,63 +289,90 @@ fn resolve_model(
                     path.display()
                 )
             })?;
-            let kv = match probe.arch {
-                Some(arch) => KvResolution {
-                    per_token: kv_bytes_per_token(&arch),
-                    warning: None,
-                },
-                None => KvResolution {
-                    per_token: 0.0,
-                    warning: Some(GGUF_KV_EXCLUDED_WARNING),
-                },
-            };
+            let arch = probe.arch;
+            let mut warnings = Vec::new();
+            if let Some(warning) = probe.warning.clone() {
+                warnings.push(warning);
+            }
+            if arch.is_none() {
+                warnings.push(GGUF_KV_EXCLUDED_WARNING.to_string());
+            }
             return Ok(ModelResolution {
                 label: name.to_string(),
+                display: name.to_string(),
                 params,
-                kv,
+                arch,
+                kv_per_token: arch.map_or(0.0, |arch| kv_bytes_per_token(&arch)),
+                // GGUF headers carry no context-window metadata in the probe.
+                ctx_default: None,
+                provenance: ModelProvenance::Gguf,
                 gguf: Some(probe),
-                model_warnings: Vec::new(),
+                warnings,
             });
         }
 
-        return match parse_model(name) {
-            Ok(entry) => Ok(ModelResolution {
-                label: entry.name.to_string(),
-                params: entry.params,
-                kv: KvResolution {
-                    per_token: kv_bytes_per_token(&entry.arch),
-                    warning: None,
-                },
+        if is_hf_id(name) {
+            let resolved =
+                resolve_hf_model(name, refresh_catalog).map_err(|err| anyhow!("{err}"))?;
+            let provenance = match resolved.source {
+                // The offline fallback returns embedded catalog facts even
+                // though it was reached through the fetch path.
+                ConfigSource::EmbeddedCatalog => ModelProvenance::Catalog,
+                ConfigSource::Cache | ConfigSource::Fetch | ConfigSource::StaleCache => {
+                    ModelProvenance::Fetched
+                }
+            };
+            let arch = resolved.arch;
+            return Ok(ModelResolution {
+                label: resolved.label.clone(),
+                display: resolved.label,
+                params: resolved.params,
+                arch: Some(arch),
+                kv_per_token: kv_bytes_per_token(&arch),
+                ctx_default: resolved.ctx_default,
+                provenance,
                 gguf: None,
-                model_warnings: Vec::new(),
-            }),
-            Err(_) if is_hf_id(name) => {
-                let resolved =
-                    resolve_hf_model(name, refresh_catalog).map_err(|err| anyhow!("{err}"))?;
-                Ok(ModelResolution {
-                    label: resolved.label,
-                    params: resolved.params,
-                    kv: KvResolution {
-                        per_token: kv_bytes_per_token(&resolved.arch),
-                        warning: None,
-                    },
-                    gguf: None,
-                    model_warnings: resolved.warnings,
-                })
-            }
-            Err(catalog_err) => Err(anyhow!(
+                warnings: resolved.warnings,
+            });
+        }
+
+        let entry = parse_model(name).map_err(|catalog_err| {
+            anyhow!(
                 "{catalog_err}; pass --params <SIZE> --arch <NAME> for a model outside the catalog"
-            )),
-        };
+            )
+        })?;
+        return Ok(ModelResolution {
+            label: entry.name.to_string(),
+            display: format!("{}/{}", entry.provider, entry.name),
+            params: entry.params,
+            arch: Some(entry.arch),
+            kv_per_token: kv_bytes_per_token(&entry.arch),
+            ctx_default: Some(entry.ctx_default),
+            provenance: ModelProvenance::Catalog,
+            gguf: None,
+            warnings: Vec::new(),
+        });
     }
 
-    let params = params.ok_or_else(|| anyhow!("pass --model <NAME> or --params <SIZE>"))?;
+    let params = params.ok_or_else(|| anyhow!("pass --model <NAME_OR_PATH> or --params <SIZE>"))?;
+    let arch = match arch {
+        Some(name) => Some(*parse_arch(name)?),
+        None => None,
+    };
     Ok(ModelResolution {
         label: params.trim().to_string(),
+        display: params.trim().to_string(),
         params: parse_params(params)?,
-        kv: resolve_kv(arch)?,
+        arch,
+        kv_per_token: arch.map_or(0.0, |arch| kv_bytes_per_token(&arch)),
+        ctx_default: None,
+        provenance: ModelProvenance::Manual,
         gguf: None,
-        model_warnings: Vec::new(),
+        warnings: arch
+            .is_none()
+            .then(|| KV_EXCLUDED_WARNING.to_string())
+            .into_iter()
+            .collect(),
     })
 }
 
@@ -445,9 +492,12 @@ struct ReportContext<'a> {
     label: &'a str,
     params: u64,
     prompt_tokens: u64,
-    /// Context length used for KV sizing.
+    /// Context length used for KV sizing (already resolved).
     ctx: u32,
-    /// Bytes of KV cache read per generated token; 0 when `--arch` is absent.
+    /// Resolved KV shape name (`gguf`, `hf-config`, a catalog/preset name),
+    /// echoed in `inputs.arch`.
+    arch: Option<&'a str>,
+    /// Bytes of KV cache read per generated token; 0 when the arch is unknown.
     kv_per_token: f64,
     hw: HwInputs,
     /// Max CPU clock behind `hw.flops_gflops`; 0.0 for an explicit override.
@@ -478,6 +528,8 @@ fn build_report(ctx: &ReportContext<'_>, quant: Quant) -> Result<EstimateReport,
             bw_gbps: ctx.hw.bw_gbps,
             gflops: ctx.hw.flops_gflops,
             clock_ghz: ctx.clock_ghz,
+            arch: ctx.arch.map(str::to_string),
+            ctx: Some(ctx.ctx),
         })
         .with_prefill_ms(prefill_ms_ttft)
         .with_ridge(ai_star, margin_pct)
@@ -577,18 +629,70 @@ fn print_probe(probe: &GgufProbe, params: u64) {
     );
 }
 
+/// Human-readable fit status for the model line, reusing [`RamFit`] only (no
+/// new sizing math).
+fn format_fit(fit: RamFit) -> String {
+    if fit.fits {
+        format!(
+            "OK ({:.1}/{:.1} GB)",
+            fit.peak_bytes / 1e9,
+            fit.avail_bytes / 1e9
+        )
+    } else {
+        let warning = fit.warning().unwrap_or_else(|| "OOM".to_string());
+        let detail = warning.strip_prefix("OOM: ").unwrap_or(&warning);
+        format!("OOM ({detail})")
+    }
+}
+
+/// The `Model: <source> (<params>) | Fit: …` prefix shared by both outputs.
+fn format_model_line(display: &str, params: u64, fit: Option<RamFit>) -> String {
+    let mut line = format!("{} ({})", display, format_params(params));
+    if let Some(fit) = fit {
+        line.push_str(" | Fit: ");
+        line.push_str(&format_fit(fit));
+    }
+    line
+}
+
+/// Largest footprint across configs, so a multi-quant model line never claims
+/// a fit that one of the requested formats would break.
+fn worst_fit(reports: &[EstimateReport]) -> Option<RamFit> {
+    reports
+        .iter()
+        .filter_map(|report| report.ram_fit)
+        .max_by(|a, b| {
+            a.peak_bytes
+                .partial_cmp(&b.peak_bytes)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
 /// Existing single-config human output. Interval lines are only added when a
 /// measured spread produced bounds, so the no-spread output is unchanged.
 /// Warnings print last so a degraded input is impossible to miss.
-fn print_single(report: &EstimateReport, prompt_tokens: u64, clock_fallback: bool) {
-    let bw_gbps = report.inputs.map_or(0.0, |inputs| inputs.bw_gbps);
-    let flops_gflops = report.inputs.map_or(0.0, |inputs| inputs.gflops);
-    let clock_ghz = report.inputs.map_or(0.0, |inputs| inputs.clock_ghz);
+fn print_single(
+    report: &EstimateReport,
+    prompt_tokens: u64,
+    clock_fallback: bool,
+    display: &str,
+    params: u64,
+) {
+    let bw_gbps = report.inputs.as_ref().map_or(0.0, |inputs| inputs.bw_gbps);
+    let flops_gflops = report.inputs.as_ref().map_or(0.0, |inputs| inputs.gflops);
+    let clock_ghz = report
+        .inputs
+        .as_ref()
+        .map_or(0.0, |inputs| inputs.clock_ghz);
     let ai_star = report.ridge_ai.unwrap_or(0.0);
     let margin_pct = report.margin_pct.unwrap_or(0.0);
     let workload_ai = decode_ai(report.quant.bytes_per_param()).unwrap_or(0.0);
     let prefill_ms_ttft = report.prefill_ms_ttft.unwrap_or(0.0);
 
+    println!(
+        "Model:       {}",
+        format_model_line(display, params, report.ram_fit)
+    );
     println!(
         "Decode:      {:.1} tok/s ({} {})",
         report.decode_tps, report.model, report.quant,
@@ -662,10 +766,19 @@ fn print_warnings(report: &EstimateReport) {
 }
 
 /// Multi-config human output, already sorted fastest-first by the caller.
-fn print_table(reports: &[EstimateReport], prompt_tokens: u64, clock_fallback: bool) {
-    let model = reports.first().map_or("", |report| report.model.as_str());
-    println!("Model:  {model} (prompt {prompt_tokens} tok)");
-    if let Some(inputs) = reports.first().and_then(|report| report.inputs) {
+fn print_table(
+    reports: &[EstimateReport],
+    prompt_tokens: u64,
+    clock_fallback: bool,
+    display: &str,
+    params: u64,
+) {
+    println!(
+        "Model:  {}",
+        format_model_line(display, params, worst_fit(reports))
+    );
+    println!("Prompt: {prompt_tokens} tok");
+    if let Some(inputs) = reports.first().and_then(|report| report.inputs.as_ref()) {
         println!(
             "Inputs: {:.1} GB/s, {}",
             inputs.bw_gbps,
@@ -729,7 +842,7 @@ pub fn run(
     arch: Option<&str>,
     prompt_tokens: u64,
     _gen_tokens: u64,
-    ctx: u32,
+    ctx: Option<u32>,
     bench_json: Option<&Path>,
     bench_quant: Option<&str>,
     calibrate: bool,
@@ -738,11 +851,23 @@ pub fn run(
 ) -> Result<()> {
     let ModelResolution {
         label,
+        display,
         params: params_count,
-        kv,
+        arch,
+        kv_per_token,
+        ctx_default,
+        provenance,
         gguf,
-        model_warnings,
+        warnings: model_warnings,
     } = resolve_model(model, params, arch, refresh_catalog)?;
+    // One resolver result feeds every config below, so multi-quant tables and
+    // single reports cannot disagree on params, KV shape, context or warnings.
+    // `provenance` is carried for tests/future reporting; it does not change
+    // the math.
+    let _ = provenance;
+    // Explicit --ctx wins; otherwise the source's documented context; else
+    // the historical 2048 default.
+    let ctx = resolve_ctx(ctx, ctx_default);
     let quants = parse_quants(quant)?;
     // The bench's own quant is only known when the user states it; without
     // the flag no quant-mismatch warning can be produced (and none is).
@@ -772,7 +897,8 @@ pub fn run(
         params: params_count,
         prompt_tokens,
         ctx,
-        kv_per_token: kv.per_token,
+        arch: arch.map(|arch| arch.name),
+        kv_per_token,
         hw,
         clock_ghz: compute.clock_ghz,
         ram_avail_bytes: detect_available_ram_bytes(),
@@ -784,14 +910,6 @@ pub fn run(
     for quant in quants {
         let mut report = build_report(&context, quant)?;
         for warning in &model_warnings {
-            report = report.with_warning(warning);
-        }
-        if let Some(probe) = gguf.as_ref() {
-            if let Some(warning) = probe.warning.as_deref() {
-                report = report.with_warning(warning);
-            }
-        }
-        if let Some(warning) = kv.warning {
             report = report.with_warning(warning);
         }
         if compute.clock_fallback {
@@ -829,9 +947,21 @@ pub fn run(
         print_probe(probe, params_count);
     }
     if let [report] = reports.as_slice() {
-        print_single(report, prompt_tokens, compute.clock_fallback);
+        print_single(
+            report,
+            prompt_tokens,
+            compute.clock_fallback,
+            &display,
+            params_count,
+        );
     } else {
-        print_table(&reports, prompt_tokens, compute.clock_fallback);
+        print_table(
+            &reports,
+            prompt_tokens,
+            compute.clock_fallback,
+            &display,
+            params_count,
+        );
     }
     Ok(())
 }
@@ -1179,6 +1309,7 @@ mod tests {
             params: 135_000_000,
             prompt_tokens: 512,
             ctx: 2048,
+            arch: None,
             kv_per_token: 0.0,
             hw: HwInputs {
                 bw_gbps: 20.0,
@@ -1222,16 +1353,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_kv_uses_the_preset_or_warns_loudly() {
-        let known = resolve_kv(Some("llama-3.1-8b")).expect("known preset");
-        assert_eq!(known.per_token, 131_072.0);
-        assert_eq!(known.warning, None);
-
-        let unknown = resolve_kv(None).expect("omitting --arch is allowed");
-        assert_eq!(unknown.per_token, 0.0);
-        assert_eq!(unknown.warning, Some(KV_EXCLUDED_WARNING));
-
-        assert!(resolve_kv(Some("not-a-model")).is_err());
+    fn resolve_ctx_prefers_explicit_then_source_then_builtin_default() {
+        // Explicit --ctx always wins over the source's documented default.
+        assert_eq!(resolve_ctx(Some(2_048), Some(131_072)), 2_048);
+        // No explicit value: use the source default.
+        assert_eq!(resolve_ctx(None, Some(8_192)), 8_192);
+        // No source default (GGUF/manual): keep the historical 2048.
+        assert_eq!(resolve_ctx(None, None), DEFAULT_CTX);
+        assert_eq!(DEFAULT_CTX, 2_048);
     }
 
     #[test]
@@ -1239,9 +1368,13 @@ mod tests {
         let resolved =
             resolve_model(Some("Llama-3.1-8B"), None, None, false).expect("catalog model");
         assert_eq!(resolved.label, "llama-3.1-8b");
+        assert_eq!(resolved.display, "meta/llama-3.1-8b");
         assert_eq!(resolved.params, 8_030_000_000);
-        assert_eq!(resolved.kv.per_token, 131_072.0);
-        assert_eq!(resolved.kv.warning, None);
+        assert_eq!(resolved.arch.map(|arch| arch.name), Some("llama-3.1-8b"));
+        assert_eq!(resolved.kv_per_token, 131_072.0);
+        assert_eq!(resolved.ctx_default, Some(131_072));
+        assert_eq!(resolved.provenance, ModelProvenance::Catalog);
+        assert!(resolved.warnings.is_empty());
     }
 
     #[test]
@@ -1250,13 +1383,18 @@ mod tests {
             .expect("explicit flags");
         assert_eq!(resolved.label, "8.03B");
         assert_eq!(resolved.params, 8_030_000_000);
-        assert_eq!(resolved.kv.per_token, 131_072.0);
-        assert_eq!(resolved.kv.warning, None);
+        assert_eq!(resolved.arch.map(|arch| arch.name), Some("llama-3.1-8b"));
+        assert_eq!(resolved.kv_per_token, 131_072.0);
+        assert_eq!(resolved.ctx_default, None);
+        assert_eq!(resolved.provenance, ModelProvenance::Manual);
+        assert!(resolved.warnings.is_empty());
 
         let weights_only = resolve_model(None, Some("135M"), None, false).expect("no arch");
         assert_eq!(weights_only.params, 135_000_000);
-        assert_eq!(weights_only.kv.per_token, 0.0);
-        assert_eq!(weights_only.kv.warning, Some(KV_EXCLUDED_WARNING));
+        assert_eq!(weights_only.arch, None);
+        assert_eq!(weights_only.kv_per_token, 0.0);
+        assert_eq!(weights_only.warnings, vec![KV_EXCLUDED_WARNING.to_string()]);
+        assert_eq!(weights_only.provenance, ModelProvenance::Manual);
     }
 
     #[test]
@@ -1265,7 +1403,8 @@ mod tests {
         let via_flags = resolve_model(None, Some("8.03B"), Some("llama-3.1-8b"), false)
             .expect("explicit flags");
         assert_eq!(via_model.params, via_flags.params);
-        assert_eq!(via_model.kv.per_token, via_flags.kv.per_token);
+        assert_eq!(via_model.arch, via_flags.arch);
+        assert_eq!(via_model.kv_per_token, via_flags.kv_per_token);
     }
 
     #[test]
@@ -1287,10 +1426,14 @@ mod tests {
         let resolved =
             resolve_model(Some(name), None, None, false).expect("GGUF file should resolve");
         assert_eq!(resolved.label, name);
+        assert_eq!(resolved.display, name);
         assert_eq!(resolved.params, 8_200_000_000);
         // 2 (K+V) × 36 layers × 8 KV heads × (4096/32) × 2 bytes.
-        assert_eq!(resolved.kv.per_token, 2.0 * 36.0 * 8.0 * 128.0 * 2.0);
-        assert_eq!(resolved.kv.warning, None);
+        assert_eq!(resolved.kv_per_token, 2.0 * 36.0 * 8.0 * 128.0 * 2.0);
+        assert_eq!(resolved.arch.map(|arch| arch.name), Some("gguf"));
+        assert_eq!(resolved.ctx_default, None);
+        assert_eq!(resolved.provenance, ModelProvenance::Gguf);
+        assert!(resolved.warnings.is_empty());
 
         let probe = resolved.gguf.as_ref().expect("probe result");
         assert_eq!(probe.facts.architecture, "llama");
@@ -1319,7 +1462,11 @@ mod tests {
             Some("catalog says 32 layers, file has 36")
         );
         // The file's 36 layers drive the KV size, not the catalog's 32.
-        assert_eq!(resolved.kv.per_token, 2.0 * 36.0 * 8.0 * 128.0 * 2.0);
+        assert_eq!(resolved.kv_per_token, 2.0 * 36.0 * 8.0 * 128.0 * 2.0);
+        assert_eq!(
+            resolved.warnings,
+            vec!["catalog says 32 layers, file has 36".to_string()]
+        );
         cleanup_temp_gguf(&path);
     }
 
@@ -1365,6 +1512,44 @@ mod tests {
             report.decode_tps,
             weights_only
         );
+    }
+
+    #[test]
+    fn build_report_resolved_ctx_changes_kv_bytes_and_decode() {
+        let mut short = context(None, "unavailable: test");
+        short.arch = Some("llama-3.1-8b");
+        short.kv_per_token = kv_bytes_per_token(parse_arch("llama-3.1-8b").expect("preset"));
+        short.ram_avail_bytes = Some(64e9);
+
+        let mut long = context(None, "unavailable: test");
+        long.arch = short.arch;
+        long.kv_per_token = short.kv_per_token;
+        long.ram_avail_bytes = short.ram_avail_bytes;
+        long.ctx = 8_192;
+
+        let short_report = build_report(&short, Quant::Q4_K_M).expect("short ctx report");
+        let long_report = build_report(&long, Quant::Q4_K_M).expect("long ctx report");
+
+        // KV bytes scale with ctx in both decode and the RAM fit.
+        let short_fit = short_report.ram_fit.expect("short ram fit");
+        let long_fit = long_report.ram_fit.expect("long ram fit");
+        assert_eq!(short_fit.kv_bytes, short.kv_per_token * 2_048.0);
+        assert_eq!(long_fit.kv_bytes, short.kv_per_token * 8_192.0);
+        assert!(
+            long_fit.kv_bytes > short_fit.kv_bytes,
+            "ctx 8192 must need more KV than 2048"
+        );
+        assert!(
+            long_report.decode_tps < short_report.decode_tps,
+            "larger ctx must lower decode: {} vs {}",
+            long_report.decode_tps,
+            short_report.decode_tps
+        );
+
+        // `inputs` echoes the resolved arch/ctx used, not the raw flags.
+        let inputs = short_report.inputs.expect("inputs");
+        assert_eq!(inputs.arch.as_deref(), Some("llama-3.1-8b"));
+        assert_eq!(inputs.ctx, Some(2_048));
     }
 
     #[test]

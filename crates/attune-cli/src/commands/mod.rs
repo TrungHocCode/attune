@@ -66,10 +66,9 @@ pub enum Command {
             .args(["model", "params"])
     ))]
     Estimate {
-        /// Verified catalog model (e.g. `llama-3.1-8b`, `qwen3-8b`) or an
-        /// existing `.gguf` file path. A catalog name supplies the parameter
-        /// count and KV-cache shape from the built-in table; a file is probed
-        /// from its header, with a catalog cross-check when the name matches.
+        /// Model source, in priority order: an existing `.gguf` file path
+        /// (probed header), an `org/model` Hugging Face id (config.json with
+        /// a 30-day cache), or a verified catalog name (e.g. `llama-3.1-8b`).
         /// Mutually exclusive with `--params` / `--arch`.
         #[arg(long, value_name = "NAME_OR_PATH", conflicts_with = "arch")]
         model: Option<String>,
@@ -104,9 +103,11 @@ pub enum Command {
         /// slice 3 calibration output)
         #[arg(long, value_name = "N", default_value_t = 128)]
         gen_tokens: u64,
-        /// Context window size used for KV-cache sizing (default 2048)
-        #[arg(long, value_name = "N", default_value_t = 2048)]
-        ctx: u32,
+        /// Context window size used for KV-cache sizing. When omitted, a
+        /// built-in model uses its documented default (catalog/config.json),
+        /// otherwise 2048. An explicit value always wins.
+        #[arg(long, value_name = "N")]
+        ctx: Option<u32>,
         /// Saved `attune bench --json` report to calibrate against. Accepts
         /// either a bare report or the `{ "bench": … }` envelope written by
         /// `attune bench --model --save`. A full report also supplies the

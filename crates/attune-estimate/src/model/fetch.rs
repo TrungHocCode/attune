@@ -112,6 +112,10 @@ pub struct ResolvedHfModel {
     pub params: u64,
     /// KV-cache shape.
     pub arch: Arch,
+    /// Documented default context window (`max_position_embeddings`), or
+    /// `None` when the config omits it. The CLI uses this only when `--ctx`
+    /// was not passed.
+    pub ctx_default: Option<u32>,
     /// Which source supplied the facts.
     pub source: ConfigSource,
     /// Notices to attach to every report (`offline, using …`, cache failures).
@@ -344,6 +348,7 @@ where
                     label: entry.name.to_string(),
                     params: entry.params,
                     arch: entry.arch,
+                    ctx_default: Some(entry.ctx_default),
                     source: ConfigSource::EmbeddedCatalog,
                     warnings: vec!["offline, using embedded catalog".to_string()],
                 });
@@ -370,6 +375,7 @@ fn resolved_from(
         label: label.to_string(),
         params: config.params,
         arch: config.arch(),
+        ctx_default: (config.ctx_default > 0).then_some(config.ctx_default),
         source,
         warnings,
     }
@@ -661,6 +667,7 @@ mod tests {
             resolve_hf_model_at("Qwen/Qwen2.5-0.5B", false, &path, now, fetch).expect("cache hit");
         assert_eq!(resolved.source, ConfigSource::Cache);
         assert_eq!(resolved.params, 134_515_008);
+        assert_eq!(resolved.ctx_default, Some(8_192));
         assert!(resolved.warnings.is_empty());
         cleanup(&path);
     }
@@ -740,6 +747,7 @@ mod tests {
         assert_eq!(resolved.label, "smollm2-135m");
         assert_eq!(resolved.params, 135_000_000);
         assert_eq!(resolved.arch.n_layer, 30);
+        assert_eq!(resolved.ctx_default, Some(8_192));
         assert_eq!(
             resolved.warnings,
             vec!["offline, using embedded catalog".to_string()]
