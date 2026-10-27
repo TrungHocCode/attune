@@ -70,6 +70,7 @@ Current phase: **PHASE 3 — TUNE (M4: `attune tune`)**.
 - Don't commit `target/`, `*.gguf`, local bench JSON.
 - Don't rename binary/crate prefix (`attune`, `attune-*`).
 - Don't add Desktop/Tauri code until M5 (serve) is complete.
+- Don't `assert_eq!` on floats across a JSON roundtrip (serde's float backend does not guarantee bitwise round-trip — compare with tolerance). Same for any live-system value: tests reading clocks/CPU%/RAPL need headroom, never exact bounds.
 
 ## 7. Git Flow (strict — solo dev, chuẩn team)
 
@@ -91,6 +92,7 @@ Current phase: **PHASE 3 — TUNE (M4: `attune tune`)**.
 - Types cho phép: `feat|fix|chore|docs|refactor|test|perf|ci|build`.
 - KHÔNG: `git push --force` lên `main`, commit `target/`, `*.gguf`, `profiles/*.json`, secret, `attune-plan.md` (đã gitignored — local only).
 - Trước commit luôn chạy: `git status --short` + `git diff --stat` để soát file lọt (plan, secret).
+- Issue/PR bodies: always write to a `.md` file first, then `--body-file` (inline `--body` eats newlines on PowerShell). Keep `oldString` edits surrounded by unique context lines.
 
 **Release:**
 - M1→M5 tag `v0.1.0`→`v0.5.0`, ghi `CHANGELOG.md`, binary <20MB.
