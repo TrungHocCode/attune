@@ -168,6 +168,9 @@ pub enum Command {
         /// Override the FP32 peak (decimal GFLOPS); skips the HAL estimate
         #[arg(long, value_name = "GFLOPS")]
         gflops: Option<f64>,
+        /// Keep at most this many candidates after pruning (default 64)
+        #[arg(long, value_name = "N", default_value_t = 64)]
+        max_configs: usize,
         /// Output machine-readable JSON instead of the human table
         #[arg(long)]
         json: bool,
@@ -240,6 +243,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             objective,
             bandwidth_gbps,
             gflops,
+            max_configs,
             json,
         } => tune::run(
             model.as_deref(),
@@ -249,6 +253,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             &objective,
             bandwidth_gbps,
             gflops,
+            max_configs,
             json,
         ),
     }

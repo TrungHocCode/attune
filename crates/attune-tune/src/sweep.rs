@@ -1,9 +1,58 @@
-//! Cartesian grid expansion and estimate-only ranking.
+//! Cartesian grid expansion, pruning and estimate-only ranking.
 
 use attune_estimate::{predict_decode_tps, predict_prefill_ms_quant, HwInputs, Quant, RamFit};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{Objective, TuneConfig, TuneError};
+
+/// Context tokens reserved for chat templates / BOS overhead when checking
+/// whether a config can hold `prompt_tokens + gen_tokens`.
+pub const CTX_SAFETY_MARGIN: u64 = 32;
+
+/// Why [`prune`] dropped a candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PruneReason {
+    /// Weights do not fit in the supplied available RAM.
+    Oom,
+    /// `prompt_tokens + gen_tokens + margin` exceeds the context window.
+    CtxOverflow,
+    /// The config uses more threads than the machine has physical cores.
+    TooManyThreads,
+    /// The grid exceeded `--max-configs` after the checks above.
+    OverCap,
+}
+
+impl PruneReason {
+    /// Canonical lowercase name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PruneReason::Oom => "oom",
+            PruneReason::CtxOverflow => "ctx_overflow",
+            PruneReason::TooManyThreads => "too_many_threads",
+            PruneReason::OverCap => "over_cap",
+        }
+    }
+
+    /// Actionable hint shown next to an OOM or overflow notice.
+    ///
+    /// The OOM text intentionally names the two knobs that reduce the
+    /// footprint: a smaller context window and a smaller quantization.
+    pub fn suggestion(self) -> &'static str {
+        match self {
+            PruneReason::Oom => "try a lower n_ctx or a smaller quant",
+            PruneReason::CtxOverflow => "raise n_ctx or lower prompt/gen tokens",
+            PruneReason::TooManyThreads => "use at most the physical core count",
+            PruneReason::OverCap => "raise --max-configs to keep more candidates",
+        }
+    }
+}
+
+impl std::fmt::Display for PruneReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// One ranked grid point plus the prediction it was scored from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,6 +107,53 @@ pub fn expand_grid(
     configs
 }
 
+/// Drop configs that cannot run, then enforce the candidate cap.
+///
+/// Checks run in a fixed order so the same grid always reports the same reason:
+/// OOM, context overflow, too many threads, then `max_configs`. A non-positive
+/// or non-finite `avail_bytes` (or `physical_cores == 0`) means "unknown", so
+/// that check is skipped rather than pruning everything. The kept order is the
+/// input order, which keeps cap truncation deterministic.
+pub fn prune(
+    configs: &[TuneConfig],
+    params: u64,
+    avail_bytes: f64,
+    prompt_tokens: u64,
+    gen_tokens: u64,
+    physical_cores: u32,
+    max_configs: usize,
+) -> (Vec<TuneConfig>, Vec<(TuneConfig, PruneReason)>) {
+    let required_ctx = prompt_tokens
+        .saturating_add(gen_tokens)
+        .saturating_add(CTX_SAFETY_MARGIN);
+    let mut kept = Vec::new();
+    let mut pruned = Vec::new();
+
+    for config in configs {
+        let weight_bytes = params as f64 * config.quant.bytes_per_param();
+        let fits = RamFit::new(weight_bytes, 0.0, avail_bytes).is_none_or(|fit| fit.fits);
+        if !fits {
+            pruned.push((config.clone(), PruneReason::Oom));
+            continue;
+        }
+        if u64::from(config.n_ctx) < required_ctx {
+            pruned.push((config.clone(), PruneReason::CtxOverflow));
+            continue;
+        }
+        if physical_cores > 0 && config.n_threads > physical_cores {
+            pruned.push((config.clone(), PruneReason::TooManyThreads));
+            continue;
+        }
+        if kept.len() >= max_configs {
+            pruned.push((config.clone(), PruneReason::OverCap));
+            continue;
+        }
+        kept.push(config.clone());
+    }
+
+    (kept, pruned)
+}
+
 /// Predict and rank every config, best score first.
 ///
 /// All math is the pure `attune-estimate` roofline; nothing is detected or
@@ -71,7 +167,8 @@ pub fn expand_grid(
 ///   cache read is omitted and the number is optimistic at large contexts);
 /// - TTFT is [`predict_prefill_ms_quant`] for the full `n_ctx` window, the
 ///   worst-case prefill available without a separate prompt-length input;
-/// - RAM fit counts weights only, for the same no-`Arch` reason.
+/// - RAM fit and the near-ceiling score penalty count weights only, for the
+///   same no-`Arch` reason.
 ///
 /// Ties keep the input (grid) order because [`slice::sort_by`] is stable.
 /// The `Result` exists because the roofline math rejects invalid inputs
@@ -99,16 +196,17 @@ pub fn rank_by_estimate(
             hw.flops_gflops,
             config.quant,
         )?;
-        let fits = RamFit::new(
+        let fit = RamFit::new(
             params as f64 * config.quant.bytes_per_param(),
             0.0,
             avail_bytes,
-        )
-        .is_none_or(|fit| fit.fits);
-        let score = objective.score(decode_tps, ttft_ms, fits);
+        );
+        let fits = fit.is_none_or(|fit| fit.fits);
+        let ram_ratio = fit.map_or(0.0, |fit| fit.peak_bytes / fit.avail_bytes);
+        let score = objective.score(decode_tps, ttft_ms, fits, ram_ratio);
 
         ranked.push(RankedConfig {
-            config: *config,
+            config: config.clone(),
             decode_tps,
             ttft_ms,
             fits,
@@ -301,5 +399,90 @@ mod tests {
             "got {} want {expected}",
             ranked[0].decode_tps
         );
+    }
+
+    #[test]
+    fn rank_feeds_the_near_ceiling_ram_ratio_into_the_score() {
+        let config = TuneConfig::new(Quant::Q4_K_M, 2_048, 4, 512, Quant::Fp16);
+        let params = 1_000_000_000_u64;
+        let avail = 700_000_000.0;
+        let ranked =
+            rank_by_estimate(&[config], params, hw(), avail, Objective::Throughput).expect("rank");
+
+        let weight = params as f64 * Quant::Q4_K_M.bytes_per_param();
+        let ratio = weight / avail;
+        let expected = ranked[0].decode_tps - (ratio - crate::objective::RAM_WARN_RATIO) * 10.0;
+        assert!(ranked[0].fits);
+        assert!(ratio > crate::objective::RAM_WARN_RATIO, "ratio {ratio}");
+        assert!(
+            (ranked[0].score - expected).abs() < 1e-9,
+            "got {} want {expected}",
+            ranked[0].score
+        );
+    }
+
+    #[test]
+    fn prune_drops_oom_with_a_lower_n_ctx_or_quant_suggestion() {
+        let configs = expand_grid(
+            &[Quant::Fp16, Quant::Q4_K_M],
+            &[2_048],
+            &[4],
+            &[512],
+            &[Quant::Fp16],
+        );
+        let (kept, pruned) = prune(&configs, 70_000_000_000, 16e9, 512, 128, 8, 64);
+
+        assert!(kept.is_empty());
+        assert_eq!(pruned.len(), 2);
+        assert!(pruned.iter().all(|(_, reason)| *reason == PruneReason::Oom));
+        let suggestion = PruneReason::Oom.suggestion();
+        assert!(
+            suggestion.contains("n_ctx") && suggestion.contains("quant"),
+            "suggestion must name both knobs: {suggestion}"
+        );
+    }
+
+    #[test]
+    fn prune_drops_context_overflow() {
+        let configs = expand_grid(&[Quant::Q4_K_M], &[2_048], &[4], &[512], &[Quant::Fp16]);
+        // 2048 + 128 + 32 = 2208 > 2048.
+        let (kept, pruned) = prune(&configs, 135_000_000, 16e9, 2048, 128, 8, 64);
+        assert!(kept.is_empty());
+        assert_eq!(pruned[0].1, PruneReason::CtxOverflow);
+    }
+
+    #[test]
+    fn prune_drops_too_many_threads() {
+        let configs = [TuneConfig::new(Quant::Q4_K_M, 2_048, 16, 512, Quant::Fp16)];
+        let (kept, pruned) = prune(&configs, 135_000_000, 16e9, 512, 128, 8, 64);
+        assert!(kept.is_empty());
+        assert_eq!(pruned[0].1, PruneReason::TooManyThreads);
+    }
+
+    #[test]
+    fn prune_cap_is_deterministic_and_reports_the_count() {
+        let (configs, _) = crate::expand_full_grid_with_quants(8, &[Quant::Q4_K_M]);
+        let (first, first_pruned) = prune(&configs, 135_000_000, 16e9, 512, 128, 8, 5);
+        let (second, second_pruned) = prune(&configs, 135_000_000, 16e9, 512, 128, 8, 5);
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 5);
+        assert_eq!(first, configs[..5].to_vec());
+        assert_eq!(
+            first_pruned
+                .iter()
+                .filter(|(_, reason)| *reason == PruneReason::OverCap)
+                .count(),
+            11
+        );
+        assert_eq!(first_pruned, second_pruned);
+    }
+
+    #[test]
+    fn prune_skips_checks_when_ram_or_cores_are_unknown() {
+        let configs = expand_grid(&[Quant::Q4_K_M], &[2_048], &[4], &[512], &[Quant::Fp16]);
+        let (kept, pruned) = prune(&configs, 135_000_000, 0.0, 0, 0, 0, 64);
+        assert_eq!(kept.len(), 1);
+        assert!(pruned.is_empty());
     }
 }
