@@ -27,10 +27,11 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
-    apply_decode, apply_prefill, clamped, classify, decode_ai, kv_bytes_per_token, parse_arch,
-    parse_model, parse_params, parse_quants, predict_prefill_ms_quant, probe_gguf_file, ridge_ai,
-    spread_pct_from_stats, CalibratedInputs, CalibrationReport, Confidence, EstimateError,
-    EstimateInputs, EstimateReport, GgufProbe, HwInputs, MultiEstimateReport, Quant, RamFit,
+    apply_decode, apply_prefill, clamped, classify, decode_ai, is_hf_id, kv_bytes_per_token,
+    parse_arch, parse_model, parse_params, parse_quants, predict_prefill_ms_quant, probe_gguf_file,
+    resolve_hf_model, ridge_ai, spread_pct_from_stats, CalibratedInputs, CalibrationReport,
+    Confidence, EstimateError, EstimateInputs, EstimateReport, GgufProbe, HwInputs,
+    MultiEstimateReport, Quant, RamFit,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
@@ -213,9 +214,9 @@ fn resolve_kv(arch: Option<&str>) -> Result<KvResolution, EstimateError> {
 }
 
 /// Model inputs resolved from either `--model` or `--params` + `--arch`.
-struct ModelResolution<'a> {
+struct ModelResolution {
     /// Report label: catalog name, GGUF path or the literal `--params` text.
-    label: &'a str,
+    label: String,
     /// Parameter count used for the weight footprint.
     params: u64,
     /// KV-cache traffic for the resolved architecture.
@@ -223,6 +224,8 @@ struct ModelResolution<'a> {
     /// Probe result when `--model` was a `.gguf` file path. Drives the
     /// human-readable probe line and the catalog mismatch warning.
     gguf: Option<GgufProbe>,
+    /// Notices from online config resolution (`offline, using …`).
+    model_warnings: Vec<String>,
 }
 
 /// True when `--model` points at an existing `.gguf` file (case-insensitive
@@ -241,16 +244,21 @@ fn as_gguf_path(value: &str) -> Option<&Path> {
 /// An existing `.gguf` file is probed from its header: `general.parameter_count`
 /// supplies the size when present, otherwise a catalog entry inferred from the
 /// file name does. The file's KV shape wins over a catalog disagreement, which
-/// is recorded as a warning. Plain names keep the catalog path; the two flags
-/// stay the escape hatch for models outside both. Clap makes `--model` mutually
-/// exclusive with `--params` / `--arch`, so the paths cannot silently disagree.
-/// The catalog's `ctx_default` is deliberately not applied here yet: `--ctx`
-/// remains the context source until the wiring slice consumes it.
-fn resolve_model<'a>(
-    model: Option<&'a str>,
-    params: Option<&'a str>,
+/// is recorded as a warning. A catalog name is looked up in the embedded table.
+/// An `org/name` Hugging Face id outside the catalog fetches `config.json`,
+/// using the 30-day cache and degrading to stale cache / embedded catalog when
+/// offline (`--refresh-catalog` forces that refetch). Short unknown names are
+/// never guessed into an organization. The two flags stay the escape hatch for
+/// everything else, and clap makes `--model` mutually exclusive with
+/// `--params` / `--arch`, so the paths cannot silently disagree. The catalog's
+/// `ctx_default` is deliberately not applied here yet: `--ctx` remains the
+/// context source until the wiring slice consumes it.
+fn resolve_model(
+    model: Option<&str>,
+    params: Option<&str>,
     arch: Option<&str>,
-) -> Result<ModelResolution<'a>> {
+    refresh_catalog: bool,
+) -> Result<ModelResolution> {
     if let Some(name) = model {
         if let Some(path) = as_gguf_path(name) {
             let probe = probe_gguf_file(path)
@@ -272,33 +280,52 @@ fn resolve_model<'a>(
                 },
             };
             return Ok(ModelResolution {
-                label: name,
+                label: name.to_string(),
                 params,
                 kv,
                 gguf: Some(probe),
+                model_warnings: Vec::new(),
             });
         }
 
-        let entry = parse_model(name).map_err(|err| {
-            anyhow!("{err}; pass --params <SIZE> --arch <NAME> for a model outside the catalog")
-        })?;
-        return Ok(ModelResolution {
-            label: entry.name,
-            params: entry.params,
-            kv: KvResolution {
-                per_token: kv_bytes_per_token(&entry.arch),
-                warning: None,
-            },
-            gguf: None,
-        });
+        return match parse_model(name) {
+            Ok(entry) => Ok(ModelResolution {
+                label: entry.name.to_string(),
+                params: entry.params,
+                kv: KvResolution {
+                    per_token: kv_bytes_per_token(&entry.arch),
+                    warning: None,
+                },
+                gguf: None,
+                model_warnings: Vec::new(),
+            }),
+            Err(_) if is_hf_id(name) => {
+                let resolved =
+                    resolve_hf_model(name, refresh_catalog).map_err(|err| anyhow!("{err}"))?;
+                Ok(ModelResolution {
+                    label: resolved.label,
+                    params: resolved.params,
+                    kv: KvResolution {
+                        per_token: kv_bytes_per_token(&resolved.arch),
+                        warning: None,
+                    },
+                    gguf: None,
+                    model_warnings: resolved.warnings,
+                })
+            }
+            Err(catalog_err) => Err(anyhow!(
+                "{catalog_err}; pass --params <SIZE> --arch <NAME> for a model outside the catalog"
+            )),
+        };
     }
 
     let params = params.ok_or_else(|| anyhow!("pass --model <NAME> or --params <SIZE>"))?;
     Ok(ModelResolution {
-        label: params.trim(),
+        label: params.trim().to_string(),
         params: parse_params(params)?,
         kv: resolve_kv(arch)?,
         gguf: None,
+        model_warnings: Vec::new(),
     })
 }
 
@@ -706,6 +733,7 @@ pub fn run(
     bench_json: Option<&Path>,
     bench_quant: Option<&str>,
     calibrate: bool,
+    refresh_catalog: bool,
     json: bool,
 ) -> Result<()> {
     let ModelResolution {
@@ -713,7 +741,8 @@ pub fn run(
         params: params_count,
         kv,
         gguf,
-    } = resolve_model(model, params, arch)?;
+        model_warnings,
+    } = resolve_model(model, params, arch, refresh_catalog)?;
     let quants = parse_quants(quant)?;
     // The bench's own quant is only known when the user states it; without
     // the flag no quant-mismatch warning can be produced (and none is).
@@ -739,7 +768,7 @@ pub fn run(
         flops_gflops: compute.gflops,
     };
     let context = ReportContext {
-        label,
+        label: &label,
         params: params_count,
         prompt_tokens,
         ctx,
@@ -754,6 +783,9 @@ pub fn run(
     let mut reports = Vec::with_capacity(quants.len());
     for quant in quants {
         let mut report = build_report(&context, quant)?;
+        for warning in &model_warnings {
+            report = report.with_warning(warning);
+        }
         if let Some(probe) = gguf.as_ref() {
             if let Some(warning) = probe.warning.as_deref() {
                 report = report.with_warning(warning);
@@ -789,7 +821,7 @@ pub fn run(
     sort_by_decode(&mut reports);
 
     if json {
-        println!("{}", render_json(label, &reports)?);
+        println!("{}", render_json(&label, &reports)?);
         return Ok(());
     }
 
@@ -1204,7 +1236,8 @@ mod tests {
 
     #[test]
     fn resolve_model_prefers_the_catalog_entry() {
-        let resolved = resolve_model(Some("Llama-3.1-8B"), None, None).expect("catalog model");
+        let resolved =
+            resolve_model(Some("Llama-3.1-8B"), None, None, false).expect("catalog model");
         assert_eq!(resolved.label, "llama-3.1-8b");
         assert_eq!(resolved.params, 8_030_000_000);
         assert_eq!(resolved.kv.per_token, 131_072.0);
@@ -1213,14 +1246,14 @@ mod tests {
 
     #[test]
     fn resolve_model_falls_back_to_params_and_arch() {
-        let resolved =
-            resolve_model(None, Some("8.03B"), Some("llama-3.1-8b")).expect("explicit flags");
+        let resolved = resolve_model(None, Some("8.03B"), Some("llama-3.1-8b"), false)
+            .expect("explicit flags");
         assert_eq!(resolved.label, "8.03B");
         assert_eq!(resolved.params, 8_030_000_000);
         assert_eq!(resolved.kv.per_token, 131_072.0);
         assert_eq!(resolved.kv.warning, None);
 
-        let weights_only = resolve_model(None, Some("135M"), None).expect("no arch");
+        let weights_only = resolve_model(None, Some("135M"), None, false).expect("no arch");
         assert_eq!(weights_only.params, 135_000_000);
         assert_eq!(weights_only.kv.per_token, 0.0);
         assert_eq!(weights_only.kv.warning, Some(KV_EXCLUDED_WARNING));
@@ -1228,16 +1261,16 @@ mod tests {
 
     #[test]
     fn resolve_model_paths_resolve_to_the_same_inputs() {
-        let via_model = resolve_model(Some("llama-3.1-8b"), None, None).expect("catalog");
-        let via_flags =
-            resolve_model(None, Some("8.03B"), Some("llama-3.1-8b")).expect("explicit flags");
+        let via_model = resolve_model(Some("llama-3.1-8b"), None, None, false).expect("catalog");
+        let via_flags = resolve_model(None, Some("8.03B"), Some("llama-3.1-8b"), false)
+            .expect("explicit flags");
         assert_eq!(via_model.params, via_flags.params);
         assert_eq!(via_model.kv.per_token, via_flags.kv.per_token);
     }
 
     #[test]
     fn resolve_model_unknown_name_suggests_params() {
-        let err = resolve_model(Some("not-a-model"), None, None)
+        let err = resolve_model(Some("not-a-model"), None, None, false)
             .err()
             .expect("unknown model must fail");
         let message = err.to_string();
@@ -1251,7 +1284,8 @@ mod tests {
         let path = write_temp_gguf("probe", "local-model.gguf", &bytes);
         let name = path.to_str().expect("temp path is UTF-8");
 
-        let resolved = resolve_model(Some(name), None, None).expect("GGUF file should resolve");
+        let resolved =
+            resolve_model(Some(name), None, None, false).expect("GGUF file should resolve");
         assert_eq!(resolved.label, name);
         assert_eq!(resolved.params, 8_200_000_000);
         // 2 (K+V) × 36 layers × 8 KV heads × (4096/32) × 2 bytes.
@@ -1274,7 +1308,8 @@ mod tests {
         let path = write_temp_gguf("mismatch", "llama-3.1-8b.gguf", &bytes);
         let name = path.to_str().expect("temp path is UTF-8");
 
-        let resolved = resolve_model(Some(name), None, None).expect("GGUF file should resolve");
+        let resolved =
+            resolve_model(Some(name), None, None, false).expect("GGUF file should resolve");
         assert_eq!(resolved.params, 8_030_000_000);
         assert_eq!(
             resolved
@@ -1298,7 +1333,7 @@ mod tests {
         let path = write_temp_gguf("corrupt", "bad.gguf", &bytes);
         let name = path.to_str().expect("temp path is UTF-8");
 
-        let err = resolve_model(Some(name), None, None)
+        let err = resolve_model(Some(name), None, None, false)
             .err()
             .expect("corrupt header must fail");
         let message = err.to_string();

@@ -19,6 +19,15 @@ pub enum EstimateError {
     /// A GGUF file could not be opened or its header is malformed/unsupported.
     #[error("invalid GGUF: {0}")]
     InvalidGguf(String),
+    /// An online `config.json` fetch failed (timeout, DNS, TLS, non-2xx).
+    #[error("config fetch failed: {0}")]
+    FetchConfig(String),
+    /// A fetched or cached `config.json` lacks usable architecture fields.
+    #[error("invalid model config: {0}")]
+    InvalidConfig(String),
+    /// The on-disk catalog cache could not be written.
+    #[error("catalog cache error: {0}")]
+    Cache(String),
     /// A hardware input is missing, non-finite or non-positive.
     #[error("invalid hardware inputs: {0}")]
     BadHw(String),
