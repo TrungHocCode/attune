@@ -10,6 +10,9 @@ description = "Estimate-only config ranking for Attune (M4)"
 # attune-bench). No clap/anyhow here — the CLI owns arg parsing.
 attune-estimate = { path = "../attune-estimate" }
 attune-bench = { path = "../attune-bench" }
+# Slice 3 exports the winner as an `attune-profile` document. The dependency is
+# one-way (profile stays a leaf) so the schema cannot grow tune/estimate logic.
+attune-profile = { path = "../attune-profile" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 

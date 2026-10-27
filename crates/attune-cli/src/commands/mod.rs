@@ -171,6 +171,13 @@ pub enum Command {
         /// Keep at most this many candidates after pruning (default 64)
         #[arg(long, value_name = "N", default_value_t = 64)]
         max_configs: usize,
+        /// Save the winning config as a versioned profile JSON file
+        #[arg(long, value_name = "PATH")]
+        save: Option<PathBuf>,
+        /// Profile name recorded in the saved file
+        /// (default: `<model>-<objective>`)
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
         /// Output machine-readable JSON instead of the human table
         #[arg(long)]
         json: bool,
@@ -244,6 +251,8 @@ pub fn dispatch(command: Command) -> Result<()> {
             bandwidth_gbps,
             gflops,
             max_configs,
+            save,
+            name,
             json,
         } => tune::run(
             model.as_deref(),
@@ -254,6 +263,8 @@ pub fn dispatch(command: Command) -> Result<()> {
             bandwidth_gbps,
             gflops,
             max_configs,
+            save.as_deref(),
+            name.as_deref(),
             json,
         ),
     }
