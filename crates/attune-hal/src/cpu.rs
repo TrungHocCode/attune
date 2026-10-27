@@ -462,6 +462,15 @@ model name\t: Example CPU
         let json = serde_json::to_string(&cpu).expect("serialize CpuInfo");
         assert!(json.contains("\"clock_ghz\""), "missing clock_ghz: {json}");
         let back: CpuInfo = serde_json::from_str(&json).expect("deserialize CpuInfo");
-        assert_eq!(back.clock_ghz, cpu.clock_ghz);
+        // JSON floats are decimal approximations: serde_json's float backend
+        // does not guarantee bitwise round-trip (e.g. 3.6994409999999998 may
+        // serialize as 3.699441), so compare with tolerance, not assert_eq!.
+        // This failed on CI runners whose clock needs >6 significant digits.
+        assert!(
+            (back.clock_ghz - cpu.clock_ghz).abs() < 1e-9,
+            "clock diverged: {} vs {} ({json})",
+            back.clock_ghz,
+            cpu.clock_ghz
+        );
     }
 }

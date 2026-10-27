@@ -7,9 +7,9 @@
 //! omits `head_dim`), and the unit tests mirror every field. Change a number
 //! only together with a source update in the comment and in the test.
 //!
-//! `ctx_default` is intentionally not wired into `estimate` yet: the CLI keeps
-//! using `--ctx` (default 2048) until the catalog wiring slice consumes it.
-//! It is stored and pinned here so that change is a pure wiring diff.
+//! `ctx_default` is the model's documented context window. The CLI uses it
+//! only when the user did not pass `--ctx`; an explicit `--ctx` always wins.
+//! It is stored and pinned here so the resolution rule stays testable.
 
 use super::{Arch, Quant};
 use crate::EstimateError;
@@ -27,8 +27,8 @@ pub struct ModelEntry {
     pub arch: Arch,
     /// Formats this model is commonly distributed in.
     pub quants: &'static [Quant],
-    /// Documented default context window. Stored and tested, but not yet
-    /// applied by `estimate` (see the module note).
+    /// Documented default context window. Used by `estimate` only when
+    /// `--ctx` is not passed explicitly.
     pub ctx_default: u32,
 }
 

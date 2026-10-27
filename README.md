@@ -59,6 +59,19 @@ attune bench               # full bandwidth + FLOPS report
 attune bench --json        # machine-readable report
 ```
 
+`estimate --model` accepts a catalog name, an `org/model` Hugging Face id
+(30-day cache, offline fallback), or a local GGUF path:
+
+```powershell
+attune estimate --model smollm2-135m --quant q4_k_m
+attune estimate --model HuggingFaceTB/SmolLM2-135M --quant q4_k_m
+attune estimate --model .\models\smollm2-135m-q4_k_m.gguf --quant q4_k_m
+attune estimate --params 135M --arch llama-3.1-8b --quant q4_k_m --ctx 2048
+```
+
+`--ctx` overrides the model's documented context default; without either, the
+historical 2048 is used.
+
 JSON output is the stable contract for scripting; the pretty table is for humans.
 
 ## Platform support

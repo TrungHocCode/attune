@@ -155,9 +155,9 @@ pub fn spread_pct_from_stats(stats: &KernelStats) -> Option<f64> {
     spread.is_finite().then_some(spread)
 }
 
-/// Hardware inputs a slice-2 report was computed from, echoed so a consumer
+/// Hardware and model inputs a report was computed from, echoed so a consumer
 /// can reproduce the prediction without re-running detection.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct EstimateInputs {
     /// Memory bandwidth in decimal GB/s.
     #[serde(default)]
@@ -170,6 +170,16 @@ pub struct EstimateInputs {
     /// `serde(default)` keeps older report JSON without this field parseable.
     #[serde(default)]
     pub clock_ghz: f64,
+    /// Resolved KV-cache shape name: a catalog/`--arch` preset, `gguf` for a
+    /// header-derived shape, or `hf-config` for a fetched `config.json`.
+    /// `None` when the source had no usable attention shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+    /// Context length used for KV sizing after resolution: explicit `--ctx`,
+    /// else the source's documented default, else 2048. `None` only in older
+    /// JSON documents (and hand-built reports).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<u32>,
 }
 
 /// Whether the model fits in the RAM available on this machine.
@@ -487,6 +497,8 @@ mod tests {
                 bw_gbps: 20.0,
                 gflops: 50.0,
                 clock_ghz: 4.0,
+                arch: Some("llama-3.1-8b".to_string()),
+                ctx: Some(2048),
             })
             .with_prefill_ms(2764.8)
             .with_ridge(2.5, 33.333_333)
@@ -555,6 +567,8 @@ mod tests {
                 bw_gbps: 20.0,
                 gflops: 50.0,
                 clock_ghz: 4.0,
+                arch: Some("llama-3.1-8b".to_string()),
+                ctx: Some(2048),
             })
             .with_prefill_ms(2764.8)
             .with_ridge(2.5, 33.333_333);
@@ -567,6 +581,8 @@ mod tests {
             "bw_gbps",
             "gflops",
             "clock_ghz",
+            "arch",
+            "ctx",
         ] {
             assert!(
                 json.contains(&format!("\"{key}\"")),
@@ -623,6 +639,10 @@ mod tests {
         assert_eq!(inputs.bw_gbps, 20.0);
         assert_eq!(inputs.gflops, 50.0);
         assert_eq!(inputs.clock_ghz, 0.0);
+        // Model-resolution fields were added after slice 2/3: old documents
+        // must keep parsing with both absent.
+        assert_eq!(inputs.arch, None);
+        assert_eq!(inputs.ctx, None);
     }
 
     #[test]
