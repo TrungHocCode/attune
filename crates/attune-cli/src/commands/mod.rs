@@ -4,6 +4,7 @@
 mod bench;
 mod detect;
 mod estimate;
+mod tune;
 
 use anyhow::Result;
 use clap::{ArgGroup, Subcommand};
@@ -132,6 +133,45 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Rank candidate inference configs from roofline estimates (M4 slice 1).
+    /// Estimate-only: no llama.cpp run, no file output.
+    #[command(group(
+        ArgGroup::new("model_source")
+            .required(true)
+            .args(["model", "params"])
+    ))]
+    Tune {
+        /// Model source, in priority order: an existing `.gguf` file path
+        /// (probed header), an `org/model` Hugging Face id, or a verified
+        /// catalog name (e.g. `llama-3.1-8b`). Mutually exclusive with
+        /// `--params` / `--arch`.
+        #[arg(long, value_name = "NAME_OR_PATH", conflicts_with = "arch")]
+        model: Option<String>,
+        /// Model size, e.g. `135M`, `1.2B` or `7000000`. Alternative to
+        /// `--model` for models outside the catalog.
+        #[arg(long, value_name = "SIZE")]
+        params: Option<String>,
+        /// Architecture preset for the report/display: `llama-3.1-8b`,
+        /// `llama-3.1-70b` or `qwen2.5-7b`. Not used with `--model`.
+        #[arg(long, value_name = "NAME")]
+        arch: Option<String>,
+        /// Weight format(s) to rank: `fp16`, `q8_0`, `q4_0` or `q4_k_m`.
+        /// Comma-separate to sweep several, e.g. `q4_k_m,q8_0`
+        #[arg(long, value_name = "QUANT[,QUANT...]", default_value = "q4_k_m")]
+        quant: String,
+        /// Ranking objective: `throughput`, `latency` or `balanced`
+        #[arg(long, value_name = "NAME", default_value = "balanced")]
+        objective: String,
+        /// Override measured memory bandwidth (decimal GB/s); skips the bench
+        #[arg(long, value_name = "GBPS")]
+        bandwidth_gbps: Option<f64>,
+        /// Override the FP32 peak (decimal GFLOPS); skips the HAL estimate
+        #[arg(long, value_name = "GFLOPS")]
+        gflops: Option<f64>,
+        /// Output machine-readable JSON instead of the human table
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Run the selected subcommand. All logic lives in `commands::*`.
@@ -190,6 +230,25 @@ pub fn dispatch(command: Command) -> Result<()> {
             bench_quant.as_deref(),
             calibrate,
             refresh_catalog,
+            json,
+        ),
+        Command::Tune {
+            model,
+            params,
+            arch,
+            quant,
+            objective,
+            bandwidth_gbps,
+            gflops,
+            json,
+        } => tune::run(
+            model.as_deref(),
+            params.as_deref(),
+            arch.as_deref(),
+            &quant,
+            &objective,
+            bandwidth_gbps,
+            gflops,
             json,
         ),
     }
