@@ -19,4 +19,9 @@ pub enum TuneError {
     /// actionable `attune-estimate` message.
     #[error(transparent)]
     Estimate(#[from] attune_estimate::EstimateError),
+    /// The e2e verification backend could not be set up: no resolvable
+    /// `llama-cli`, or its `--version` probe failed. Individual measurement
+    /// failures are warnings, not this error.
+    #[error("e2e verification setup failed: {0}")]
+    Verify(String),
 }

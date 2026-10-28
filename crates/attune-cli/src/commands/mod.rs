@@ -178,6 +178,29 @@ pub enum Command {
         /// (default: `<model>-<objective>`)
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
+        /// Verify the best candidates with a real llama.cpp e2e run and
+        /// re-score them from the measured numbers (M4 slice 4). Requires
+        /// `--model` to be a local `.gguf` file.
+        #[arg(long, requires = "model")]
+        verify: bool,
+        /// How many of the best estimate configs to verify (default 2)
+        #[arg(long, value_name = "N", default_value_t = 2, requires = "verify")]
+        top_k: usize,
+        /// Path to the llama.cpp `llama-cli` binary (default:
+        /// $ATTUNE_LLAMA_CLI, then a PATH search for `llama-cli`/`main`)
+        #[arg(long, value_name = "PATH", requires = "verify")]
+        llama_cli: Option<PathBuf>,
+        /// Approximate prefill token count for the verification run
+        /// (default 512)
+        #[arg(long, value_name = "N", requires = "verify")]
+        prompt_tokens: Option<usize>,
+        /// Number of decode tokens for the verification run (default 128)
+        #[arg(long, value_name = "N", requires = "verify")]
+        gen_tokens: Option<u32>,
+        /// Context window for the verification run (overrides each config's
+        /// `n_ctx`; default 2048)
+        #[arg(long, value_name = "N", requires = "verify")]
+        ctx: Option<u32>,
         /// Output machine-readable JSON instead of the human table
         #[arg(long)]
         json: bool,
@@ -253,6 +276,12 @@ pub fn dispatch(command: Command) -> Result<()> {
             max_configs,
             save,
             name,
+            verify,
+            top_k,
+            llama_cli,
+            prompt_tokens,
+            gen_tokens,
+            ctx,
             json,
         } => tune::run(
             model.as_deref(),
@@ -265,6 +294,14 @@ pub fn dispatch(command: Command) -> Result<()> {
             max_configs,
             save.as_deref(),
             name.as_deref(),
+            tune::VerifyArgs {
+                enabled: verify,
+                top_k,
+                llama_cli: llama_cli.as_deref(),
+                prompt_tokens,
+                gen_tokens,
+                ctx,
+            },
             json,
         ),
     }
