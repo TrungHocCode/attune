@@ -77,6 +77,7 @@ dependencies = [
  "attune-bench",
  "attune-estimate",
  "attune-hal",
+ "attune-profile",
  "attune-tune",
  "clap",
  "serde_json",
@@ -105,11 +106,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "attune-profile"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "attune-tune"
 version = "0.1.0"
 dependencies = [
  "attune-bench",
  "attune-estimate",
+ "attune-profile",
  "serde",
  "serde_json",
  "thiserror",

@@ -1,9 +1,10 @@
-//! `attune tune` — estimate-only config ranking (M4 slices 1–2).
+//! `attune tune` — estimate-only config ranking (M4 slices 1–3).
 //!
 //! Thin CLI: resolve the model, expand the full thread/context/batch/KV grid,
 //! prune candidates that cannot run, call the pure `attune-tune` ranking and
-//! render either the JSON contract or a human table. No llama.cpp process is
-//! spawned and no file is written in this slice.
+//! render either the JSON contract or a human table. Slice 3 adds `--save`,
+//! which exports the winner as an `attune-profile` document. No llama.cpp
+//! process is spawned.
 //!
 //! Model resolution mirrors `attune estimate` (GGUF file -> `org/model`
 //! fetch/cache -> catalog name -> manual `--params`/`--arch`). The resolver is
@@ -21,10 +22,19 @@ use attune_estimate::{
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
+use attune_profile::Profile;
+use attune_tune::ProfileInputs;
 use attune_tune::{
-    expand_full_grid_with_quants, prune, rank_by_estimate, stars, Objective, PruneReason,
-    TuneConfig, TuneError, TuneReport,
+    expand_full_grid_with_quants, from_best, hardware_fingerprint, prune, rank_by_estimate, stars,
+    Objective, PruneReason, TuneConfig, TuneError, TuneReport,
 };
+
+/// `engine.version` recorded by slice 3: no llama.cpp binary is inspected on
+/// the estimate-only path, so the field states that instead of guessing.
+const ENGINE_VERSION_ESTIMATE_ONLY: &str = "unknown (estimate-only)";
+
+/// Confidence recorded for an uncalibrated slice-3 prediction.
+const ESTIMATE_ONLY_CONFIDENCE: f64 = 0.5;
 
 /// Prompt length assumed by the prune check. The slice-1 sweep ranks the full
 /// context as TTFT, so this is only used to drop a context window that cannot
@@ -263,6 +273,27 @@ fn detect_physical_cores() -> u32 {
         .unwrap_or(1)
 }
 
+/// Readable fingerprint for the machine this profile is being saved on.
+///
+/// Only called when `--save` is used, so the normal estimate path never pays
+/// for a second HAL detection. Detection failures degrade to the same
+/// `unknown|0|unknown|0` marker rather than blocking the save.
+fn current_hardware_fingerprint() -> String {
+    let cpu = attune_hal::cpu::detect();
+    let memory = attune_hal::memory::detect();
+    let brand = cpu
+        .as_ref()
+        .map(|cpu| cpu.brand.as_str())
+        .unwrap_or("unknown");
+    let cores = cpu.as_ref().map_or(0, |cpu| cpu.physical_cores);
+    let simd = cpu
+        .as_ref()
+        .map(|cpu| cpu.simd.as_str())
+        .unwrap_or("unknown");
+    let total_ram = memory.as_ref().map_or(0, |memory| memory.total_bytes);
+    hardware_fingerprint(brand, cores, simd, total_ram)
+}
+
 /// Compact parameter label (`135M`, `8.00B`, ...).
 fn format_params(params: u64) -> String {
     if params >= 1_000_000_000 {
@@ -325,7 +356,7 @@ fn print_table(report: &TuneReport, resolution: &ModelResolution, total_ram_fall
     }
     println!();
     println!(
-        "Note: estimate-only ranking (weights-only decode, full-context prefill TTFT); no llama.cpp run, no file written."
+        "Note: estimate-only ranking (weights-only decode, full-context prefill TTFT); no llama.cpp run."
     );
     for warning in &report.warnings {
         println!("Warning:     {warning}");
@@ -359,6 +390,49 @@ fn print_pruned(pruned: &[(TuneConfig, PruneReason)], cap_from_expand: usize) {
     );
 }
 
+/// Build the versioned profile for the highest-ranked config.
+fn build_profile(report: &TuneReport, resolution: &ModelResolution, name: &str) -> Result<Profile> {
+    let best = report
+        .configs
+        .first()
+        .ok_or_else(|| anyhow!("cannot save a profile without a ranked config"))?;
+    let quant = best.config.quant;
+    let size_bytes = (report.params as f64 * quant.bytes_per_param()).round() as u64;
+    let fingerprint = current_hardware_fingerprint();
+    let inputs = ProfileInputs {
+        name,
+        fingerprint: &fingerprint,
+        engine_version: ENGINE_VERSION_ESTIMATE_ONLY,
+        model_path: &resolution.label,
+        quant,
+        size_bytes,
+        ram_peak_gb: size_bytes as f64 / 1e9,
+        confidence: ESTIMATE_ONLY_CONFIDENCE,
+    };
+    Ok(from_best(
+        &best.config,
+        best.decode_tps,
+        best.ttft_ms,
+        &inputs,
+    ))
+}
+
+/// One-line summary of the winner, printed before the save path.
+fn print_best(report: &TuneReport) {
+    if let Some(best) = report.configs.first() {
+        println!(
+            "Best: {} ctx={} threads={} batch={} kv={} | {:.1} tok/s decode, {:.1} ms TTFT",
+            best.config.quant.as_str(),
+            best.config.n_ctx,
+            best.config.n_threads,
+            best.config.n_batch,
+            best.config.cache_kv.as_str(),
+            best.decode_tps,
+            best.ttft_ms,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     model: Option<&str>,
@@ -369,6 +443,8 @@ pub fn run(
     bandwidth_gbps: Option<f64>,
     gflops: Option<f64>,
     max_configs: usize,
+    save: Option<&Path>,
+    name: Option<&str>,
     json: bool,
 ) -> Result<()> {
     if max_configs == 0 {
@@ -485,12 +561,41 @@ pub fn run(
     )
     .with_warnings(warnings);
 
+    let profile = match save {
+        Some(path) => {
+            let default_name = format!("{}-{}", resolution.label, objective);
+            let profile_name = name.unwrap_or(default_name.as_str());
+            let profile = build_profile(&report, &resolution, profile_name)?;
+            let document = profile.to_json_string()?;
+            std::fs::write(path, document)
+                .with_context(|| format!("failed to write profile to {}", path.display()))?;
+            Some(profile)
+        }
+        None => None,
+    };
+
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        let mut value = serde_json::to_value(&report)?;
+        if let Some(profile) = &profile {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("profile".to_string(), serde_json::to_value(profile)?);
+                if let Some(path) = save {
+                    object.insert(
+                        "profile_path".to_string(),
+                        serde_json::Value::String(path.display().to_string()),
+                    );
+                }
+            }
+        }
+        println!("{}", serde_json::to_string_pretty(&value)?);
         return Ok(());
     }
 
     print_pruned(&pruned, cap_from_expand);
     print_table(&report, &resolution, total_ram_fallback);
+    if let (Some(path), Some(_)) = (save, profile.as_ref()) {
+        print_best(&report);
+        println!("Profile saved: {}", path.display());
+    }
     Ok(())
 }

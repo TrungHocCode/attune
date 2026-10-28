@@ -13,17 +13,21 @@
 //!
 //! **Scope:** decode is the weights-only roofline (no `Arch`, so no KV-cache
 //! term) and TTFT is the prefill of the full `n_ctx` window. RAM fit and the
-//! near-ceiling score penalty therefore count weights only. Later slices add
-//! the arch-aware KV term, an e2e verification run and profile output.
+//! near-ceiling score penalty therefore count weights only. Slice 3 adds
+//! [`export`], which turns the winning config into an `attune-profile`
+//! document; later slices add the arch-aware KV term and an e2e verification
+//! run.
 
 pub mod config;
 pub mod error;
+pub mod export;
 pub mod objective;
 pub mod report;
 pub mod sweep;
 
 pub use config::{expand_full_grid, expand_full_grid_with_quants, TuneConfig, FULL_GRID_CAP};
 pub use error::TuneError;
+pub use export::{from_best, hardware_fingerprint, ProfileInputs};
 pub use objective::{ram_penalty, stars, tpot_ms_from_tps, Objective};
 pub use report::TuneReport;
 pub use sweep::{expand_grid, prune, rank_by_estimate, PruneReason, RankedConfig};
