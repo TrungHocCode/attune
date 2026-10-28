@@ -5,6 +5,8 @@ members = [
     "crates/attune-estimate",
     "crates/attune-tune",
     "crates/attune-profile",
+    "crates/attune-backend",
+    "crates/attune-serve",
     "crates/attune-cli",
 ]
 resolver = "2"

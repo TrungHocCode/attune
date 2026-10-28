@@ -1,0 +1,19 @@
+[package]
+name = "attune-backend"
+version.workspace = true
+edition.workspace = true
+description = "Inference backend adapters for Attune (llama.cpp subprocess)"
+
+[dependencies]
+# Plan §7: attune-backend owns the Backend trait and the llama.cpp subprocess
+# adapter. It deliberately does NOT depend on attune-bench/attune-hal: the
+# serve path must stay lean, so the tiny binary resolver is duplicated here
+# instead of pulling the whole benchmarking stack (see lib.rs).
+attune-profile = { path = "../attune-profile" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+# Justification (AGENTS §3.4): sync HTTP health polling without an async
+# runtime. `ureq` is already in the workspace (attune-estimate), but this is a
+# separate dependency entry: the health endpoint is plain localhost HTTP, so no
+# TLS feature is enabled and `rustls`/`ring` stay out of the serving path.
+ureq = { version = "3", default-features = false }

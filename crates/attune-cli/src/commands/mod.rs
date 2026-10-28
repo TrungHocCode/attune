@@ -4,6 +4,7 @@
 mod bench;
 mod detect;
 mod estimate;
+mod serve;
 mod tune;
 
 use anyhow::Result;
@@ -130,6 +131,32 @@ pub enum Command {
         #[arg(long)]
         refresh_catalog: bool,
         /// Output machine-readable JSON instead of the human lines
+        #[arg(long)]
+        json: bool,
+    },
+    /// Serve a tuned profile through llama-server (M5 slice 1: profile
+    /// validation + spawn + health check; proxy/metrics land in later slices).
+    Serve {
+        /// Profile JSON written by `attune tune --save`
+        #[arg(long, value_name = "PATH")]
+        profile: PathBuf,
+        /// Path to the llama.cpp `llama-server` binary (default:
+        /// $ATTUNE_LLAMA_SERVER, then a PATH search for `llama-server`)
+        #[arg(long, value_name = "PATH")]
+        llama_server: Option<PathBuf>,
+        /// Interface the upstream server binds to
+        #[arg(long, value_name = "HOST", default_value = "127.0.0.1")]
+        host: String,
+        /// Upstream port llama-server listens on
+        #[arg(long, value_name = "PORT", default_value_t = 8081)]
+        port: u16,
+        /// Seconds to wait for `/health` before giving up
+        #[arg(long, value_name = "N", default_value_t = 60)]
+        timeout_s: u64,
+        /// Launch without validating the profile against this machine
+        #[arg(long)]
+        force: bool,
+        /// Print one machine-readable JSON line once the server is healthy
         #[arg(long)]
         json: bool,
     },
@@ -279,6 +306,23 @@ pub fn dispatch(command: Command) -> Result<()> {
             bench_quant.as_deref(),
             calibrate,
             refresh_catalog,
+            json,
+        ),
+        Command::Serve {
+            profile,
+            llama_server,
+            host,
+            port,
+            timeout_s,
+            force,
+            json,
+        } => serve::run(
+            &profile,
+            llama_server.as_deref(),
+            &host,
+            port,
+            timeout_s,
+            force,
             json,
         ),
         Command::Tune {
