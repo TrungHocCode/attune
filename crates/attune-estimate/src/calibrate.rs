@@ -25,6 +25,12 @@
 //! Everything here is pure: no I/O, no clock, no allocation beyond the error
 //! strings. The CLI reads the bench JSON and feeds the numbers in.
 
+use std::path::Path;
+
+use attune_bench::BenchReport;
+
+use crate::model::Quant;
+use crate::report::CalibrationReport;
 use crate::EstimateError;
 
 /// Lower clamp for any fitted eta. A measured/predicted ratio below this is
@@ -138,6 +144,171 @@ pub fn apply_prefill(raw_ms: f64, eta_comp: f64) -> f64 {
     } else {
         0.0
     }
+}
+
+/// Parse the text of a saved bench report.
+///
+/// `attune bench --save` writes a bare [`BenchReport`] when it runs the
+/// kernels only, but the `--model` path wraps it in `{ "llama": …, "bench": … }`
+/// so the probe block stays alongside the measurements. Accept both shapes: a
+/// consumer should not have to know which mode produced the file.
+///
+/// Pure (no file I/O): the CLI owns reading the path and adding context.
+pub fn parse_bench_report(text: &str) -> Result<BenchReport, serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(text)?;
+    let candidate = value.get("bench").unwrap_or(&value);
+    serde_json::from_value(candidate.clone())
+}
+
+/// One calibration fitted from a bench report, reusable across a whole sweep.
+///
+/// `attune estimate` fits and applies in one step per report. `attune tune`
+/// (M4 slice 5) needs the opposite order: fit **once** against a reference
+/// roofline, then apply the same `eta_mem` / `eta_comp` to every ranked config
+/// so the grid is scaled consistently instead of being re-fitted per point.
+///
+/// [`BenchCalibration::fit`] performs the fit and keeps the measured values
+/// plus the bench prompt length; [`BenchCalibration::report_for`] applies them
+/// to one roofline prediction and returns the same [`CalibrationReport`] shape
+/// `attune estimate` emits (including cross-workload warnings).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BenchCalibration {
+    /// The fitted factors.
+    pub inputs: CalibratedInputs,
+    /// Decode throughput the bench measured, in tokens/second.
+    pub measured_decode_tps: f64,
+    /// TTFT the bench measured, in milliseconds; `None` when the e2e block
+    /// carried no usable prefill timing.
+    pub measured_ttft_ms: Option<f64>,
+    /// Prompt length llama.cpp actually processed, echoed into the
+    /// cross-workload prompt warning.
+    pub bench_prompt_tokens: u64,
+}
+
+impl BenchCalibration {
+    /// Fit both factors from a bench report and a reference roofline.
+    ///
+    /// Decode uses `eta_mem = measured / roofline`; prefill latency is
+    /// inverted (see [`CalibratedInputs::fit`]). A missing or unusable `e2e`
+    /// block is an expected condition and returns
+    /// [`EstimateError::CalibrationUnavailable`] — never a panic.
+    pub fn fit(
+        bench: &BenchReport,
+        roofline_decode_tps: f64,
+        roofline_prefill_ms: Option<f64>,
+        path: &Path,
+    ) -> Result<Self, EstimateError> {
+        let e2e = bench.e2e.as_ref().ok_or_else(|| {
+            EstimateError::CalibrationUnavailable(format!(
+                "{} has no e2e block; run `attune bench --model <gguf> --save <PATH>` first",
+                path.display()
+            ))
+        })?;
+
+        if !e2e.tok_s.is_finite() || e2e.tok_s <= 0.0 {
+            return Err(EstimateError::CalibrationUnavailable(format!(
+                "{} has no usable e2e decode rate (tok_s={}); rerun the bench with --model",
+                path.display(),
+                e2e.tok_s,
+            )));
+        }
+
+        let measured_ttft_ms = if e2e.ttft_ms.is_finite() && e2e.ttft_ms > 0.0 {
+            Some(e2e.ttft_ms)
+        } else {
+            None
+        };
+        let inputs = CalibratedInputs::fit(
+            roofline_decode_tps,
+            e2e.tok_s,
+            roofline_prefill_ms,
+            measured_ttft_ms,
+        )?;
+
+        Ok(Self {
+            inputs,
+            measured_decode_tps: e2e.tok_s,
+            measured_ttft_ms,
+            bench_prompt_tokens: e2e.prompt_tokens,
+        })
+    }
+
+    /// Apply the fitted factors to one roofline prediction.
+    ///
+    /// `estimate_prompt_tokens` is the prompt length this prediction models
+    /// (for `attune tune` that is the config's `n_ctx`, because TTFT is the
+    /// full-context prefill). A quant or prompt mismatch, or an eta sitting
+    /// exactly on a clamp bound, becomes a `warnings` entry instead of a
+    /// silent mis-calibration.
+    pub fn report_for(
+        &self,
+        roofline_decode_tps: f64,
+        roofline_prefill_ms: Option<f64>,
+        bench_quant: Option<Quant>,
+        estimate_quant: Quant,
+        estimate_prompt_tokens: u64,
+    ) -> CalibrationReport {
+        let calibrated_decode_tps = apply_decode(roofline_decode_tps, self.inputs.eta_mem);
+        let calibrated_prefill_ms_ttft = match (self.measured_ttft_ms, roofline_prefill_ms) {
+            (Some(_), Some(raw_ms)) => Some(apply_prefill(raw_ms, self.inputs.eta_comp)),
+            _ => None,
+        };
+
+        let mut warnings = Vec::new();
+        if let Some(bench_quant) = bench_quant {
+            if bench_quant != estimate_quant {
+                warnings.push(format!(
+                    "eta from {bench_quant} applied to {estimate_quant}"
+                ));
+            }
+        }
+        if self.bench_prompt_tokens != estimate_prompt_tokens {
+            warnings.push(format!(
+                "prompt mismatch {} vs {}",
+                self.bench_prompt_tokens, estimate_prompt_tokens
+            ));
+        }
+        if clamped(self.inputs.eta_mem)
+            || (self.measured_ttft_ms.is_some() && clamped(self.inputs.eta_comp))
+        {
+            warnings.push("eta clamped, unreliable".to_string());
+        }
+
+        CalibrationReport {
+            inputs: self.inputs,
+            measured_decode_tps: self.measured_decode_tps,
+            calibrated_decode_tps,
+            measured_ttft_ms: self.measured_ttft_ms,
+            calibrated_prefill_ms_ttft,
+            warnings,
+        }
+    }
+}
+
+/// Fit and apply a bench calibration to one roofline prediction.
+///
+/// A thin composition of [`BenchCalibration::fit`] and
+/// [`BenchCalibration::report_for`], kept as the one call `attune estimate`
+/// needs. `attune tune` uses the two steps directly so it can fit once and
+/// apply to every ranked config.
+#[allow(clippy::too_many_arguments)]
+pub fn calibrate_with_bench(
+    bench: &BenchReport,
+    roofline_decode_tps: f64,
+    roofline_prefill_ms: f64,
+    path: &Path,
+    bench_quant: Option<Quant>,
+    estimate_quant: Quant,
+    estimate_prompt_tokens: u64,
+) -> Result<CalibrationReport, EstimateError> {
+    let fit = BenchCalibration::fit(bench, roofline_decode_tps, Some(roofline_prefill_ms), path)?;
+    Ok(fit.report_for(
+        roofline_decode_tps,
+        Some(roofline_prefill_ms),
+        bench_quant,
+        estimate_quant,
+        estimate_prompt_tokens,
+    ))
 }
 
 #[cfg(test)]

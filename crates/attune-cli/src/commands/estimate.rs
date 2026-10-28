@@ -27,10 +27,10 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
-    apply_decode, apply_prefill, clamped, classify, decode_ai, is_hf_id, kv_bytes_per_token,
-    parse_arch, parse_model, parse_params, parse_quants, predict_prefill_ms_quant, probe_gguf_file,
-    resolve_hf_model, ridge_ai, spread_pct_from_stats, Arch, CalibratedInputs, CalibrationReport,
-    Confidence, ConfigSource, EstimateError, EstimateInputs, EstimateReport, GgufProbe, HwInputs,
+    calibrate_with_bench, classify, decode_ai, is_hf_id, kv_bytes_per_token, parse_arch,
+    parse_bench_report, parse_model, parse_params, parse_quants, predict_prefill_ms_quant,
+    probe_gguf_file, resolve_hf_model, ridge_ai, spread_pct_from_stats, Arch, Confidence,
+    ConfigSource, EstimateError, EstimateInputs, EstimateReport, GgufProbe, HwInputs,
     MultiEstimateReport, Quant, RamFit,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
@@ -386,105 +386,15 @@ fn detect_available_ram_bytes() -> Option<f64> {
         .filter(|bytes| bytes.is_finite() && *bytes > 0.0)
 }
 
-/// Parse the text of a saved bench report.
-///
-/// `attune bench --save` writes a bare [`BenchReport`] when it runs the
-/// kernels only, but the `--model` path wraps it in `{ "llama": …, "bench": … }`
-/// so the probe block stays alongside the measurements. Accept both shapes:
-/// a consumer should not have to know which mode produced the file.
-fn parse_bench_report(text: &str) -> Result<BenchReport> {
-    let value: serde_json::Value =
-        serde_json::from_str(text).context("bench JSON is not valid JSON")?;
-    let candidate = value.get("bench").unwrap_or(&value);
-    serde_json::from_value(candidate.clone()).context("not an attune bench report")
-}
-
 /// Read and parse `--bench-json`.
+///
+/// Parsing (bare report or `{ "bench": … }` envelope) and the calibration
+/// math live in `attune-estimate`; this wrapper only adds file/path context.
 fn load_bench_report(path: &Path) -> Result<BenchReport> {
     let text = fs::read_to_string(path)
         .with_context(|| format!("failed to read --bench-json {}", path.display()))?;
     parse_bench_report(&text)
         .with_context(|| format!("failed to load --bench-json {}", path.display()))
-}
-
-/// Fit calibration from a bench report.
-///
-/// Decode uses `eta_mem = measured / roofline`; prefill latency is inverted
-/// (see [`CalibratedInputs::fit`]). A missing or unusable `e2e` block is an
-/// expected condition and returns [`EstimateError::CalibrationUnavailable`] —
-/// never a panic.
-///
-/// Cross-workload application is allowed but loud: `bench_quant` (the format
-/// the bench measured, when the user passes `--bench-quant`) and the bench's
-/// prompt length are compared against this estimate, and any mismatch — or
-/// an eta sitting exactly on a clamp bound — becomes a `warnings` entry
-/// instead of a silent mis-calibration.
-#[allow(clippy::too_many_arguments)]
-fn calibrate_with_bench(
-    bench: &BenchReport,
-    roofline_decode_tps: f64,
-    roofline_prefill_ms: f64,
-    path: &Path,
-    bench_quant: Option<Quant>,
-    estimate_quant: Quant,
-    estimate_prompt_tokens: u64,
-) -> Result<CalibrationReport, EstimateError> {
-    let e2e = bench.e2e.as_ref().ok_or_else(|| {
-        EstimateError::CalibrationUnavailable(format!(
-            "{} has no e2e block; run `attune bench --model <gguf> --save <PATH>` first",
-            path.display()
-        ))
-    })?;
-
-    if !e2e.tok_s.is_finite() || e2e.tok_s <= 0.0 {
-        return Err(EstimateError::CalibrationUnavailable(format!(
-            "{} has no usable e2e decode rate (tok_s={}); rerun the bench with --model",
-            path.display(),
-            e2e.tok_s,
-        )));
-    }
-
-    let measured_ttft_ms = if e2e.ttft_ms.is_finite() && e2e.ttft_ms > 0.0 {
-        Some(e2e.ttft_ms)
-    } else {
-        None
-    };
-    let inputs = CalibratedInputs::fit(
-        roofline_decode_tps,
-        e2e.tok_s,
-        Some(roofline_prefill_ms),
-        measured_ttft_ms,
-    )?;
-    let calibrated_decode_tps = apply_decode(roofline_decode_tps, inputs.eta_mem);
-    let calibrated_prefill_ms_ttft =
-        measured_ttft_ms.map(|_| apply_prefill(roofline_prefill_ms, inputs.eta_comp));
-
-    let mut warnings = Vec::new();
-    if let Some(bench_quant) = bench_quant {
-        if bench_quant != estimate_quant {
-            warnings.push(format!(
-                "eta from {bench_quant} applied to {estimate_quant}"
-            ));
-        }
-    }
-    if e2e.prompt_tokens != estimate_prompt_tokens {
-        warnings.push(format!(
-            "prompt mismatch {} vs {}",
-            e2e.prompt_tokens, estimate_prompt_tokens
-        ));
-    }
-    if clamped(inputs.eta_mem) || (measured_ttft_ms.is_some() && clamped(inputs.eta_comp)) {
-        warnings.push("eta clamped, unreliable".to_string());
-    }
-
-    Ok(CalibrationReport {
-        inputs,
-        measured_decode_tps: e2e.tok_s,
-        calibrated_decode_tps,
-        measured_ttft_ms,
-        calibrated_prefill_ms_ttft,
-        warnings,
-    })
 }
 
 /// Everything shared by every config in one `estimate` invocation.

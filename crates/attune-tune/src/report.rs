@@ -79,7 +79,7 @@ impl TuneReport {
 mod tests {
     use super::*;
     use crate::TuneConfig;
-    use attune_estimate::Quant;
+    use attune_estimate::{CalibratedInputs, CalibrationReport, Quant};
 
     fn ranked(score: f64) -> RankedConfig {
         RankedConfig {
@@ -90,6 +90,7 @@ mod tests {
             score,
             verified: false,
             measured: None,
+            calibration: None,
         }
     }
 
@@ -205,6 +206,66 @@ mod tests {
             !json.contains("\"warnings\""),
             "empty warnings must be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn calibration_roundtrips_per_config_and_old_json_still_parses() {
+        let mut config = ranked(246.913_58);
+        config.calibration = Some(CalibrationReport {
+            inputs: CalibratedInputs {
+                eta_mem: 0.5,
+                eta_comp: 1.25,
+            },
+            measured_decode_tps: 123.4,
+            calibrated_decode_tps: 123.456_79,
+            measured_ttft_ms: Some(120.0),
+            calibrated_prefill_ms_ttft: Some(2_211.84),
+            warnings: vec!["prompt mismatch 128 vs 2048".to_string()],
+        });
+        let report = TuneReport::new(
+            "135M",
+            135_000_000,
+            Objective::Throughput,
+            HwInputs {
+                bw_gbps: 20.0,
+                flops_gflops: 50.0,
+            },
+            Some(16e9),
+            vec![config],
+        );
+
+        let json = serde_json::to_string(&report).expect("serialize calibrated report");
+        for key in [
+            "calibration",
+            "eta_mem",
+            "eta_comp",
+            "calibrated_decode_tps",
+        ] {
+            assert!(
+                json.contains(&format!("\"{key}\"")),
+                "missing {key}: {json}"
+            );
+        }
+        let back: TuneReport = serde_json::from_str(&json).expect("deserialize calibrated");
+        let calibration = back.configs[0]
+            .calibration
+            .as_ref()
+            .expect("calibration block");
+        assert!((calibration.inputs.eta_mem - 0.5).abs() < 1e-12);
+        assert_eq!(
+            calibration.warnings,
+            vec!["prompt mismatch 128 vs 2048".to_string()]
+        );
+
+        // An uncalibrated config omits the field, and older JSON (no field)
+        // still parses.
+        let plain = serde_json::to_string(&sample()).expect("serialize plain");
+        assert!(!plain.contains("calibration"), "{plain}");
+        let back: TuneReport = serde_json::from_str(plain.as_str()).expect("deserialize old");
+        assert!(back
+            .configs
+            .iter()
+            .all(|config| config.calibration.is_none()));
     }
 
     #[test]

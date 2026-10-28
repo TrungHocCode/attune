@@ -201,6 +201,22 @@ pub enum Command {
         /// `n_ctx`; default 2048)
         #[arg(long, value_name = "N", requires = "verify")]
         ctx: Option<u32>,
+        /// Saved `attune bench --json` report to calibrate the sweep against.
+        /// Accepts either a bare report or the `{ "bench": … }` envelope
+        /// written by `attune bench --model --save`. The report must contain
+        /// an `e2e` block when `--calibrate` is used.
+        #[arg(long, value_name = "PATH")]
+        bench_json: Option<PathBuf>,
+        /// Calibrate every ranked config from `--bench-json`. The eta pair is
+        /// fitted once against the best estimate config (decode scaled,
+        /// prefill divided), so the whole grid uses the same correction.
+        #[arg(long, requires = "bench_json")]
+        calibrate: bool,
+        /// Weight format the `--bench-json` run measured (e.g. `q4_k_m`).
+        /// The bench report carries no quant, so without this flag no
+        /// cross-quant warning can be produced. Used only with `--calibrate`.
+        #[arg(long, value_name = "QUANT", requires = "bench_json")]
+        bench_quant: Option<String>,
         /// Output machine-readable JSON instead of the human table
         #[arg(long)]
         json: bool,
@@ -282,6 +298,9 @@ pub fn dispatch(command: Command) -> Result<()> {
             prompt_tokens,
             gen_tokens,
             ctx,
+            bench_json,
+            calibrate,
+            bench_quant,
             json,
         } => tune::run(
             model.as_deref(),
@@ -302,6 +321,9 @@ pub fn dispatch(command: Command) -> Result<()> {
                 gen_tokens,
                 ctx,
             },
+            bench_json.as_deref(),
+            bench_quant.as_deref(),
+            calibrate,
             json,
         ),
     }

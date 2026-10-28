@@ -84,7 +84,7 @@ JSON output is the stable contract for scripting; the pretty table is for humans
 
 ## Roadmap
 
-M1 `detect` ✅ · M2 `bench` ✅ · M3 `estimate` ✅ · M4 `tune` 🚧 · M5 `serve` (MVP)
+M1 `detect` ✅ · M2 `bench` ✅ · M3 `estimate` ✅ · M4 `tune` ✅ · M5 `serve` 🚧 (MVP)
 
 Details, acceptance criteria, and status live in [ROADMAP.md](ROADMAP.md).
 GitHub issues and milestones are the source of truth for what lands next.
