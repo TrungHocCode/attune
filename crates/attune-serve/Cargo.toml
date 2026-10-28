@@ -1,0 +1,15 @@
+[package]
+name = "attune-serve"
+version.workspace = true
+edition.workspace = true
+description = "Profile launcher and health check for Attune (M5)"
+
+[dependencies]
+# Plan §7: attune-serve owns the launcher/health-check lifecycle and depends on
+# the backend adapter + the profile schema. attune-hal supplies the live
+# fingerprint inputs and available RAM for profile validation.
+attune-backend = { path = "../attune-backend" }
+attune-profile = { path = "../attune-profile" }
+attune-hal = { path = "../attune-hal" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
