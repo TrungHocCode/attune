@@ -46,9 +46,9 @@ cargo run -p attune-cli -- detect
 
 ## 4. Phase Discipline (do NOT jump ahead)
 
-Current phase: **PHASE 3 — TUNE (M4: `attune tune`)**.
-- M1 (detect), M2 (bench), M3 (estimate) are done and tagged v0.1.0–v0.3.0.
-- DO NOT implement `serve/Tauri` until M4 is done.
+Current phase: **PHASE 4 — SERVE (M5: `attune serve`, MVP)**.
+- M1 (detect), M2 (bench), M3 (estimate), M4 (tune) are done and tagged v0.1.0–v0.4.0.
+- Serve scope was recorded in ROADMAP.md (proxy + `/v1/metrics` JSON + `/metrics` Prometheus, localhost-only by default). Plan slices just before starting.
 - Each task must meet its Acceptance column in plan §8 before marking done.
 
 **Phase-close checklist (mandatory when a milestone finishes):**

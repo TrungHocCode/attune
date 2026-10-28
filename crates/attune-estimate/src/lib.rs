@@ -22,7 +22,8 @@ pub mod roofline;
 
 pub use bottleneck::{classify, decode_ai, prefill_ai, ridge_ai};
 pub use calibrate::{
-    apply_decode, apply_prefill, clamped, fit_eta, CalibratedInputs, MAX_ETA, MIN_ETA,
+    apply_decode, apply_prefill, calibrate_with_bench, clamped, fit_eta, parse_bench_report,
+    BenchCalibration, CalibratedInputs, MAX_ETA, MIN_ETA,
 };
 pub use error::EstimateError;
 pub use model::{

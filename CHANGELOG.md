@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-10-28
+
+Calibrated sweep plus the M4 acceptance measurement on SmolLM2-135M Q4_K_M.
+
+### Added
+- `attune tune --bench-json <PATH> --calibrate [--bench-quant <QUANT>]`:
+  fits `eta_mem` / `eta_comp` **once** against the best estimate config and
+  applies the same factors to every ranked config (decode scaled, prefill
+  divided). Each `RankedConfig` gets an optional `calibration` block with its
+  calibrated numbers and cross-workload warnings; `--bench-quant` enables the
+  quant-mismatch notice and the bench prompt length drives the prompt-mismatch
+  notice.
+- `BenchCalibration` and `parse_bench_report` in `attune-estimate`, plus
+  `attune_tune::calibrate_ranked`, so `estimate` and `tune` share one
+  calibration/parsing path instead of duplicating it.
+- `attune tune` human output prints the fitted `eta_mem` / `eta_comp` and the
+  bench's measured tok/s / TTFT above the ranking.
+
+### Changed
+- `RankedConfig` gains `calibration` (`serde(default)`, omitted when
+  uncalibrated, so older JSON still parses).
+- `attune-estimate` exports `calibrate_with_bench` (moved out of the CLI) with
+  unchanged behavior; `estimate` still fits and applies per report.
+
+### Acceptance (M4)
+
+Measured on SmolLM2-135M Q4_K_M / llama.cpp 0.7.0-dev, Windows x86-64, five
+consecutive runs per side:
+
+- llama.cpp defaults (`-m -p <~500-token prompt> -n 32 -c 2048`, no `-t`):
+  **125.3 tok/s** median (runs 118.6–136.2).
+- `attune tune --objective throughput --verify --top-k 2 --max-configs 8`:
+  **157.5 tok/s** median best measured config (runs 141.8–174.5); the winner
+  was `q4_k_m ctx=2048 -t 4 n_batch=128`.
+- Median-vs-median improvement **25.7%**; best-vs-best **28.1%**. That clears
+  the >20% M4 target on these runs, but both sides are noisy on a 135M model,
+  so treat the margin as directional rather than a hard guarantee.
+
+Release binary: `attune.exe` = **3,898,368 bytes (3.72 MiB)**, under the
+20 MB budget.
+
 ## [0.3.2] - 2026-10-27
 
 Model-resolution wiring for `attune estimate` (closes #48). One resolver now

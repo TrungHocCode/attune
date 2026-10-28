@@ -1,4 +1,4 @@
-//! `attune tune` — config ranking (M4 slices 1–4).
+//! `attune tune` — config ranking (M4 slices 1–5).
 //!
 //! Thin CLI: resolve the model, expand the full thread/context/batch/KV grid,
 //! prune candidates that cannot run, call the pure `attune-tune` ranking and
@@ -6,7 +6,9 @@
 //! which exports the winner as an `attune-profile` document. Slice 4 adds the
 //! opt-in `--verify`, which measures the best `--top-k` configs with a real
 //! llama.cpp e2e run and re-scores them. Without `--verify` nothing is
-//! spawned and the output is unchanged.
+//! spawned and the output is unchanged. Slice 5 adds
+//! `--bench-json`/`--bench-quant`/`--calibrate`: one eta pair is fitted from
+//! the saved bench and applied to every ranked config.
 //!
 //! Model resolution mirrors `attune estimate` (GGUF file -> `org/model`
 //! fetch/cache -> catalog name -> manual `--params`/`--arch`). The resolver is
@@ -14,23 +16,24 @@
 //! TODO on [`resolve_model`] — promoting it to one shared helper is a
 //! follow-up, not part of M4 slice 1.
 
+use std::fs;
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use attune_bench::e2e::{DEFAULT_GEN_TOKENS, DEFAULT_PROMPT_TOKENS};
-use attune_bench::{run_quick, BandwidthReport};
+use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
-    is_hf_id, parse_arch, parse_model, parse_params, parse_quants, probe_gguf_file,
-    resolve_hf_model, Arch, HwInputs,
+    is_hf_id, parse_arch, parse_bench_report, parse_model, parse_params, parse_quants,
+    probe_gguf_file, resolve_hf_model, Arch, BenchCalibration, HwInputs, Quant,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
 use attune_profile::Profile;
 use attune_tune::ProfileInputs;
 use attune_tune::{
-    expand_full_grid_with_quants, from_best, hardware_fingerprint, prune, rank_by_estimate,
-    run_verify_topk, stars, Objective, PruneReason, RankedConfig, TuneConfig, TuneError,
-    TuneReport,
+    calibrate_ranked, expand_full_grid_with_quants, from_best, hardware_fingerprint, prune,
+    rank_by_estimate, run_verify_topk, stars, Objective, PruneReason, RankedConfig, TuneConfig,
+    TuneError, TuneReport,
 };
 
 /// `engine.version` recorded by slice 3: no llama.cpp binary is inspected on
@@ -188,6 +191,17 @@ fn resolve_bandwidth(bandwidth_gbps: Option<f64>) -> Result<f64> {
             }
         }
     }
+}
+
+/// Read and parse `--bench-json`.
+///
+/// Parsing (bare report or `{ "bench": … }` envelope) and the calibration
+/// math live in `attune-estimate`; this wrapper only adds file/path context.
+fn load_bench_report(path: &Path) -> Result<BenchReport> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("failed to read --bench-json {}", path.display()))?;
+    parse_bench_report(&text)
+        .with_context(|| format!("failed to load --bench-json {}", path.display()))
 }
 
 /// Resolved hardware inputs for one tune run.
@@ -355,6 +369,23 @@ fn print_table(
         ),
         (Some(ram), false) => println!("RAM:    {:.1} GB available", ram / 1e9),
         (None, _) => println!("RAM:    unknown (fit check skipped)"),
+    }
+    // One eta pair was fitted once and applied to every config (slice 5), so
+    // the first calibrated entry describes the whole sweep.
+    if let Some(calibration) = report
+        .configs
+        .iter()
+        .find_map(|ranked| ranked.calibration.as_ref())
+    {
+        let ttft = calibration
+            .measured_ttft_ms
+            .map_or_else(|| "no TTFT".to_string(), |ms| format!("{ms:.1} ms TTFT"));
+        println!(
+            "Calib:  eta_mem={:.3} (decode), eta_comp={:.3} (prefill) | bench measured {:.1} tok/s, {ttft}",
+            calibration.inputs.eta_mem,
+            calibration.inputs.eta_comp,
+            calibration.measured_decode_tps,
+        );
     }
     // Only widen the table when at least one config was measured, so the
     // estimate-only output every earlier slice produced stays byte-identical.
@@ -567,6 +598,9 @@ pub fn run(
     save: Option<&Path>,
     name: Option<&str>,
     verify: VerifyArgs<'_>,
+    bench_json: Option<&Path>,
+    bench_quant: Option<&str>,
+    calibrate: bool,
     json: bool,
 ) -> Result<()> {
     if max_configs == 0 {
@@ -575,6 +609,22 @@ pub fn run(
     if verify.enabled && verify.top_k == 0 {
         return Err(anyhow!("--top-k must be > 0"));
     }
+    if calibrate && bench_json.is_none() {
+        return Err(anyhow!(
+            "--calibrate requires --bench-json <PATH> with an e2e block"
+        ));
+    }
+
+    // The bench report is only read once, but parse it before the probes so a
+    // typo in the path fails fast. `--calibrate` is the only consumer.
+    let bench = match bench_json {
+        Some(path) => Some(load_bench_report(path)?),
+        None => None,
+    };
+    let bench_quant = bench_quant
+        .map(str::parse::<Quant>)
+        .transpose()
+        .map_err(|err: attune_estimate::EstimateError| anyhow!("{err}"))?;
 
     // `--verify` can only measure a real file: a catalog name or `--params`
     // has no GGUF for llama.cpp to load. Fail before the hardware probes.
@@ -686,6 +736,36 @@ pub fn run(
         effective_avail.unwrap_or(0.0),
         objective,
     )?;
+
+    // Opt-in slice 5: fit one eta pair against the best estimate config and
+    // apply it to every ranked point. Fitting per config would give each grid
+    // point a different correction; the grid must stay internally consistent.
+    let mut calibration_warnings: Vec<String> = Vec::new();
+    if calibrate {
+        let path = bench_json
+            .ok_or_else(|| anyhow!("--calibrate requires --bench-json <PATH> with an e2e block"))?;
+        let bench = bench
+            .as_ref()
+            .ok_or_else(|| anyhow!("--calibrate requires --bench-json <PATH> with an e2e block"))?;
+        let reference = ranked
+            .first()
+            .ok_or_else(|| anyhow!("cannot calibrate an empty ranking"))?;
+        let fit = BenchCalibration::fit(bench, reference.decode_tps, Some(reference.ttft_ms), path)
+            .map_err(|err| anyhow!("{err}"))?;
+        ranked = calibrate_ranked(&ranked, &fit, bench_quant, objective);
+        // Each config carries its own notices; the human table shows the
+        // deduplicated union once instead of one line per row.
+        for entry in &ranked {
+            if let Some(report) = &entry.calibration {
+                for warning in &report.warnings {
+                    if !calibration_warnings.contains(warning) {
+                        calibration_warnings.push(warning.clone());
+                    }
+                }
+            }
+        }
+    }
+
     // Keep the estimate numbers for the human `--verify` table; the report
     // itself carries the measured values after re-scoring.
     let estimate_snapshot = verify.enabled.then(|| ranked.clone());
@@ -697,6 +777,7 @@ pub fn run(
     if total_ram_fallback {
         warnings.push(TOTAL_RAM_FALLBACK_WARNING.to_string());
     }
+    warnings.extend(calibration_warnings);
     // Opt-in slice 4: measure the top-K estimate configs and re-score them.
     // Setup errors fail here; a single bad run becomes a warning and keeps
     // that config's estimate score.

@@ -18,7 +18,8 @@
 //! near-ceiling score penalty therefore count weights only. Slice 3 adds
 //! [`export`], which turns the winning config into an `attune-profile`
 //! document; slice 4 adds [`verify`], the optional e2e measurement of the
-//! top-K configs.
+//! top-K configs; slice 5 adds [`sweep::calibrate_ranked`], which applies one
+//! bench-fitted eta pair uniformly to every ranked config.
 
 pub mod config;
 pub mod error;
@@ -33,7 +34,9 @@ pub use error::TuneError;
 pub use export::{from_best, hardware_fingerprint, ProfileInputs};
 pub use objective::{ram_penalty, stars, tpot_ms_from_tps, Objective};
 pub use report::TuneReport;
-pub use sweep::{expand_grid, prune, rank_by_estimate, PruneReason, RankedConfig};
+pub use sweep::{
+    calibrate_ranked, expand_grid, prune, rank_by_estimate, PruneReason, RankedConfig,
+};
 pub use verify::{e2e_config_for, rerank_with_e2e, run_verify_topk, VerifyOutcome};
 
 /// Schema stamped on every [`TuneReport`] so consumers can tell this M4

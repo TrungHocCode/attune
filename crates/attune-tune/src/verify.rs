@@ -197,8 +197,18 @@ fn map_preflight(err: BenchError) -> TuneError {
     }
 }
 
-/// Re-score one measured config, preserving the estimate's RAM penalty.
-fn rescore(entry: &RankedConfig, decode_tps: f64, ttft_ms: f64, objective: Objective) -> f64 {
+/// Re-score one config from new decode/TTFT numbers, preserving the estimate's
+/// RAM penalty.
+///
+/// Shared by [`rerank_with_e2e`] (measured numbers) and
+/// [`crate::sweep::calibrate_ranked`] (calibrated estimates): both replace the
+/// decode/TTFT pair but must not silently drop the near-ceiling nudge.
+pub(crate) fn rescore(
+    entry: &RankedConfig,
+    decode_tps: f64,
+    ttft_ms: f64,
+    objective: Objective,
+) -> f64 {
     let estimate_raw = objective.score(entry.decode_tps, entry.ttft_ms, entry.fits, 0.0);
     let penalty = if estimate_raw.is_finite() && entry.score.is_finite() {
         (estimate_raw - entry.score).max(0.0)
@@ -235,6 +245,7 @@ mod tests {
             score,
             verified: false,
             measured: None,
+            calibration: None,
         }
     }
 

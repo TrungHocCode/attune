@@ -49,18 +49,22 @@
 - Validated on SmolLM2-135M Q4_K_M: bench measured 148.05 tok/s,
   calibrated estimate 148.1 (eta=0.420) — 0% error.
 
-## M4 — Tune 🚧 (current, v0.4.0 planned)
+## M4 — Tune ✅ (v0.4.0)
 
 **Goal:** find the best config automatically.
 
 - Config-space sweep (quant, threads, batch, KV-cache type, context size)
-  with scoring objectives (throughput / latency / balanced).
+  with scoring objectives (throughput / latency / balanced); two-tier
+  estimate-then-verify-top-K with real e2e runs.
 - Export the winner as a versioned JSON profile with validation and
   fallbacks (hardware mismatch warns, low RAM suggests smaller settings).
 - Acceptance: > 20% better than llama.cpp defaults on the test machine;
   profile round-trips through validation.
+- Validated on SmolLM2-135M Q4_K_M: defaults 125.3 tok/s median vs tuned
+  best 157.5 tok/s median (**+25.7%**; noisy on a 135M model, reported as
+  directional).
 
-## M5 — Serve (planned, v0.5.0, MVP)
+## M5 — Serve 🚧 (current, v0.5.0 planned, MVP)
 
 **Goal:** run the winning profile for real.
 

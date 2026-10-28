@@ -1,7 +1,10 @@
 //! Cartesian grid expansion, pruning and estimate-only ranking.
 
 use attune_bench::e2e::E2eResult;
-use attune_estimate::{predict_decode_tps, predict_prefill_ms_quant, HwInputs, Quant, RamFit};
+use attune_estimate::{
+    predict_decode_tps, predict_prefill_ms_quant, BenchCalibration, CalibrationReport, HwInputs,
+    Quant, RamFit,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{Objective, TuneConfig, TuneError};
@@ -85,6 +88,11 @@ pub struct RankedConfig {
     /// config was only scored by the roofline estimate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measured: Option<E2eResult>,
+    /// The bench calibration applied to this config's estimate (M4 slice 5,
+    /// `attune tune --bench-json --calibrate`). `None` when the sweep ran
+    /// uncalibrated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<CalibrationReport>,
 }
 
 /// Expand a cartesian product into configs.
@@ -221,6 +229,7 @@ pub fn rank_by_estimate(
             score,
             verified: false,
             measured: None,
+            calibration: None,
         });
     }
 
@@ -230,6 +239,57 @@ pub fn rank_by_estimate(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     Ok(ranked)
+}
+
+/// Apply one fitted bench calibration to every ranked config (M4 slice 5).
+///
+/// The caller fits [`BenchCalibration`] **once** against a reference roofline
+/// (the CLI uses the best estimate config) and this function applies the same
+/// `eta_mem` / `eta_comp` to every point: decode is scaled, prefill latency is
+/// divided. Re-fitting per config would give each point a different factor and
+/// make the grid internally inconsistent.
+///
+/// Each entry stores its own [`CalibrationReport`] — that config's calibrated
+/// numbers plus its cross-workload warnings (quant mismatch, prompt mismatch,
+/// clamped eta) — and is re-scored with the same [`Objective`]. The estimate's
+/// near-ceiling RAM penalty is recovered and preserved through
+/// [`crate::verify::rescore`], then the list is re-sorted best-score-first.
+pub fn calibrate_ranked(
+    ranked: &[RankedConfig],
+    calibration: &BenchCalibration,
+    bench_quant: Option<Quant>,
+    objective: Objective,
+) -> Vec<RankedConfig> {
+    let mut calibrated: Vec<RankedConfig> = ranked
+        .iter()
+        .map(|entry| {
+            // `attune tune` predicts TTFT as the full-context prefill, so the
+            // config's `n_ctx` is the prompt length this prediction models.
+            let report = calibration.report_for(
+                entry.decode_tps,
+                Some(entry.ttft_ms),
+                bench_quant,
+                entry.config.quant,
+                u64::from(entry.config.n_ctx),
+            );
+            let decode_tps = report.calibrated_decode_tps;
+            let ttft_ms = report.calibrated_prefill_ms_ttft.unwrap_or(entry.ttft_ms);
+
+            let mut updated = entry.clone();
+            updated.decode_tps = decode_tps;
+            updated.ttft_ms = ttft_ms;
+            updated.score = crate::verify::rescore(entry, decode_tps, ttft_ms, objective);
+            updated.calibration = Some(report);
+            updated
+        })
+        .collect();
+
+    calibrated.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    calibrated
 }
 
 /// Write a finite score as a number and an OOM score as `null`.
@@ -429,6 +489,142 @@ mod tests {
             "got {} want {expected}",
             ranked[0].score
         );
+    }
+
+    /// Canned bench report with the measured e2e block slice 5 calibrates from.
+    fn canned_bench(prompt_tokens: u64, tok_s: f64, ttft_ms: f64) -> attune_bench::BenchReport {
+        use attune_bench::bandwidth::{FullBandwidthResult, KernelStats};
+
+        attune_bench::BenchReport {
+            schema: attune_bench::SCHEMA.to_string(),
+            mode: "full".to_string(),
+            bandwidth: attune_bench::BandwidthReport::Full(FullBandwidthResult {
+                read: KernelStats {
+                    median_gbps: 20.0,
+                    best_gbps: 22.0,
+                },
+                write: KernelStats {
+                    median_gbps: 14.0,
+                    best_gbps: 16.0,
+                },
+                copy: KernelStats {
+                    median_gbps: 18.0,
+                    best_gbps: 20.0,
+                },
+                buffer_mib: 256,
+                threads: 8,
+                reps: 5,
+                flops: None,
+                resources: None,
+            }),
+            flops: None,
+            resources: None,
+            e2e: Some(E2eResult {
+                engine: "test".to_string(),
+                model: "/models/tiny.gguf".to_string(),
+                prompt_tokens,
+                eval_tokens: 32,
+                ttft_ms,
+                tpot_ms: 1_000.0 / tok_s,
+                tok_s,
+                ram_peak_bytes: 1_073_741_824,
+                cpu_avg_pct: 70.0,
+                power_avg_watts: None,
+                elapsed_ms: 0.0,
+            }),
+        }
+    }
+
+    #[test]
+    fn one_calibration_scales_the_whole_grid_and_propagates_warnings() {
+        use std::path::Path;
+
+        let configs = expand_grid(
+            &[Quant::Q4_K_M],
+            &[2_048, 4_096],
+            &[4],
+            &[512],
+            &[Quant::Fp16],
+        );
+        let raw = rank_by_estimate(&configs, 135_000_000, hw(), 16e9, Objective::Throughput)
+            .expect("rank");
+
+        // Fit against the best estimate: half the predicted decode and a
+        // prefill 1.25x slower than predicted (both inside the clamp bounds).
+        let reference = raw.first().expect("ranked config");
+        let bench = canned_bench(128, reference.decode_tps * 0.5, reference.ttft_ms / 1.25);
+        let fit = BenchCalibration::fit(
+            &bench,
+            reference.decode_tps,
+            Some(reference.ttft_ms),
+            Path::new("bench.json"),
+        )
+        .expect("canned calibration should fit");
+        assert!(
+            (fit.inputs.eta_mem - 0.5).abs() < 1e-9,
+            "eta_mem {}",
+            fit.inputs.eta_mem
+        );
+        assert!(
+            (fit.inputs.eta_comp - 1.25).abs() < 1e-9,
+            "eta_comp {}",
+            fit.inputs.eta_comp
+        );
+
+        let calibrated = calibrate_ranked(&raw, &fit, Some(Quant::Fp16), Objective::Throughput);
+        assert_eq!(calibrated.len(), raw.len());
+
+        for entry in &calibrated {
+            let original = raw
+                .iter()
+                .find(|original| original.config == entry.config)
+                .expect("raw entry for every config");
+            let report = entry.calibration.as_ref().expect("calibration block");
+
+            // The same fitted eta scales every grid point.
+            assert!((report.inputs.eta_mem - fit.inputs.eta_mem).abs() < 1e-12);
+            assert!((report.inputs.eta_comp - fit.inputs.eta_comp).abs() < 1e-12);
+            assert!(
+                (entry.decode_tps - original.decode_tps * 0.5).abs() < 1e-9,
+                "decode {} vs {}",
+                entry.decode_tps,
+                original.decode_tps * 0.5
+            );
+            assert!(
+                (entry.ttft_ms - original.ttft_ms / 1.25).abs() < 1e-9,
+                "ttft {} vs {}",
+                entry.ttft_ms,
+                original.ttft_ms / 1.25
+            );
+            assert!((report.calibrated_decode_tps - entry.decode_tps).abs() < 1e-12);
+
+            // Cross-workload warnings survive per config.
+            assert!(
+                report
+                    .warnings
+                    .iter()
+                    .any(|warning| warning == "eta from fp16 applied to q4_k_m"),
+                "{:?}",
+                report.warnings
+            );
+            assert!(
+                report
+                    .warnings
+                    .iter()
+                    .any(|warning| warning
+                        == &format!("prompt mismatch 128 vs {}", entry.config.n_ctx)),
+                "{:?}",
+                report.warnings
+            );
+            assert!(
+                !report
+                    .warnings
+                    .iter()
+                    .any(|warning| warning == "eta clamped, unreliable"),
+                "{:?}",
+                report.warnings
+            );
+        }
     }
 
     #[test]
