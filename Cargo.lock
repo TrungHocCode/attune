@@ -60,7 +60,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "attune-bench"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "attune-hal",
  "serde",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "attune-cli"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "attune-bench",
@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "attune-estimate"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "attune-bench",
  "serde",
@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "attune-hal"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "raw-cpuid",
  "serde",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "attune-profile"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -116,7 +116,7 @@ dependencies = [
 
 [[package]]
 name = "attune-tune"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "attune-bench",
  "attune-estimate",
