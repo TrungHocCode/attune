@@ -1,5 +1,6 @@
 //! Cartesian grid expansion, pruning and estimate-only ranking.
 
+use attune_bench::e2e::E2eResult;
 use attune_estimate::{predict_decode_tps, predict_prefill_ms_quant, HwInputs, Quant, RamFit};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -77,6 +78,13 @@ pub struct RankedConfig {
         deserialize_with = "deserialize_score"
     )]
     pub score: f64,
+    /// Whether a real llama.cpp run measured this config (M4 slice 4).
+    #[serde(default)]
+    pub verified: bool,
+    /// The end-to-end measurement behind [`Self::verified`]. `None` when this
+    /// config was only scored by the roofline estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured: Option<E2eResult>,
 }
 
 /// Expand a cartesian product into configs.
@@ -211,6 +219,8 @@ pub fn rank_by_estimate(
             ttft_ms,
             fits,
             score,
+            verified: false,
+            measured: None,
         });
     }
 

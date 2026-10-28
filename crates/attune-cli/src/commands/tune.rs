@@ -1,10 +1,12 @@
-//! `attune tune` — estimate-only config ranking (M4 slices 1–3).
+//! `attune tune` — config ranking (M4 slices 1–4).
 //!
 //! Thin CLI: resolve the model, expand the full thread/context/batch/KV grid,
 //! prune candidates that cannot run, call the pure `attune-tune` ranking and
 //! render either the JSON contract or a human table. Slice 3 adds `--save`,
-//! which exports the winner as an `attune-profile` document. No llama.cpp
-//! process is spawned.
+//! which exports the winner as an `attune-profile` document. Slice 4 adds the
+//! opt-in `--verify`, which measures the best `--top-k` configs with a real
+//! llama.cpp e2e run and re-scores them. Without `--verify` nothing is
+//! spawned and the output is unchanged.
 //!
 //! Model resolution mirrors `attune estimate` (GGUF file -> `org/model`
 //! fetch/cache -> catalog name -> manual `--params`/`--arch`). The resolver is
@@ -15,6 +17,7 @@
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
+use attune_bench::e2e::{DEFAULT_GEN_TOKENS, DEFAULT_PROMPT_TOKENS};
 use attune_bench::{run_quick, BandwidthReport};
 use attune_estimate::{
     is_hf_id, parse_arch, parse_model, parse_params, parse_quants, probe_gguf_file,
@@ -25,8 +28,9 @@ use attune_hal::HardwareInfo;
 use attune_profile::Profile;
 use attune_tune::ProfileInputs;
 use attune_tune::{
-    expand_full_grid_with_quants, from_best, hardware_fingerprint, prune, rank_by_estimate, stars,
-    Objective, PruneReason, TuneConfig, TuneError, TuneReport,
+    expand_full_grid_with_quants, from_best, hardware_fingerprint, prune, rank_by_estimate,
+    run_verify_topk, stars, Objective, PruneReason, RankedConfig, TuneConfig, TuneError,
+    TuneReport,
 };
 
 /// `engine.version` recorded by slice 3: no llama.cpp binary is inspected on
@@ -51,6 +55,23 @@ const CLOCK_FALLBACK_WARNING: &str =
 /// Warning attached when transient available RAM would prune every candidate.
 const TOTAL_RAM_FALLBACK_WARNING: &str =
     "available RAM can hold no candidate; planning against total RAM — runtime may still OOM";
+
+/// Verify-mode knobs from the CLI. Grouped so [`run`] does not keep growing
+/// one positional argument per flag.
+pub struct VerifyArgs<'a> {
+    /// `--verify`: measure the top-K estimate configs with llama.cpp.
+    pub enabled: bool,
+    /// `--top-k`: how many of the best estimate configs to measure.
+    pub top_k: usize,
+    /// `--llama-cli`: explicit binary path; `None` uses env/PATH.
+    pub llama_cli: Option<&'a Path>,
+    /// `--prompt-tokens`: prefill size for the verification run.
+    pub prompt_tokens: Option<usize>,
+    /// `--gen-tokens`: decode length for the verification run.
+    pub gen_tokens: Option<u32>,
+    /// `--ctx`: context window override for every verification run.
+    pub ctx: Option<u32>,
+}
 
 /// Model inputs resolved from GGUF, fetch/cache, catalog or manual flags.
 struct ModelResolution {
@@ -307,7 +328,16 @@ fn format_params(params: u64) -> String {
 
 /// Human-readable rank table. The score column prints `-inf` for OOM configs
 /// (the JSON contract writes those as `null`).
-fn print_table(report: &TuneReport, resolution: &ModelResolution, total_ram_fallback: bool) {
+///
+/// `estimates` is the pre-verification ranking, kept only so `--verify` can
+/// show the estimate next to the measured numbers (the report itself carries
+/// the measured values in `decode_tps` / `ttft_ms`).
+fn print_table(
+    report: &TuneReport,
+    resolution: &ModelResolution,
+    total_ram_fallback: bool,
+    estimates: Option<&[RankedConfig]>,
+) {
     let arch = resolution.arch.map_or("unknown", |arch| arch.name);
     println!(
         "Model:  {} ({}) | Arch: {arch}",
@@ -326,11 +356,42 @@ fn print_table(report: &TuneReport, resolution: &ModelResolution, total_ram_fall
         (Some(ram), false) => println!("RAM:    {:.1} GB available", ram / 1e9),
         (None, _) => println!("RAM:    unknown (fit check skipped)"),
     }
+    // Only widen the table when at least one config was measured, so the
+    // estimate-only output every earlier slice produced stays byte-identical.
+    let show_verify = report.configs.iter().any(|ranked| ranked.verified);
     println!();
-    println!(
-        "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<5} {:<6} Score",
-        "Rank", "Quant", "Ctx", "Threads", "Batch", "KV", "Decode tok/s", "TTFT ms", "Fit", "Stars"
-    );
+    if show_verify {
+        println!(
+            "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<14} {:<14} {:<8} {:<5} {:<6} Score",
+            "Rank",
+            "Quant",
+            "Ctx",
+            "Threads",
+            "Batch",
+            "KV",
+            "Est. tok/s",
+            "Est. TTFT ms",
+            "E2E tok/s",
+            "E2E TTFT ms",
+            "Verified",
+            "Fit",
+            "Stars"
+        );
+    } else {
+        println!(
+            "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<5} {:<6} Score",
+            "Rank",
+            "Quant",
+            "Ctx",
+            "Threads",
+            "Batch",
+            "KV",
+            "Decode tok/s",
+            "TTFT ms",
+            "Fit",
+            "Stars"
+        );
+    }
     let total = report.configs.len();
     for (index, ranked) in report.configs.iter().enumerate() {
         let score = if ranked.score.is_finite() {
@@ -339,25 +400,67 @@ fn print_table(report: &TuneReport, resolution: &ModelResolution, total_ram_fall
             "-inf".to_string()
         };
         let star_marks = "*".repeat(usize::from(stars(index, total)));
-        println!(
-            "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<5} {:<6} {}",
-            index + 1,
-            ranked.config.quant.as_str(),
-            ranked.config.n_ctx,
-            ranked.config.n_threads,
-            ranked.config.n_batch,
-            ranked.config.cache_kv.as_str(),
-            ranked.decode_tps,
-            ranked.ttft_ms,
-            if ranked.fits { "yes" } else { "OOM" },
-            star_marks,
-            score,
-        );
+        if show_verify {
+            let estimate = estimates
+                .and_then(|list| list.iter().find(|item| item.config == ranked.config))
+                .unwrap_or(ranked);
+            let (e2e_tps, e2e_ttft, verified) = match ranked.measured.as_ref() {
+                Some(measured) if ranked.verified => (
+                    format!("{:.1}", measured.tok_s),
+                    format!("{:.1}", measured.ttft_ms),
+                    "yes".to_string(),
+                ),
+                _ => ("-".to_string(), "-".to_string(), "-".to_string()),
+            };
+            println!(
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<14} {:<14} {:<8} {:<5} {:<6} {}",
+                index + 1,
+                ranked.config.quant.as_str(),
+                ranked.config.n_ctx,
+                ranked.config.n_threads,
+                ranked.config.n_batch,
+                ranked.config.cache_kv.as_str(),
+                estimate.decode_tps,
+                estimate.ttft_ms,
+                e2e_tps,
+                e2e_ttft,
+                verified,
+                if ranked.fits { "yes" } else { "OOM" },
+                star_marks,
+                score,
+            );
+        } else {
+            println!(
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<5} {:<6} {}",
+                index + 1,
+                ranked.config.quant.as_str(),
+                ranked.config.n_ctx,
+                ranked.config.n_threads,
+                ranked.config.n_batch,
+                ranked.config.cache_kv.as_str(),
+                ranked.decode_tps,
+                ranked.ttft_ms,
+                if ranked.fits { "yes" } else { "OOM" },
+                star_marks,
+                score,
+            );
+        }
     }
     println!();
-    println!(
-        "Note: estimate-only ranking (weights-only decode, full-context prefill TTFT); no llama.cpp run."
-    );
+    if show_verify {
+        let measured = report
+            .configs
+            .iter()
+            .filter(|ranked| ranked.verified)
+            .count();
+        println!(
+            "Note: {measured} config(s) re-scored from a measured llama.cpp e2e run; the rest are estimate-only."
+        );
+    } else {
+        println!(
+            "Note: estimate-only ranking (weights-only decode, full-context prefill TTFT); no llama.cpp run."
+        );
+    }
     for warning in &report.warnings {
         println!("Warning:     {warning}");
     }
@@ -433,6 +536,24 @@ fn print_best(report: &TuneReport) {
     }
 }
 
+/// Convert the `--llama-cli` path to the `&str` the resolver takes. A
+/// non-UTF-8 path is named rather than silently ignored (same policy as
+/// `attune bench`).
+fn llama_explicit(path: Option<&Path>) -> Result<Option<&str>> {
+    match path {
+        None => Ok(None),
+        Some(path) => path
+            .to_str()
+            .ok_or_else(|| {
+                anyhow!(
+                    "--llama-cli path is not valid UTF-8: {}",
+                    path.to_string_lossy()
+                )
+            })
+            .map(Some),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     model: Option<&str>,
@@ -445,11 +566,33 @@ pub fn run(
     max_configs: usize,
     save: Option<&Path>,
     name: Option<&str>,
+    verify: VerifyArgs<'_>,
     json: bool,
 ) -> Result<()> {
     if max_configs == 0 {
         return Err(anyhow!("--max-configs must be > 0"));
     }
+    if verify.enabled && verify.top_k == 0 {
+        return Err(anyhow!("--top-k must be > 0"));
+    }
+
+    // `--verify` can only measure a real file: a catalog name or `--params`
+    // has no GGUF for llama.cpp to load. Fail before the hardware probes.
+    let verify_model = if verify.enabled {
+        let Some(requested) = model else {
+            return Err(anyhow!(
+                "--verify requires --model <PATH> to an existing local .gguf file"
+            ));
+        };
+        let path = as_gguf_path(requested).ok_or_else(|| {
+            anyhow!(
+                "--verify requires --model to be an existing local .gguf file (got `{requested}`)"
+            )
+        })?;
+        Some(path.to_path_buf())
+    } else {
+        None
+    };
 
     let resolution = resolve_model(model, params, arch)?;
     let quants = parse_quants(quant)?;
@@ -536,13 +679,16 @@ pub fn run(
         ));
     }
 
-    let ranked = rank_by_estimate(
+    let mut ranked = rank_by_estimate(
         &kept,
         resolution.params,
         hw,
         effective_avail.unwrap_or(0.0),
         objective,
     )?;
+    // Keep the estimate numbers for the human `--verify` table; the report
+    // itself carries the measured values after re-scoring.
+    let estimate_snapshot = verify.enabled.then(|| ranked.clone());
 
     let mut warnings = resolution.warnings.clone();
     if clock_fallback {
@@ -550,6 +696,23 @@ pub fn run(
     }
     if total_ram_fallback {
         warnings.push(TOTAL_RAM_FALLBACK_WARNING.to_string());
+    }
+    // Opt-in slice 4: measure the top-K estimate configs and re-score them.
+    // Setup errors fail here; a single bad run becomes a warning and keeps
+    // that config's estimate score.
+    if let Some(model_path) = verify_model.as_deref() {
+        let outcome = run_verify_topk(
+            &ranked,
+            objective,
+            verify.top_k,
+            model_path,
+            llama_explicit(verify.llama_cli)?,
+            verify.prompt_tokens.unwrap_or(DEFAULT_PROMPT_TOKENS),
+            verify.gen_tokens.unwrap_or(DEFAULT_GEN_TOKENS),
+            verify.ctx,
+        )?;
+        ranked = outcome.configs;
+        warnings.extend(outcome.warnings);
     }
     let report = TuneReport::new(
         resolution.label.clone(),
@@ -592,7 +755,12 @@ pub fn run(
     }
 
     print_pruned(&pruned, cap_from_expand);
-    print_table(&report, &resolution, total_ram_fallback);
+    print_table(
+        &report,
+        &resolution,
+        total_ram_fallback,
+        estimate_snapshot.as_deref(),
+    );
     if let (Some(path), Some(_)) = (save, profile.as_ref()) {
         print_best(&report);
         println!("Profile saved: {}", path.display());

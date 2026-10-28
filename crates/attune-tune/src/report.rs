@@ -88,6 +88,8 @@ mod tests {
             ttft_ms: 2_764.8,
             fits: true,
             score,
+            verified: false,
+            measured: None,
         }
     }
 
@@ -203,5 +205,47 @@ mod tests {
             !json.contains("\"warnings\""),
             "empty warnings must be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn measured_and_verified_roundtrip_in_the_json_contract() {
+        use attune_bench::e2e::E2eResult;
+
+        let mut config = ranked(400.0);
+        config.verified = true;
+        config.measured = Some(E2eResult {
+            engine: "test".into(),
+            model: "/m.gguf".into(),
+            prompt_tokens: 64,
+            eval_tokens: 16,
+            ttft_ms: 40.0,
+            tpot_ms: 2.5,
+            tok_s: 400.0,
+            ram_peak_bytes: 1_024,
+            cpu_avg_pct: 10.0,
+            power_avg_watts: None,
+            elapsed_ms: 500.0,
+        });
+        let report = TuneReport::new(
+            "135M",
+            135_000_000,
+            Objective::Throughput,
+            HwInputs {
+                bw_gbps: 20.0,
+                flops_gflops: 50.0,
+            },
+            Some(16e9),
+            vec![config],
+        );
+
+        let json = serde_json::to_string(&report).expect("serialize");
+        assert!(json.contains("\"verified\":true"), "{json}");
+        assert!(json.contains("\"measured\""), "{json}");
+
+        let back: TuneReport = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.configs[0].verified);
+        let measured = back.configs[0].measured.as_ref().expect("measured block");
+        assert!((measured.tok_s - 400.0).abs() < 1e-9);
+        assert!((measured.ttft_ms - 40.0).abs() < 1e-9);
     }
 }
