@@ -1,7 +1,7 @@
 [package]
 name = "attune-hal"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Hardware detection for Attune (CPU / memory / cache / OS for M1)"
 
 [dependencies]

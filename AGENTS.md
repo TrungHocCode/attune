@@ -96,6 +96,7 @@ Current phase: **PHASE 4 — SERVE (M5: `attune serve`, MVP)**.
 
 **Release:**
 - M1→M5 tag `v0.1.0`→`v0.5.0`, ghi `CHANGELOG.md`, binary <20MB.
+- Crate versions are inherited from `[workspace.package]` — bump that single line to match the tag, never per-crate (so `attune --version` agrees with the release).
 
 ## 8. Open-Source Contribution (see CONTRIBUTING.md)
 

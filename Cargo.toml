@@ -9,6 +9,13 @@ members = [
 ]
 resolver = "2"
 
+# Single version source: every attune-* crate inherits this, so
+# `attune --version` always matches the release tag. Bump here on release
+# (see AGENTS.md release checklist), never per-crate.
+[workspace.package]
+version = "0.4.0"
+edition = "2021"
+
 # The bandwidth/FLOPS kernels must never be measured through unoptimized
 # codegen: a dev-profile kernel reports ~6x less bandwidth than the same code
 # at opt-level 3, which would poison the roofline math in `attune estimate`.
