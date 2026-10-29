@@ -134,8 +134,9 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Serve a tuned profile through llama-server (M5 slice 1: profile
-    /// validation + spawn + health check; proxy/metrics land in later slices).
+    /// Serve a tuned profile through llama-server behind an OpenAI-compatible
+    /// proxy (M5 slice 2: profile validation + spawn + health check + proxy;
+    /// metrics land in slice 3, `--api-key` enforcement in slice 4).
     Serve {
         /// Profile JSON written by `attune tune --save`
         #[arg(long, value_name = "PATH")]
@@ -144,19 +145,31 @@ pub enum Command {
         /// $ATTUNE_LLAMA_SERVER, then a PATH search for `llama-server`)
         #[arg(long, value_name = "PATH")]
         llama_server: Option<PathBuf>,
-        /// Interface the upstream server binds to
+        /// Interface llama-server (the upstream) binds to
         #[arg(long, value_name = "HOST", default_value = "127.0.0.1")]
         host: String,
-        /// Upstream port llama-server listens on
+        /// Port llama-server (the upstream) listens on
         #[arg(long, value_name = "PORT", default_value_t = 8081)]
         port: u16,
+        /// Interface the OpenAI-compatible proxy binds to. Keep loopback
+        /// unless the network is trusted: `--api-key` is not enforced yet.
+        #[arg(long, value_name = "HOST", default_value = "127.0.0.1")]
+        listen: String,
+        /// Port for the OpenAI-compatible proxy
+        #[arg(long, value_name = "PORT", default_value_t = 8080)]
+        listen_port: u16,
+        /// Bearer key clients send. Accepted for forward compatibility but
+        /// NOT enforced yet (harden lands in slice 4); a warning is printed.
+        #[arg(long, value_name = "KEY")]
+        api_key: Option<String>,
         /// Seconds to wait for `/health` before giving up
         #[arg(long, value_name = "N", default_value_t = 60)]
         timeout_s: u64,
         /// Launch without validating the profile against this machine
         #[arg(long)]
         force: bool,
-        /// Print one machine-readable JSON line once the server is healthy
+        /// Print one machine-readable JSON line once the upstream is healthy
+        /// (the proxy address is printed on stderr)
         #[arg(long)]
         json: bool,
     },
@@ -313,6 +326,9 @@ pub fn dispatch(command: Command) -> Result<()> {
             llama_server,
             host,
             port,
+            listen,
+            listen_port,
+            api_key,
             timeout_s,
             force,
             json,
@@ -321,6 +337,9 @@ pub fn dispatch(command: Command) -> Result<()> {
             llama_server.as_deref(),
             &host,
             port,
+            &listen,
+            listen_port,
+            api_key.as_deref(),
             timeout_s,
             force,
             json,

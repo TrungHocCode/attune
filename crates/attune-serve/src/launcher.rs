@@ -246,22 +246,6 @@ pub fn launch(options: &ServeOptions) -> Result<Serving, ServeError> {
     })
 }
 
-/// Block the calling thread until the process is interrupted.
-///
-/// Slice 1 has no Ctrl+C handler yet (the `ctrlc` dependency lands with the
-/// proxy slice), so this parks forever. An interrupt or kill terminates the
-/// process without unwinding; slice 2 will install a handler that shuts the
-/// [`attune_backend::ServerGuard`] down explicitly. The guard's `Drop` still
-/// reaps the child on normal unwinding.
-pub fn run_forever(serving: Serving) -> ! {
-    // Move the whole `Serving` in so the guard stays alive for the process
-    // lifetime instead of being dropped before the loop.
-    let _keep_alive = serving;
-    loop {
-        std::thread::park();
-    }
-}
-
 /// The `/health` URL for a bind address.
 fn health_url_for(host: &str, port: u16) -> String {
     format!("http://{host}:{port}/health")
