@@ -1,25 +1,33 @@
-//! attune-serve - run a tuned profile for real (M5 slice 1).
+//! attune-serve - run a tuned profile for real (M5 slices 1-2).
 //!
-//! Slice 1 covers **launch + health check** only:
+//! Slice 1 covers **launch + health check**:
 //! - read and validate a [`attune_profile::Profile`];
 //! - warn on a hardware-fingerprint mismatch and auto-apply the recorded
 //!   `fallbacks.if_ram_insufficient.n_ctx` when RAM is short;
 //! - resolve and spawn `llama-server` through [`attune_backend`];
 //! - poll `/health` with a deadline.
 //!
-//! The proxy (`/v1`), the metrics endpoints and Ctrl+C handling arrive in later
-//! slices. Until then [`launcher::run_forever`] parks the main thread; an
-//! interrupt or kill terminates the process without unwinding, so slice 2 will
-//! install a Ctrl+C handler that shuts the server down explicitly. The
-//! [`attune_backend::ServerGuard`] `Drop` impl still reaps `llama-server` on
-//! normal unwinding.
+//! Slice 2 adds the **OpenAI-compatible proxy** and **graceful shutdown**:
+//! - [`server`] binds a `tiny_http` listener and routes the `/v1` surface plus
+//!   `/health`;
+//! - [`proxy`] forwards each request to the launched upstream, streaming SSE
+//!   responses chunk-by-chunk and returning non-stream bodies verbatim;
+//! - [`shutdown`] turns Ctrl+C (`SIGINT`, plus `SIGTERM`/`SIGHUP` on Unix) into
+//!   a flag that closes the listener; dropping [`Serving`] then kills and reaps
+//!   `llama-server` through [`attune_backend::ServerGuard`].
+//!
+//! Metrics and `--api-key` enforcement are later slices.
 
 pub mod launcher;
+pub mod proxy;
+pub mod server;
+pub mod shutdown;
 
 pub use launcher::{
-    fingerprint_of, launch, prepare_profile, run_forever, PreparedProfile, ReadyReport,
-    ServeOptions, Serving,
+    fingerprint_of, launch, prepare_profile, PreparedProfile, ReadyReport, ServeOptions, Serving,
 };
+pub use server::{Proxy, ProxyConfig};
+pub use shutdown::{install_shutdown, ShutdownSignal};
 
 use thiserror::Error;
 
@@ -47,4 +55,10 @@ pub enum ServeError {
     /// The caller supplied settings the launcher cannot use.
     #[error("invalid serve configuration: {0}")]
     InvalidConfig(String),
+    /// The proxy listener could not be bound or served.
+    #[error("proxy: {0}")]
+    Proxy(String),
+    /// The process shutdown handler could not be installed.
+    #[error("shutdown handler: {0}")]
+    Shutdown(String),
 }

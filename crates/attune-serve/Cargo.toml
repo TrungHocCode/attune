@@ -12,4 +12,16 @@ attune-backend = { path = "../attune-backend" }
 attune-profile = { path = "../attune-profile" }
 attune-hal = { path = "../attune-hal" }
 serde = { version = "1", features = ["derive"] }
+# Justification (AGENTS §3.4): OpenAI-shaped error envelopes + `"stream": true`
+# detection; already used across the workspace, no extra transitive weight.
+serde_json = "1"
 thiserror = "1"
+# Justification (AGENTS §3.4): smallest synchronous HTTP server that supports
+# chunked/SSE responses, matching this all-sync codebase (no async runtime).
+tiny_http = "0.12"
+# Justification (AGENTS §3.4): cross-platform Ctrl+C/SIGTERM handling; std has
+# no signal API. `termination` adds SIGTERM/SIGHUP on Unix for systemd/docker.
+ctrlc = { version = "3", features = ["termination"] }
+# Justification (AGENTS §3.4): sync upstream forwarding for the proxy without
+# pulling in an async runtime. Local llama-server is plain HTTP, so no TLS.
+ureq = { version = "3", default-features = false }
