@@ -1,8 +1,8 @@
 # attune — Tune LLM inference to your hardware
 
 > [!NOTE]
-> Early development (v0.1.x). `detect` works, `bench` is in progress.
-> Not production-ready yet.
+> Beta (v0.4.x). `detect`, `bench`, `estimate` and `tune` work;
+> `serve` is in progress. Not production-ready yet.
 
 [![CI](https://github.com/TrungHocCode/attune/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TrungHocCode/attune/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -36,6 +36,7 @@ cargo build -p attune-cli
 ```
 CPU:        Intel(R) Core(TM) 5 210H (GenuineIntel, 8P, 12L)
 SIMD:       SSE4.2, AVX, AVX2
+Clock:      2.20 GHz max (best-effort)
 Cache:      L1d 48 KB | L1i 32 KB | L2 1.2 MB | L3 12.0 MB | line 64 B
 RAM:        15.6 GB total / 2.7 GB available
 OS:         windows
@@ -57,6 +58,10 @@ attune detect --json       # machine-readable JSON (the contract)
 attune bench --quick       # fast memory-bandwidth probe
 attune bench               # full bandwidth + FLOPS report
 attune bench --json        # machine-readable report
+attune estimate --model smollm2-135m --quant q4_k_m   # predict before running
+attune tune --model smollm2-135m --objective throughput  # rank configs
+attune tune --model smollm2-135m --save profile.json     # export best profile
+attune serve --profile profile.json                     # run it (M5, in progress)
 ```
 
 `estimate --model` accepts a catalog name, an `org/model` Hugging Face id
