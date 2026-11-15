@@ -97,6 +97,16 @@ pub struct E2eConfig {
     pub threads: u32,
     /// Context window (`-c`).
     pub ctx_size: u32,
+    /// Prompt batch (`-b`). `0` = llama.cpp default (no flag).
+    pub n_batch: u32,
+    /// Physical micro-batch (`--ubatch-size`). `0` = llama.cpp default.
+    pub n_ubatch: u32,
+    /// K-cache type (`--cache-type-k`). `None` = llama.cpp default.
+    pub cache_type_k: Option<String>,
+    /// V-cache type (`--cache-type-v`). `None` = llama.cpp default.
+    pub cache_type_v: Option<String>,
+    /// Emit `--flash-attn on`. `false` = llama.cpp default (no flag).
+    pub flash_attn: bool,
 }
 
 impl E2eConfig {
@@ -108,6 +118,11 @@ impl E2eConfig {
             gen_tokens: DEFAULT_GEN_TOKENS,
             threads: 0,
             ctx_size: DEFAULT_CTX_SIZE,
+            n_batch: 0,
+            n_ubatch: 0,
+            cache_type_k: None,
+            cache_type_v: None,
+            flash_attn: false,
         }
     }
 
@@ -282,6 +297,13 @@ pub fn build_prompt(target_tokens: usize, max_chars: usize) -> String {
 /// newer conveniences would make the bench fail on older llama.cpp checkouts
 /// instead of telling us anything useful.
 ///
+/// The launch knobs (`-b`, `--ubatch-size`, `--cache-type-k/v`,
+/// `--flash-attn on`) are emitted only when set, so `attune bench --model`
+/// keeps the old-safe argv. `attune tune --verify` sets them to match what
+/// `attune serve` launches; keep the spelling in sync with
+/// `attune-profile`'s `to_llama_args` and the backend's `--flash-attn on`
+/// rewrite (this crate cannot depend on either).
+///
 /// [`llama::COMMON_ARGS`] carries `-st` and `-v`, both of which predate the
 /// chat rewrite: `-st` makes the child answer the prompt and exit instead of
 /// opening its interactive REPL, `-v` makes it print the timing block
@@ -303,6 +325,26 @@ pub fn build_e2e_args(cfg: &E2eConfig) -> Vec<String> {
     if cfg.threads > 0 {
         args.push("-t".to_string());
         args.push(cfg.threads.to_string());
+    }
+    if cfg.n_batch > 0 {
+        args.push("-b".to_string());
+        args.push(cfg.n_batch.to_string());
+    }
+    if cfg.n_ubatch > 0 {
+        args.push("--ubatch-size".to_string());
+        args.push(cfg.n_ubatch.to_string());
+    }
+    if let Some(kind) = &cfg.cache_type_k {
+        args.push("--cache-type-k".to_string());
+        args.push(kind.clone());
+    }
+    if let Some(kind) = &cfg.cache_type_v {
+        args.push("--cache-type-v".to_string());
+        args.push(kind.clone());
+    }
+    if cfg.flash_attn {
+        args.push("--flash-attn".to_string());
+        args.push("on".to_string());
     }
     args
 }
@@ -684,6 +726,36 @@ mod tests {
         );
         // No thread pin when threads == 0.
         assert!(!joined.contains("-t "), "no -t: {joined}");
+        // No launch knobs unless set.
+        for flag in [
+            "-b",
+            "--ubatch-size",
+            "--cache-type-k",
+            "--cache-type-v",
+            "--flash-attn",
+        ] {
+            assert!(!args.iter().any(|arg| arg == flag), "no {flag}: {joined}");
+        }
+    }
+
+    #[test]
+    fn build_e2e_args_emits_launch_knobs_when_set() {
+        let mut cfg = E2eConfig::new(PathBuf::from("/m.gguf"));
+        cfg.n_batch = 128;
+        cfg.n_ubatch = 64;
+        cfg.cache_type_k = Some("f16".to_string());
+        cfg.cache_type_v = Some("q8_0".to_string());
+        cfg.flash_attn = true;
+        let joined = build_e2e_args(&cfg).join(" ");
+        for pair in [
+            "-b 128",
+            "--ubatch-size 64",
+            "--cache-type-k f16",
+            "--cache-type-v q8_0",
+            "--flash-attn on",
+        ] {
+            assert!(joined.contains(pair), "missing {pair}: {joined}");
+        }
     }
 
     #[test]
