@@ -84,6 +84,16 @@ fn default_cache_type() -> String {
     "q8_0".to_string()
 }
 
+/// llama.cpp's `--cache-type-k/v` spelling for a KV format. It spells FP16 as
+/// `f16`, unlike [`Quant::as_str`]; `q4_k_m` has no KV-cache type and is
+/// rejected by [`TuneConfig::validate`].
+fn llama_cache_type(cache_kv: Quant) -> &'static str {
+    match cache_kv {
+        Quant::Fp16 => "f16",
+        other => other.as_str(),
+    }
+}
+
 impl TuneConfig {
     /// Build one grid point, filling the launch fields with safe defaults.
     pub fn new(quant: Quant, n_ctx: u32, n_threads: u32, n_batch: u32, cache_kv: Quant) -> Self {
@@ -99,8 +109,8 @@ impl TuneConfig {
             flash_attn: default_true(),
             numa: default_numa(),
             cache_kv,
-            cache_type_k: default_cache_type(),
-            cache_type_v: default_cache_type(),
+            cache_type_k: llama_cache_type(cache_kv).to_string(),
+            cache_type_v: llama_cache_type(cache_kv).to_string(),
             cpu_affinity: None,
         }
     }
@@ -121,6 +131,11 @@ impl TuneConfig {
         }
         if self.n_batch == 0 {
             return Err(TuneError::InvalidConfig("n_batch must be > 0".to_string()));
+        }
+        if self.cache_kv == Quant::Q4_K_M {
+            return Err(TuneError::InvalidConfig(
+                "cache_kv q4_k_m is not a llama.cpp KV-cache type".to_string(),
+            ));
         }
         Ok(())
     }
@@ -212,6 +227,10 @@ mod tests {
                 n_batch: 0,
                 ..valid()
             },
+            TuneConfig {
+                cache_kv: Quant::Q4_K_M,
+                ..valid()
+            },
         ] {
             assert!(
                 matches!(config.validate(), Err(TuneError::InvalidConfig(_))),
@@ -229,9 +248,22 @@ mod tests {
         assert!(!config.mlock);
         assert!(config.flash_attn);
         assert_eq!(config.numa, "local");
-        assert_eq!(config.cache_type_k, "q8_0");
-        assert_eq!(config.cache_type_v, "q8_0");
+        assert_eq!(config.cache_type_k, "f16");
+        assert_eq!(config.cache_type_v, "f16");
         assert_eq!(config.cpu_affinity, None);
+    }
+
+    #[test]
+    fn new_derives_the_llama_cache_type_from_cache_kv() {
+        for (cache_kv, expected) in [
+            (Quant::Fp16, "f16"),
+            (Quant::Q8_0, "q8_0"),
+            (Quant::Q4_0, "q4_0"),
+        ] {
+            let config = TuneConfig::new(Quant::Q4_K_M, 2_048, 8, 512, cache_kv);
+            assert_eq!(config.cache_type_k, expected, "{cache_kv:?}");
+            assert_eq!(config.cache_type_v, expected, "{cache_kv:?}");
+        }
     }
 
     #[test]

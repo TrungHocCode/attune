@@ -155,7 +155,8 @@ mod tests {
         assert_eq!(profile.load_config.n_ctx, 2_048);
         assert_eq!(profile.load_config.n_batch, 512);
         assert_eq!(profile.load_config.n_ubatch, 128);
-        assert_eq!(profile.load_config.cache_type_k, "q8_0");
+        assert_eq!(profile.load_config.cache_type_k, "f16");
+        assert_eq!(profile.load_config.cache_type_v, "f16");
         assert_eq!(profile.compute_config.n_threads, 8);
         assert_eq!(profile.compute_config.n_threads_batch, 8);
         assert!((profile.expected_performance.tok_s - 250.0).abs() < 1e-9);
