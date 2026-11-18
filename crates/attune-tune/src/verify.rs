@@ -33,6 +33,10 @@ use crate::{Objective, TuneConfig, TuneError};
 /// [`E2eConfig::ctx_size`]).
 const MIN_E2E_CTX: u32 = 32;
 
+/// Relative score gap under which two estimates count as tied when picking
+/// verify candidates.
+const TIE_REL_EPS: f64 = 1e-6;
+
 /// Result of [`run_verify_topk`]: the re-scored configs plus the non-fatal
 /// notices from any config whose real run failed.
 #[derive(Debug, Clone, PartialEq)]
@@ -118,8 +122,46 @@ pub fn rerank_with_e2e(
     updated
 }
 
+/// Pick the configs [`run_verify_topk`] measures, best first.
+///
+/// The roofline has no thread term, so whole blocks of the grid tie and grid
+/// order (threads outer) would hand every slot to one thread count. Configs
+/// tied with the best score are therefore taken round-robin over distinct
+/// `n_threads` (first of each thread count, then second, ...); the rest
+/// follow in rank order. An untied ranking selects exactly its top `top_k`.
+fn select_verify_candidates(ranked: &[RankedConfig], top_k: usize) -> Vec<&RankedConfig> {
+    let Some(best) = ranked.first() else {
+        return Vec::new();
+    };
+    let tolerance = best.score.abs() * TIE_REL_EPS;
+    let tied = ranked
+        .iter()
+        .take_while(|entry| (best.score - entry.score).abs() <= tolerance)
+        .count();
+
+    // Stable sort by "how many earlier tied entries share my thread count".
+    let mut tied_order: Vec<usize> = (0..tied).collect();
+    tied_order.sort_by_key(|&index| {
+        let threads = ranked[index].config.n_threads;
+        ranked[..index]
+            .iter()
+            .filter(|entry| entry.config.n_threads == threads)
+            .count()
+    });
+
+    tied_order
+        .into_iter()
+        .chain(tied..ranked.len())
+        .take(top_k)
+        .map(|index| &ranked[index])
+        .collect()
+}
+
 /// Run the best `top_k` configs through a real llama.cpp e2e and fold the
 /// measurements back into the ranking.
+///
+/// Configs tied on estimate are spread across thread counts first (see
+/// [`select_verify_candidates`]).
 ///
 /// Setup failures (unreadable model, no `llama-cli`, unparseable version) are
 /// returned as [`TuneError`] before a single model load starts. Individual run
@@ -160,11 +202,11 @@ pub fn run_verify_topk(
     preflight(&cli, model_path).map_err(map_preflight)?;
 
     let engine_version = cli.display().to_string();
-    let limit = top_k.min(ranked.len());
-    let mut measured = Vec::with_capacity(limit);
+    let candidates = select_verify_candidates(ranked, top_k);
+    let mut measured = Vec::with_capacity(candidates.len());
     let mut warnings = Vec::new();
 
-    for entry in ranked.iter().take(limit) {
+    for entry in candidates {
         let mut config = e2e_config_for(&entry.config, model_path, prompt_tokens, gen_tokens);
         if let Some(ctx) = ctx_size {
             config.ctx_size = ctx;
@@ -343,6 +385,63 @@ mod tests {
         assert_eq!(reranked[1].config, estimate_winner);
         assert_eq!(reranked[1].decode_tps, 300.0);
         assert_eq!(reranked[1].score, 300.0);
+    }
+
+    #[test]
+    fn select_spreads_tied_candidates_across_thread_counts() {
+        // Grid order: threads outer, so the four -t 4 points come first.
+        let tied: Vec<RankedConfig> = crate::expand_grid(
+            &[Quant::Q4_K_M],
+            &[2_048],
+            &[4, 8],
+            &[128, 512],
+            &[Quant::Fp16, Quant::Q8_0],
+        )
+        .into_iter()
+        .map(|config| ranked(config, 300.0, 100.0, 300.0))
+        .collect();
+        assert_eq!(tied.len(), 8);
+
+        let threads = |top_k| {
+            select_verify_candidates(&tied, top_k)
+                .iter()
+                .map(|entry| entry.config.n_threads)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(threads(2), [4, 8]);
+        assert_eq!(threads(3), [4, 8, 4]);
+        assert_eq!(threads(20).len(), 8);
+
+        // Within one thread count the estimate order is kept.
+        let picked = select_verify_candidates(&tied, 4);
+        assert_eq!(picked[0].config, tied[0].config);
+        assert_eq!(picked[1].config, tied[4].config);
+        assert_eq!(picked[2].config, tied[1].config);
+    }
+
+    #[test]
+    fn select_keeps_rank_order_when_scores_differ() {
+        let configs =
+            crate::expand_grid(&[Quant::Q4_K_M], &[2_048], &[4, 8], &[128], &[Quant::Fp16]);
+        let ranked_list = [
+            ranked(configs[0].clone(), 300.0, 100.0, 300.0),
+            ranked(
+                TuneConfig {
+                    n_batch: 512,
+                    ..configs[0].clone()
+                },
+                290.0,
+                100.0,
+                290.0,
+            ),
+            ranked(configs[1].clone(), 280.0, 100.0, 280.0),
+        ];
+
+        let picked = select_verify_candidates(&ranked_list, 2);
+        assert_eq!(picked.len(), 2);
+        assert_eq!(picked[0].config, ranked_list[0].config);
+        assert_eq!(picked[1].config, ranked_list[1].config);
+        assert!(select_verify_candidates(&[], 2).is_empty());
     }
 
     #[test]
