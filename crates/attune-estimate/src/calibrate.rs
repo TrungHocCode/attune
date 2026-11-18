@@ -155,6 +155,7 @@ pub fn apply_prefill(raw_ms: f64, eta_comp: f64) -> f64 {
 ///
 /// Pure (no file I/O): the CLI owns reading the path and adding context.
 pub fn parse_bench_report(text: &str) -> Result<BenchReport, serde_json::Error> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let value: serde_json::Value = serde_json::from_str(text)?;
     let candidate = value.get("bench").unwrap_or(&value);
     serde_json::from_value(candidate.clone())
@@ -314,6 +315,39 @@ pub fn calibrate_with_bench(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const BENCH_JSON: &str = r#"{
+        "schema": "attune-bench/1",
+        "mode": "quick",
+        "bandwidth": { "read_gbps": 29.1, "buffer_mib": 256, "threads": 4, "reps": 5 }
+    }"#;
+
+    #[test]
+    fn parses_bench_report_with_utf8_bom() {
+        for text in [
+            BENCH_JSON.to_string(),
+            format!(r#"{{"llama": {{}}, "bench": {BENCH_JSON}}}"#),
+        ] {
+            let expected = parse_bench_report(&text).expect("parse bench report");
+            for prefix in ["\u{feff}", "\u{feff}\r\n"] {
+                let parsed = parse_bench_report(&format!("{prefix}{text}"))
+                    .expect("parse bench report with BOM");
+                assert_eq!(parsed, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_bench_json_with_bom() {
+        for text in [
+            "\u{feff}".to_string(),
+            "\u{feff}{".to_string(),
+            format!("\u{feff}\u{feff}{BENCH_JSON}"),
+            format!(" \u{feff}{BENCH_JSON}"),
+        ] {
+            assert!(parse_bench_report(&text).is_err(), "accepted {text:?}");
+        }
+    }
 
     /// Relative error in percent, the shape the M3 acceptance gate uses.
     fn rel_err_pct(predicted: f64, measured: f64) -> f64 {
