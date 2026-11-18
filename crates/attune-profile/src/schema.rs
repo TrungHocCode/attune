@@ -92,6 +92,7 @@ impl Profile {
     /// defaults; use [`crate::migrate_value`] first when the document may be
     /// older than [`PROFILE_VERSION`].
     pub fn from_json_str(input: &str) -> Result<Self, ProfileError> {
+        let input = input.strip_prefix('\u{feff}').unwrap_or(input);
         Ok(serde_json::from_str(input)?)
     }
 
@@ -425,6 +426,28 @@ mod tests {
         assert_eq!(draft.model, "models/draft.gguf");
         assert_eq!(draft.draft_k, 4);
         assert!((draft.acceptance_rate - 0.72).abs() < 1e-12);
+    }
+
+    #[test]
+    fn parses_profile_with_utf8_bom() {
+        let mut profile = sample();
+        profile.name = "test\u{feff}profile".to_string();
+        let json = profile.to_json_string().expect("serialize profile");
+        let expected = Profile::from_json_str(&json).expect("parse profile");
+
+        for prefix in ["\u{feff}", "\u{feff}\r\n"] {
+            let parsed =
+                Profile::from_json_str(&format!("{prefix}{json}")).expect("parse profile with BOM");
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.name, profile.name);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_json_with_bom() {
+        for json in ["\u{feff}", "\u{feff}{", "\u{feff}\u{feff}{}", " \u{feff}{}"] {
+            assert!(Profile::from_json_str(json).is_err(), "accepted {json:?}");
+        }
     }
 
     #[test]

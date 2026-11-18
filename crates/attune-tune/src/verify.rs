@@ -52,11 +52,13 @@ pub struct VerifyOutcome {
 
 /// Map a tune grid point onto the llama.cpp knobs [`run_e2e`] understands.
 ///
-/// Only the fields the current e2e command line supports are mapped:
 /// `n_threads` → `threads` (`0` means "let llama.cpp decide", so no `-t` flag
-/// is emitted) and `n_ctx` → `ctx_size`, clamped to `MIN_E2E_CTX`. The
-/// `-st` / `-v` flags live in [`attune_bench::llama::COMMON_ARGS`] and are
-/// added by [`attune_bench::e2e::build_e2e_args`].
+/// is emitted), `n_ctx` → `ctx_size` (clamped to `MIN_E2E_CTX`), and the
+/// launch knobs a saved profile hands to `attune serve`: `n_batch`,
+/// `n_ubatch`, the KV-cache types and flash attention. Without them every
+/// verified config would run the same command line. The `-st` / `-v` flags
+/// live in [`attune_bench::llama::COMMON_ARGS`] and are added by
+/// [`attune_bench::e2e::build_e2e_args`].
 pub fn e2e_config_for(
     config: &TuneConfig,
     model_path: &Path,
@@ -69,6 +71,11 @@ pub fn e2e_config_for(
         gen_tokens,
         threads: config.n_threads,
         ctx_size: config.n_ctx.max(MIN_E2E_CTX),
+        n_batch: config.n_batch,
+        n_ubatch: config.n_ubatch,
+        cache_type_k: Some(config.cache_type_k.clone()),
+        cache_type_v: Some(config.cache_type_v.clone()),
+        flash_attn: config.flash_attn,
     }
 }
 
@@ -317,6 +324,24 @@ mod tests {
         assert_eq!(mapped.gen_tokens, 16);
         assert_eq!(mapped.threads, 8);
         assert_eq!(mapped.ctx_size, 2_048);
+        assert_eq!(mapped.n_batch, 512);
+        assert_eq!(mapped.n_ubatch, 128);
+        assert_eq!(mapped.cache_type_k.as_deref(), Some("f16"));
+        assert_eq!(mapped.cache_type_v.as_deref(), Some("f16"));
+        assert!(mapped.flash_attn);
+    }
+
+    #[test]
+    fn configs_differing_only_in_batch_or_kv_run_different_argv() {
+        let base = TuneConfig::new(Quant::Q4_K_M, 2_048, 4, 128, Quant::Fp16);
+        let other_batch = TuneConfig::new(Quant::Q4_K_M, 2_048, 4, 512, Quant::Fp16);
+        let other_kv = TuneConfig::new(Quant::Q4_K_M, 2_048, 4, 128, Quant::Q8_0);
+        let argv = |config: &TuneConfig| {
+            attune_bench::e2e::build_e2e_args(&e2e_config_for(config, Path::new("/m.gguf"), 64, 16))
+        };
+
+        assert_ne!(argv(&base), argv(&other_batch));
+        assert_ne!(argv(&base), argv(&other_kv));
     }
 
     #[test]
