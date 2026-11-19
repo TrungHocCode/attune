@@ -39,6 +39,6 @@ pub const PROFILE_VERSION: u32 = 1;
 /// Errors from parsing or serializing a profile.
 #[derive(Debug, Error)]
 pub enum ProfileError {
-    #[error("invalid profile JSON: {0}")]
+    #[error("invalid profile JSON")]
     Json(#[from] serde_json::Error),
 }
