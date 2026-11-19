@@ -43,7 +43,7 @@ fn render_cache(c: &attune_hal::cache::CacheInfo) -> String {
 
 fn print_pretty(hw: &HardwareInfo) {
     println!(
-        "CPU:        {} ({vendor}, {p}P, {l}L)",
+        "CPU:        {} ({vendor}, {p}C/{l}T)",
         hw.cpu.brand,
         vendor = hw.cpu.vendor,
         p = hw.cpu.physical_cores,

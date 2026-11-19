@@ -4,7 +4,7 @@
 //! - `cpu::CpuInfo`        — brand, vendor, cores, SIMD (via raw-cpuid on x86)
 //! - `memory::MemoryInfo`  — total/available RAM (via sysinfo)
 //! - `cache::CacheInfo`    — L1d/L1i/L2/L3 + line size (via raw-cpuid on x86)
-//! - `NumaInfo` / `GpuInfo` — stubs for M1, real implementation lands in M2+
+//! - `NumaInfo` / `GpuInfo` — placeholders; no real NUMA/GPU probing yet
 //!
 //! Cross-platform: x86/x86_64 get full detail; other targets compile and
 //! gracefully degrade to `"unknown"` placeholders.
@@ -22,16 +22,16 @@ pub enum HalError {
     Detection(String),
 }
 
-/// M1 stub. Real NUMA topology detection (hwloc / Windows groups) is planned
-/// in M2. We expose the field now so the JSON contract is stable.
+/// Placeholder: real NUMA topology detection is not implemented. The field
+/// exists so the JSON contract is stable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NumaInfo {
     pub nodes: u32,
     pub note: String,
 }
 
-/// M1 stub. GPU enumeration (NVIDIA/AMD/Intel via vendor APIs) is planned
-/// for M3+ — `count == 0` is the safe placeholder.
+/// Placeholder: GPU enumeration is not implemented;
+/// `count == 0` is the safe default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GpuInfo {
     pub count: u32,
@@ -54,17 +54,14 @@ impl HardwareInfo {
             cpu: cpu::detect()?,
             memory: memory::detect()?,
             cache: cache::detect()?,
-            // M1 stub: most consumer hardware reports a single NUMA node.
-            // Real detection (hwloc on Linux, NUMA APIs on Windows) is M2.
+            // Most consumer hardware reports a single NUMA node.
             numa: NumaInfo {
                 nodes: 1,
-                note: "stub M1 — hwloc lands in M2".to_string(),
+                note: "not detected; single node assumed".to_string(),
             },
-            // M1 stub: no GPU enumeration yet. M3 will probe NVML + ADL +
-            // Windows Display Driver APIs.
             gpu: GpuInfo {
                 count: 0,
-                note: "stub M1 — vendor APIs land in M3".to_string(),
+                note: "GPU detection not implemented".to_string(),
             },
             os: std::env::consts::OS.to_string(),
         })
@@ -83,8 +80,8 @@ mod tests {
         assert!(hw.cpu.logical_cores >= 1);
         assert!(hw.cpu.physical_cores >= 1);
         assert!(hw.memory.total_bytes > 0);
-        assert_eq!(hw.numa.nodes, 1); // M1 stub invariant
-        assert_eq!(hw.gpu.count, 0); // M1 stub invariant
+        assert_eq!(hw.numa.nodes, 1); // placeholder invariant
+        assert_eq!(hw.gpu.count, 0); // placeholder invariant
     }
 
     #[test]
