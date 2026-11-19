@@ -198,7 +198,7 @@ pub fn run_verify_topk(
             model_path.display()
         )));
     }
-    let cli = resolve_llama_cli(llama_cli).map_err(|err| TuneError::Verify(err.to_string()))?;
+    let cli = resolve_llama_cli(llama_cli).map_err(|err| TuneError::Verify(error_chain(&err)))?;
     preflight(&cli, model_path).map_err(map_preflight)?;
 
     let engine_version = cli.display().to_string();
@@ -224,8 +224,9 @@ pub fn run_verify_topk(
                 result.eval_tokens,
             )),
             Err(err) => warnings.push(format!(
-                "e2e verification of {} failed ({err}); keeping the estimate",
+                "e2e verification of {} failed ({}); keeping the estimate",
                 config_label(&entry.config),
+                error_chain(&err),
             )),
         }
     }
@@ -242,8 +243,21 @@ pub fn run_verify_topk(
 fn map_preflight(err: BenchError) -> TuneError {
     match err {
         BenchError::InvalidConfig(message) => TuneError::InvalidConfig(message),
-        other => TuneError::Verify(other.to_string()),
+        other => TuneError::Verify(error_chain(&other)),
     }
+}
+
+/// Display plus every `source()` cause joined with ": ". Library errors keep
+/// the cause out of Display, so flattening to a String must walk the chain.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut out = err.to_string();
+    let mut cur = err.source();
+    while let Some(cause) = cur {
+        out.push_str(": ");
+        out.push_str(&cause.to_string());
+        cur = cause.source();
+    }
+    out
 }
 
 /// Re-score one config from new decode/TTFT numbers, preserving the estimate's
@@ -539,5 +553,19 @@ mod tests {
         let measured = verified.measured.as_ref().expect("measured block recorded");
         assert!(measured.is_complete());
         println!("{verified:?}");
+    }
+}
+
+#[cfg(test)]
+mod error_chain_tests {
+    use super::*;
+
+    #[test]
+    fn error_chain_shows_each_cause_once() {
+        let err = BenchError::LlamaSpawn {
+            cli: "x".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "gone"),
+        };
+        assert_eq!(error_chain(&err), "failed to run `x`: gone");
     }
 }
