@@ -35,7 +35,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ServeError {
     /// The profile file could not be read.
-    #[error("failed to read profile `{path}`: {source}")]
+    #[error("failed to read profile `{path}`")]
     ReadProfile {
         /// The path the user passed.
         path: String,
@@ -44,10 +44,10 @@ pub enum ServeError {
         source: std::io::Error,
     },
     /// The profile file is not valid profile JSON.
-    #[error("invalid profile: {0}")]
+    #[error("invalid profile")]
     Profile(#[from] attune_profile::ProfileError),
     /// Live hardware inputs needed for validation were unavailable.
-    #[error("hardware detection failed: {0}")]
+    #[error("hardware detection failed")]
     Hal(#[from] attune_hal::HalError),
     /// The backend could not resolve, spawn or health-check.
     #[error(transparent)]
