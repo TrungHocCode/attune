@@ -1471,7 +1471,11 @@ llama_perf_context_print:        eval time =   999.00 ms /   99 runs   ( ... )
         assert!(report.elapsed_ms > 0.0, "load took no measurable time");
         if let Some(perf) = report.perf {
             assert!(perf.eval_tokens > 0, "decode timed zero tokens");
-            assert!(perf.eval_tps() > 0.0, "decode throughput was zero");
+            // llama.cpp b11804 samples the single `-n 1` token from the prompt logits and
+            // reports `eval time = 0.00 ms`, so throughput is legitimately 0 then.
+            if perf.eval_ms > 0.0 {
+                assert!(perf.eval_tps() > 0.0, "decode throughput was zero");
+            }
         }
         println!("{} ({}): {report:?}", report.cli, report.version);
     }
