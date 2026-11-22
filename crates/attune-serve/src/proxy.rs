@@ -22,11 +22,12 @@
 //! `Response` and its normal `Content-Length` handling.
 
 use std::io::{self, Cursor, Read, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tiny_http::{Header, Request, Response, ResponseBox, StatusCode};
 use ureq::Agent;
 
+use crate::metrics::{Metrics, Sample, Snapshot};
 use crate::server::Route;
 
 /// Local llama-server normally answers immediately; a short connect timeout
@@ -52,10 +53,13 @@ const HOP_BY_HOP: &[&str] = &[
 pub(crate) struct ProxyState {
     agent: Agent,
     upstream_base: String,
+    metrics: Metrics,
+    /// Pid of the spawned llama-server, for the RSS gauge.
+    upstream_pid: Option<u32>,
 }
 
 impl ProxyState {
-    pub(crate) fn new(upstream_base: String) -> Self {
+    pub(crate) fn new(upstream_base: String, upstream_pid: Option<u32>) -> Self {
         let agent = Agent::config_builder()
             // Upstream 4xx/5xx responses are forwarded verbatim, so ureq must
             // hand them back as responses instead of `Error::StatusCode`.
@@ -66,7 +70,17 @@ impl ProxyState {
         Self {
             agent,
             upstream_base: upstream_base.trim_end_matches('/').to_string(),
+            metrics: Metrics::new(),
+            upstream_pid,
         }
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        self.metrics.snapshot(
+            self.upstream_pid
+                .and_then(attune_hal::memory::process_rss_bytes),
+            attune_hal::memory::available_bytes(),
+        )
     }
 }
 
@@ -74,7 +88,34 @@ impl ProxyState {
 ///
 /// Never returns an error: any failure is rendered as an OpenAI-shaped error
 /// response so a bad request cannot kill the worker (or the proxy).
-pub(crate) fn handle(mut request: Request, route: Route, state: &ProxyState) {
+pub(crate) fn handle(request: Request, route: Route, state: &ProxyState) {
+    let (body, content_type) = match route {
+        Route::Metrics => (state.snapshot().to_json().to_string(), "application/json"),
+        Route::Prometheus => (
+            state.snapshot().to_prometheus(),
+            "text/plain; version=0.0.4; charset=utf-8",
+        ),
+        _ => return forward_request(request, route, state),
+    };
+    let headers: Vec<Header> = Header::from_bytes("Content-Type", content_type)
+        .ok()
+        .into_iter()
+        .collect();
+    respond(
+        request,
+        Upstream {
+            status: 200,
+            headers,
+            body: UpstreamBody::Buffered(body.into_bytes()),
+            headers_at: Instant::now(),
+        },
+    );
+}
+
+fn forward_request(mut request: Request, route: Route, state: &ProxyState) {
+    let received = Instant::now();
+    // Only completions are measured; /v1/models and /health are plumbing.
+    let tracker = route.is_post().then(|| state.metrics.begin());
     let authorization = header_value(&request, "Authorization");
     let mut body = Vec::new();
     if route.is_post() {
@@ -98,7 +139,23 @@ pub(crate) fn handle(mut request: Request, route: Route, state: &ProxyState) {
         &body,
         wants_stream,
     ) {
-        Ok(upstream) => respond(request, upstream),
+        Ok(upstream) => {
+            let streamed = matches!(upstream.body, UpstreamBody::Stream(_));
+            let delivery = respond(request, upstream);
+            if let Some(tracker) = tracker {
+                tracker.finish(Sample {
+                    ok: delivery.ok,
+                    ttft: delivery
+                        .first_byte
+                        .unwrap_or(received)
+                        .saturating_duration_since(received),
+                    total: received.elapsed(),
+                    tokens: delivery.tokens,
+                    streamed,
+                });
+            }
+        }
+        // `tracker` drops here without a sample: counted as an error.
         Err(error) => respond_error(
             request,
             502,
@@ -128,6 +185,7 @@ pub(crate) fn respond_error(request: Request, status: u16, error_type: &str, mes
             status,
             headers,
             body: UpstreamBody::Buffered(body),
+            headers_at: Instant::now(),
         },
     );
 }
@@ -139,6 +197,15 @@ struct Upstream {
     status: u16,
     headers: Vec<Header>,
     body: UpstreamBody,
+    /// When the upstream response head arrived (TTFT for non-stream bodies).
+    headers_at: Instant,
+}
+
+/// What actually reached the client, for metrics.
+struct Delivery {
+    ok: bool,
+    first_byte: Option<Instant>,
+    tokens: Option<u64>,
 }
 
 enum UpstreamBody {
@@ -173,6 +240,7 @@ fn forward(
     };
 
     let status = response.status().as_u16();
+    let headers_at = Instant::now();
     let headers = copy_headers(response.headers());
     // 204 has no body and `tiny_http` forbids chunked framing there, so only
     // pipe a 2xx stream when a body is actually legal.
@@ -182,6 +250,7 @@ fn forward(
             status,
             headers,
             body: UpstreamBody::Stream(response.into_body().into_reader()),
+            headers_at,
         })
     } else {
         let mut response = response;
@@ -190,13 +259,16 @@ fn forward(
             status,
             headers,
             body: UpstreamBody::Buffered(body),
+            headers_at,
         })
     }
 }
 
-fn respond(request: Request, upstream: Upstream) {
+fn respond(request: Request, upstream: Upstream) -> Delivery {
+    let status_ok = (200..300).contains(&upstream.status);
     match upstream.body {
         UpstreamBody::Buffered(body) => {
+            let tokens = usage_tokens(&body);
             let length = body.len();
             let response: ResponseBox = Response::new(
                 StatusCode(upstream.status),
@@ -205,12 +277,24 @@ fn respond(request: Request, upstream: Upstream) {
                 Some(length),
                 None,
             );
-            if let Err(error) = request.respond(response) {
+            let sent = request.respond(response);
+            if let Err(error) = &sent {
                 eprintln!("[attune] proxy: failed to send response: {error}");
+            }
+            Delivery {
+                ok: status_ok && sent.is_ok(),
+                first_byte: Some(upstream.headers_at),
+                tokens,
             }
         }
         UpstreamBody::Stream(reader) => {
-            respond_stream(request, upstream.status, &upstream.headers, reader);
+            let (sent, mut tap) =
+                respond_stream(request, upstream.status, &upstream.headers, reader);
+            Delivery {
+                ok: status_ok && sent,
+                first_byte: tap.first_byte,
+                tokens: tap.tokens(),
+            }
         }
     }
 }
@@ -221,13 +305,71 @@ fn respond_stream(
     status: u16,
     headers: &[Header],
     mut reader: ureq::BodyReader<'static>,
-) {
+) -> (bool, StreamTap) {
     let mut writer = request.into_writer();
-    if let Err(error) = write_stream(&mut writer, status, headers, &mut reader) {
+    let mut tap = StreamTap::default();
+    let result = write_stream(&mut writer, status, headers, &mut reader, &mut tap);
+    if let Err(error) = &result {
         // A client that disconnects surfaces here as a broken pipe; stop
         // pulling the upstream body and let the reader drop close that side.
         eprintln!("[attune] proxy: streaming response ended early: {error}");
     }
+    (result.is_ok(), tap)
+}
+
+/// Observes SSE bytes as they are piped: first-byte time and token count.
+#[derive(Default)]
+struct StreamTap {
+    first_byte: Option<Instant>,
+    /// Bytes of an unfinished trailing line.
+    carry: Vec<u8>,
+    /// `data:` chunks other than `[DONE]` and the usage-only chunk.
+    chunks: u64,
+    usage_tokens: Option<u64>,
+}
+
+impl StreamTap {
+    fn feed(&mut self, bytes: &[u8]) {
+        if self.first_byte.is_none() && !bytes.is_empty() {
+            self.first_byte = Some(Instant::now());
+        }
+        self.carry.extend_from_slice(bytes);
+        while let Some(end) = self.carry.iter().position(|&byte| byte == b'\n') {
+            let line: Vec<u8> = self.carry.drain(..=end).collect();
+            self.line(&line);
+        }
+    }
+
+    fn line(&mut self, line: &[u8]) {
+        let Some(data) = line.strip_prefix(b"data:") else {
+            return;
+        };
+        let data = data.trim_ascii();
+        if data.is_empty() || data == b"[DONE]" {
+            return;
+        }
+        match usage_tokens(data) {
+            Some(tokens) => self.usage_tokens = Some(tokens),
+            None => self.chunks += 1,
+        }
+    }
+
+    /// Upstream-reported usage wins; otherwise the content chunk count.
+    fn tokens(&mut self) -> Option<u64> {
+        let rest = std::mem::take(&mut self.carry);
+        self.line(&rest);
+        self.usage_tokens
+            .or((self.chunks > 0).then_some(self.chunks))
+    }
+}
+
+/// `usage.completion_tokens` from a JSON body or SSE chunk, if present.
+fn usage_tokens(json: &[u8]) -> Option<u64> {
+    serde_json::from_slice::<serde_json::Value>(json)
+        .ok()?
+        .get("usage")?
+        .get("completion_tokens")?
+        .as_u64()
 }
 
 fn write_stream<W: Write>(
@@ -235,6 +377,7 @@ fn write_stream<W: Write>(
     status: u16,
     headers: &[Header],
     reader: &mut dyn Read,
+    tap: &mut StreamTap,
 ) -> io::Result<()> {
     let reason = StatusCode(status).default_reason_phrase();
     write!(writer, "HTTP/1.1 {status} {reason}\r\n")?;
@@ -255,6 +398,7 @@ fn write_stream<W: Write>(
         if read == 0 {
             break;
         }
+        tap.feed(&buffer[..read]);
         write!(writer, "{read:x}\r\n")?;
         writer.write_all(&buffer[..read])?;
         writer.write_all(b"\r\n")?;
@@ -333,12 +477,31 @@ mod tests {
     fn stream_writer_frames_each_read_and_terminates_with_zero_chunk() {
         let mut out = Vec::new();
         let mut reader = Cursor::new(b"data: one\n\n".to_vec());
-        write_stream(&mut out, 200, &[], &mut reader).expect("write stream");
+        let mut tap = StreamTap::default();
+        write_stream(&mut out, 200, &[], &mut reader, &mut tap).expect("write stream");
+        assert!(tap.first_byte.is_some());
+        assert_eq!(tap.tokens(), Some(1));
         let text = String::from_utf8(out).expect("utf8 framing");
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(text.contains("Transfer-Encoding: chunked\r\n"));
         assert!(text.contains("\r\nb\r\ndata: one\n\n\r\n"), "{text:?}");
         assert!(text.ends_with("0\r\n\r\n"));
+    }
+
+    #[test]
+    fn stream_tap_counts_split_chunks_and_prefers_usage() {
+        let mut tap = StreamTap::default();
+        for part in ["data: {\"a\":1}\n\nda", "ta: {\"a\":2}\n\ndata: [DONE]\n\n"] {
+            tap.feed(part.as_bytes());
+        }
+        assert_eq!(tap.tokens(), Some(2));
+
+        let mut tap = StreamTap::default();
+        tap.feed(
+            b"data: {\"a\":1}\n\ndata: {\"choices\":[],\"usage\":{\"completion_tokens\":7}}\n\n",
+        );
+        assert_eq!(tap.tokens(), Some(7));
+        assert_eq!(usage_tokens(b"{\"id\":1}"), None);
     }
 
     #[test]

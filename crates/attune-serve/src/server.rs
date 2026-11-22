@@ -37,6 +37,8 @@ pub struct ProxyConfig {
     /// Shared by every worker through [`Proxy`]; plain HTTP is expected because
     /// the upstream is the local child process.
     pub upstream_base: String,
+    /// Pid of the upstream child, used for the `llama_server_rss_bytes` metric.
+    pub upstream_pid: Option<u32>,
 }
 
 /// The OpenAI endpoints the proxy serves.
@@ -46,6 +48,10 @@ pub(crate) enum Route {
     Completions,
     Models,
     Health,
+    /// `GET /v1/metrics`, answered by the proxy itself.
+    Metrics,
+    /// `GET /metrics` (Prometheus text), answered by the proxy itself.
+    Prometheus,
 }
 
 impl Route {
@@ -70,6 +76,8 @@ impl Route {
             Self::Completions => "/v1/completions",
             Self::Models => "/v1/models",
             Self::Health => "/health",
+            Self::Metrics => "/v1/metrics",
+            Self::Prometheus => "/metrics",
         }
     }
 }
@@ -94,6 +102,8 @@ pub(crate) fn route(method: &Method, url: &str) -> Routing {
         "/v1/completions" => Route::Completions,
         "/v1/models" => Route::Models,
         "/health" => Route::Health,
+        "/v1/metrics" => Route::Metrics,
+        "/metrics" => Route::Prometheus,
         _ => return Routing::NotFound,
     };
     let method_matches = if route.is_post() {
@@ -145,7 +155,10 @@ impl Proxy {
             .unwrap_or_else(|| addr.clone());
         Ok(Self {
             server: Arc::new(server),
-            state: Arc::new(ProxyState::new(config.upstream_base.clone())),
+            state: Arc::new(ProxyState::new(
+                config.upstream_base.clone(),
+                config.upstream_pid,
+            )),
             local_addr,
         })
     }
@@ -243,7 +256,7 @@ mod tests {
     use tiny_http::{Header, Response};
 
     const UPSTREAM_CHAT: &str =
-        "{\n  \"id\": \"chatcmpl-stub\",\n  \"choices\": [{\"index\": 0}]\n}\n";
+        "{\n  \"id\": \"chatcmpl-stub\",\n  \"choices\": [{\"index\": 0}],\n  \"usage\": {\"completion_tokens\": 5}\n}\n";
     const UPSTREAM_ERROR: &str =
         "{\"error\":{\"message\":\"bad prompt\",\"type\":\"invalid_request\"}}";
     const UPSTREAM_MODELS: &str = "{\"object\":\"list\",\"data\":[{\"id\":\"stub-model\"}]}";
@@ -299,6 +312,26 @@ mod tests {
         assert_eq!(
             route(&Method::Post, "/health"),
             Routing::MethodNotAllowed(Route::Health)
+        );
+    }
+
+    #[test]
+    fn metrics_routes_are_get_only() {
+        assert_eq!(
+            route(&Method::Get, "/v1/metrics"),
+            Routing::Serve(Route::Metrics)
+        );
+        assert_eq!(
+            route(&Method::Get, "/metrics"),
+            Routing::Serve(Route::Prometheus)
+        );
+        assert_eq!(
+            route(&Method::Post, "/v1/metrics"),
+            Routing::MethodNotAllowed(Route::Metrics)
+        );
+        assert_eq!(
+            route(&Method::Post, "/metrics"),
+            Routing::MethodNotAllowed(Route::Prometheus)
         );
     }
 
@@ -410,6 +443,66 @@ mod tests {
             "Authorization was not forwarded upstream: {:?}",
             stub.authorizations()
         );
+    }
+
+    #[test]
+    fn completions_move_the_proxy_metrics() {
+        let stub = StubUpstream::start();
+        let proxy = TestProxy::start(&format!("http://{}", stub.addr));
+        let get = |path: &str| {
+            let request = format!(
+                "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                proxy.addr
+            );
+            http_raw(&proxy.addr, &request).0
+        };
+
+        let empty: serde_json::Value =
+            serde_json::from_slice(&get("/v1/metrics").body).expect("metrics JSON");
+        assert_eq!(empty["requests"]["total"], 0);
+        assert!(empty["ttft_ms"]["mean"].is_null());
+
+        let plain = post_request(
+            &proxy.addr,
+            "/v1/chat/completions",
+            r#"{"model":"stub","messages":[]}"#,
+            None,
+        );
+        assert_eq!(http_raw(&proxy.addr, &plain).0.status, 200);
+        let streamed = post_request(
+            &proxy.addr,
+            "/v1/chat/completions",
+            r#"{"model":"stub","messages":[],"stream":true}"#,
+            None,
+        );
+        assert_eq!(http_raw(&proxy.addr, &streamed).0.status, 200);
+        let failed = post_request(
+            &proxy.addr,
+            "/v1/completions",
+            r#"{"prompt":"x","fail":true}"#,
+            None,
+        );
+        assert_eq!(http_raw(&proxy.addr, &failed).0.status, 400);
+
+        let metrics: serde_json::Value =
+            serde_json::from_slice(&get("/v1/metrics").body).expect("metrics JSON");
+        assert_eq!(metrics["requests"]["total"], 3);
+        assert_eq!(metrics["requests"]["ok"], 2);
+        assert_eq!(metrics["requests"]["error"], 1);
+        assert_eq!(metrics["requests"]["in_flight"], 0);
+        // One TTFT sample per ok request (non-stream + stream), all non-zero.
+        assert_eq!(metrics["ttft_ms"]["count"], 2);
+        assert!(metrics["ttft_ms"]["p50"].as_f64().unwrap_or(0.0) > 0.0);
+        // Non-stream usage says 5 tokens; the stream has 2 `data:` chunks.
+        assert_eq!(metrics["tok_s"]["count"], 2);
+        assert_eq!(metrics["tpot_ms"]["count"], 2);
+        assert!(metrics["ram_available_bytes"].as_u64().unwrap_or(0) > 0);
+
+        let prom = get("/metrics");
+        assert_eq!(prom.status, 200);
+        let text = String::from_utf8(prom.body).expect("utf8 metrics");
+        assert!(text.contains("attune_requests_total{status=\"ok\"} 2"));
+        assert!(text.contains("attune_ttft_seconds{quantile=\"0.5\"}"));
     }
 
     #[test]
@@ -625,6 +718,7 @@ mod tests {
                 listen: "127.0.0.1".to_string(),
                 listen_port: 0,
                 upstream_base: upstream_base.to_string(),
+                upstream_pid: None,
             };
             let proxy = Proxy::bind(&config).expect("bind proxy");
             let addr = proxy.local_addr().to_string();

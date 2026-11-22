@@ -64,6 +64,10 @@ attune tune --model smollm2-135m --save profile.json     # export best profile
 attune serve --profile profile.json                     # run it (M5, in progress)
 ```
 
+While serving, the proxy answers `GET /v1/metrics` (JSON) and `GET /metrics`
+(Prometheus text) with measured TTFT, TPOT, tok/s, request counters, and
+llama-server RSS.
+
 `estimate --model` accepts a catalog name, an `org/model` Hugging Face id
 (30-day cache, offline fallback), or a local GGUF path:
 
