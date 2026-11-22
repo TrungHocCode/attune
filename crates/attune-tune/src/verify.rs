@@ -80,7 +80,9 @@ pub fn e2e_config_for(
 }
 
 /// Replace estimate numbers with measured ones and re-sort with the same
-/// [`Objective`].
+/// [`Objective`]. Measured configs rank first (by measured score), then the
+/// unmeasured ones by estimate: the uncalibrated roofline over-predicts, so
+/// mixing the two scales would put never-run configs on top.
 ///
 /// `measured` is keyed by the exact [`TuneConfig`] that ran. Entries without a
 /// complete measurement are copied through untouched, so a failed or truncated
@@ -118,7 +120,11 @@ pub fn rerank_with_e2e(
         })
         .collect();
 
-    updated.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+    updated.sort_by(|a, b| {
+        b.verified
+            .cmp(&a.verified)
+            .then(b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal))
+    });
     updated
 }
 
@@ -399,6 +405,25 @@ mod tests {
         assert_eq!(reranked[1].config, estimate_winner);
         assert_eq!(reranked[1].decode_tps, 300.0);
         assert_eq!(reranked[1].score, 300.0);
+    }
+
+    #[test]
+    fn rerank_ranks_measured_above_a_higher_unmeasured_estimate() {
+        let unmeasured = TuneConfig::new(Quant::Q4_K_M, 2_048, 4, 512, Quant::Fp16);
+        let run = TuneConfig::new(Quant::Q4_K_M, 2_048, 8, 512, Quant::Fp16);
+        let ranked = [
+            ranked(unmeasured.clone(), 400.0, 100.0, 400.0),
+            ranked(run.clone(), 200.0, 200.0, 200.0),
+        ];
+
+        // Measured 120 tok/s scores below the 400 estimate but was actually run.
+        let measured = [(run.clone(), e2e(120.0, 40.0))];
+        let reranked = rerank_with_e2e(&ranked, &measured, Objective::Throughput);
+
+        assert_eq!(reranked[0].config, run);
+        assert!(reranked[0].verified);
+        assert!(reranked[0].score < reranked[1].score);
+        assert_eq!(reranked[1].config, unmeasured);
     }
 
     #[test]
