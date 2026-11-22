@@ -24,15 +24,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum BenchError {
-    #[error("hardware detection failed: {0}")]
+    #[error("hardware detection failed")]
     Hal(#[from] attune_hal::HalError),
-    #[error("failed to allocate a {0} byte benchmark buffer: {1}")]
+    #[error("failed to allocate a {0} byte benchmark buffer")]
     Alloc(u64, #[source] std::collections::TryReserveError),
     #[error("benchmark worker thread panicked during a bandwidth pass")]
     WorkerPanicked,
     #[error("invalid bench configuration: {0}")]
     InvalidConfig(String),
-    #[error("failed to spawn the resource monitor thread: {0}")]
+    #[error("failed to spawn the resource monitor thread")]
     MonitorSpawn(#[source] std::io::Error),
     /// No usable `llama-cli`: nothing matched `--llama-cli`, `ATTUNE_LLAMA_CLI`
     /// or the `PATH` search, or the winner was not a runnable file. The
@@ -44,7 +44,7 @@ pub enum BenchError {
         detail: String,
     },
     /// The child could not be started, or polling it failed.
-    #[error("failed to run `{cli}`: {source}")]
+    #[error("failed to run `{cli}`")]
     LlamaSpawn {
         /// The executable we tried to run.
         cli: String,
