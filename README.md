@@ -34,7 +34,7 @@ cargo build -p attune-cli
 ```
 
 ```
-CPU:        Intel(R) Core(TM) 5 210H (GenuineIntel, 8P, 12L)
+CPU:        Intel(R) Core(TM) 5 210H (GenuineIntel, 8C/12T)
 SIMD:       SSE4.2, AVX, AVX2
 Clock:      2.20 GHz max (best-effort)
 Cache:      L1d 48 KB | L1i 32 KB | L2 1.2 MB | L3 12.0 MB | line 64 B
