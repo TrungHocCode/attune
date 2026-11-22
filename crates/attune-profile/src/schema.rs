@@ -465,3 +465,16 @@ mod tests {
         assert!(profile.draft_model.is_none());
     }
 }
+
+#[cfg(test)]
+mod error_display_tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn json_error_keeps_cause_in_source_only() {
+        let err = Profile::from_json_str("{oops").unwrap_err();
+        assert_eq!(err.to_string(), "invalid profile JSON");
+        assert!(err.source().is_some());
+    }
+}

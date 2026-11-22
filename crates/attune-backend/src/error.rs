@@ -18,7 +18,7 @@ pub enum BackendError {
         detail: String,
     },
     /// The child could not be started, or polling it failed.
-    #[error("failed to run `{binary}`: {source}")]
+    #[error("failed to run `{binary}`")]
     Spawn {
         /// The executable we tried to run.
         binary: String,
