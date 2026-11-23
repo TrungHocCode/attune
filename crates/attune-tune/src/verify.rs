@@ -48,6 +48,9 @@ pub struct VerifyOutcome {
     /// One notice per config whose e2e run failed or produced no usable
     /// decode timing. Empty when every attempted run succeeded.
     pub warnings: Vec<String>,
+    /// llama.cpp build reported by the first successful run (`--version`), or
+    /// `None` when no run produced a measurement.
+    pub engine_version: Option<String>,
 }
 
 /// Map a tune grid point onto the llama.cpp knobs [`run_e2e`] understands.
@@ -192,6 +195,7 @@ pub fn run_verify_topk(
         return Ok(VerifyOutcome {
             configs: Vec::new(),
             warnings: Vec::new(),
+            engine_version: None,
         });
     }
 
@@ -237,9 +241,11 @@ pub fn run_verify_topk(
         }
     }
 
+    let engine_version = measured.first().map(|(_, result)| result.engine.clone());
     Ok(VerifyOutcome {
         configs: rerank_with_e2e(ranked, &measured, objective),
         warnings,
+        engine_version,
     })
 }
 

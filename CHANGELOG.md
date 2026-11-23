@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 - `estimate`/`tune --model <file>` accept extension-less GGUF files (detected by the `GGUF` magic, e.g. Ollama blobs), and derive the parameter count from the tensor-info table when `general.parameter_count` is absent (reads up to 32 MiB of header in that case) (#74).
 
 ### Fixed
+- #75: `tune --save` now records the llama.cpp build observed by `--verify` as `engine.version` (still `unknown (estimate-only)` otherwise) and defaults the profile `name` to `<file stem>-<objective>` instead of the full model path; path separators in the name become `-`. `model.path` is unchanged.
 - `estimate --model <file.gguf>` now reads `<arch>.context_length` from the header as the default `--ctx`, matching catalog and `config.json` sources (#73).
 - #71: for a GGUF `--model` file, `estimate` and `tune` now use the file size
   as the weight bytes (decode prediction, RAM fit, exported profile
