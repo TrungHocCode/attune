@@ -78,12 +78,32 @@
   needs explicit `--listen` plus `--api-key`.
 - Acceptance: install-to-first-inference under 5 minutes; profile apply
   success > 95%.
+- Slices: 1 launch + health ✅ (#62), 2 OpenAI proxy + shutdown ✅ (#63),
+  3 metrics (#90), 4 api-key + hardening incl. Windows child cleanup
+  (#91, #77), then the acceptance run and v0.5.0.
+
+## Estimate accuracy fixes (after M5)
+
+Found while re-testing M1–M5 on real models: #71, #72 (weight and KV
+bytes), #73, #74 (GGUF facts), #75 (profile metadata), #69 (prefill
+ceiling), #70 (bandwidth probe), then #78 re-validates M3/M4 on 4B+ models.
+The GPU work below builds on this math, so it lands first.
+
+## M6 — GPU (proposed)
+
+**Goal:** use the GPU the machine already has, and split the model across
+GPU + CPU when it does not fit in VRAM.
+
+- Detect GPUs (vendor CLI, no SDK dependency), measure effective VRAM
+  bandwidth through llama.cpp, estimate full and partial offload with a VRAM
+  fit check, tune `n_gpu_layers`, serve with a GPU llama.cpp build.
+- Full plan, non-goals and proposed acceptance: [docs/gpu-plan.md](docs/gpu-plan.md).
 
 ## Later
 
 - **V1 (desktop):** Tauri app with Simple/Preset/Advanced modes for
   non-technical users.
-- **V2 (advanced):** MoE offloading, speculative decoding, hybrid CPU+GPU,
+- **V2 (advanced):** MoE offloading, speculative decoding, multi-GPU,
   ARM/Apple Silicon.
 
 ## How this file stays accurate
