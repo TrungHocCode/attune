@@ -27,10 +27,10 @@ pub struct CpuInfo {
     pub simd_flags: Vec<String>,
     /// Best-effort CPU clock in GHz. 0.0 means unknown.
     ///
-    /// This is the *maximum* (boost) clock reported by the OS, not the base
-    /// clock: the roofline prefill/TTFT model wants the compute ceiling and
-    /// real inference runs ramp into the turbo bin. Sustained clocks are
-    /// lower (thermals, all-core limits), so treat this as an upper bound.
+    /// Whatever the OS reports as the maximum clock. Linux gives the boost
+    /// clock; Windows `MaxClockSpeed` usually gives the *base* clock (no
+    /// reliable user-mode turbo API), so real runs can exceed it. This is why
+    /// quantized prefill uses a measured int8 ceiling, not this datasheet math.
     /// `serde(default)` keeps old JSON without the field parseable.
     #[serde(default)]
     pub clock_ghz: f64,
@@ -291,6 +291,11 @@ fn parse_cim_max_clock_ghz(text: &str) -> f64 {
     max_mhz as f64 / 1000.0
 }
 
+/// Pure: AVX-VNNI is bit 4 of EAX for CPUID leaf 7, subleaf 1.
+pub fn avx_vnni_from_leaf7_1_eax(eax: u32) -> bool {
+    eax & (1 << 4) != 0
+}
+
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 struct X86CpuId {
     brand: Option<String>,
@@ -301,6 +306,10 @@ struct X86CpuId {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 fn detect_x86_cpuid() -> X86CpuId {
     use raw_cpuid::CpuId;
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::__cpuid_count as cpuid_count;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::__cpuid_count as cpuid_count;
 
     let cpuid = CpuId::new();
 
@@ -331,9 +340,19 @@ fn detect_x86_cpuid() -> X86CpuId {
         if ext.has_avx512f() {
             simd_flags.push("AVX-512F".to_string());
         }
+        if ext.has_avx512vnni() {
+            simd_flags.push("AVX512-VNNI".to_string());
+        }
         if ext.has_amx_tile() || ext.has_amx_bf16() || ext.has_amx_int8() {
             simd_flags.push("AMX".to_string());
         }
+    }
+
+    // AVX-VNNI (VEX-encoded) is CPUID.(EAX=7,ECX=1):EAX[4]; raw-cpuid does not expose it.
+    // Subleaf 1 only exists when leaf 7 reports max subleaf >= 1.
+    let has_leaf7_1 = cpuid_count(0, 0).eax >= 7 && cpuid_count(7, 0).eax >= 1;
+    if has_leaf7_1 && avx_vnni_from_leaf7_1_eax(cpuid_count(7, 1).eax) {
+        simd_flags.push("AVX-VNNI".to_string());
     }
 
     X86CpuId {
@@ -356,12 +375,29 @@ mod tests {
     }
 
     #[test]
+    fn avx_vnni_bit_is_eax_bit_4() {
+        assert!(avx_vnni_from_leaf7_1_eax(1 << 4));
+        assert!(avx_vnni_from_leaf7_1_eax(0xffff_ffff));
+        assert!(!avx_vnni_from_leaf7_1_eax(0));
+        assert!(!avx_vnni_from_leaf7_1_eax(!(1 << 4)));
+    }
+
+    #[test]
     fn simd_flag_strings_are_known() {
         let cpu = detect().expect("cpu detect");
         for flag in &cpu.simd_flags {
             // We only emit a fixed vocabulary — keeps JSON stable for downstream.
             assert!(
-                ["SSE4.2", "AVX", "AVX2", "AVX-512F", "AMX"].contains(&flag.as_str()),
+                [
+                    "SSE4.2",
+                    "AVX",
+                    "AVX2",
+                    "AVX-512F",
+                    "AVX-VNNI",
+                    "AVX512-VNNI",
+                    "AMX"
+                ]
+                .contains(&flag.as_str()),
                 "unexpected SIMD flag: {flag}"
             );
         }

@@ -309,6 +309,9 @@ fn json_envelope_with_model(
     if let Some(flops) = report.flops.as_ref() {
         bench.insert("flops".to_string(), serde_json::to_value(flops)?);
     }
+    if let Some(int8) = report.int8.as_ref() {
+        bench.insert("int8".to_string(), serde_json::to_value(int8)?);
+    }
     if let Some(resources) = report.resources.as_ref() {
         bench.insert("resources".to_string(), serde_json::to_value(resources)?);
     }
@@ -468,6 +471,14 @@ fn print_report_pretty(report: &BenchReport, hw: &HardwareInfo) {
     match &report.bandwidth {
         BandwidthReport::Full(r) => {
             print_pretty_full(r, report.flops.as_ref(), report.resources.as_ref(), hw);
+            if let Some(int8) = report.int8.as_ref() {
+                println!(
+                    "Int8 GOPS:              {:.1} GOPS (path: {}, {} threads)",
+                    int8.int8_gops,
+                    int8.path.as_str(),
+                    int8.threads,
+                );
+            }
         }
         BandwidthReport::Quick(r) => {
             // Quick mode in the CLI goes through `print_pretty_quick` and

@@ -29,10 +29,9 @@ use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
     calibrate_with_bench, classify, decode_ai, is_gguf_file, is_hf_id, kv_bytes_per_token,
     kv_filled_tokens, parse_arch, parse_bench_report, parse_model, parse_params, parse_quants,
-    predict_decode_tps_from_bytes, predict_prefill_ms_quant, probe_gguf_file, resolve_hf_model,
-    ridge_ai, spread_pct_from_stats, weight_bytes_for, Arch, Confidence, ConfigSource,
-    EstimateError, EstimateInputs, EstimateReport, GgufProbe, HwInputs, MultiEstimateReport, Quant,
-    RamFit,
+    predict_decode_tps_from_bytes, probe_gguf_file, resolve_hf_model, ridge_ai,
+    spread_pct_from_stats, weight_bytes_for, Arch, Confidence, ConfigSource, EstimateError,
+    EstimateInputs, EstimateReport, GgufProbe, HwInputs, MultiEstimateReport, Quant, RamFit,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
@@ -103,6 +102,18 @@ fn resolve_compute(gflops: Option<f64>) -> Result<ComputeResolution> {
             }
         }
     }
+}
+
+/// Compute ceiling for quantized prefill: the saved bench report's int8 block
+/// when it has one, else a live quick int8 probe (about 0.4 s). `None` when the
+/// probe fails, which keeps the FP32 ceiling. Callers skip this for an explicit
+/// `--gflops` so the user's number stays authoritative.
+pub(super) fn measured_int8_gops(bench: Option<&BenchReport>) -> Option<f64> {
+    let result = match bench.and_then(|b| b.int8) {
+        Some(result) => result,
+        None => attune_bench::int8::quick_int8().ok()?,
+    };
+    (result.int8_gops.is_finite() && result.int8_gops > 0.0).then_some(result.int8_gops)
 }
 
 /// Resolved bandwidth plus the spread used for confidence intervals.
@@ -438,8 +449,9 @@ fn build_report(ctx: &ReportContext<'_>, quant: Quant) -> Result<EstimateReport,
         ctx.kv_per_token,
         kv_filled_tokens(ctx.prompt_tokens, ctx.gen_tokens, ctx.ctx),
     )?;
-    let prefill_ms_ttft =
-        predict_prefill_ms_quant(ctx.params, ctx.prompt_tokens, ctx.hw.flops_gflops, quant)?;
+    let prefill_ms_ttft = ctx
+        .hw
+        .predict_prefill_ms(ctx.params, ctx.prompt_tokens, quant)?;
     let ai_star = ridge_ai(ctx.hw.flops_gflops, ctx.hw.bw_gbps)?;
     let workload_ai = decode_ai(bytes_per_param)?;
     let (bottleneck, margin_pct) = classify(workload_ai, ai_star);
@@ -451,6 +463,7 @@ fn build_report(ctx: &ReportContext<'_>, quant: Quant) -> Result<EstimateReport,
             clock_ghz: ctx.clock_ghz,
             arch: ctx.arch.map(str::to_string),
             ctx: Some(ctx.ctx),
+            int8_gops: ctx.hw.int8_gops,
         })
         .with_prefill_ms(prefill_ms_ttft)
         .with_ridge(ai_star, margin_pct)
@@ -661,6 +674,9 @@ fn print_single(
         "Peak:        {}",
         format_peak(flops_gflops, clock_ghz, clock_fallback)
     );
+    if let Some(gops) = report.inputs.as_ref().and_then(|inputs| inputs.int8_gops) {
+        println!("Int8 peak:   {gops:.1} GOPS (measured; quantized prefill ceiling)");
+    }
     println!(
         "Ridge:       {:.2} FLOP/byte ({:.1} GFLOPS / {:.1} GB/s)",
         ai_star, flops_gflops, bw_gbps,
@@ -710,6 +726,9 @@ fn print_table(
             inputs.bw_gbps,
             format_peak(inputs.gflops, inputs.clock_ghz, clock_fallback)
         );
+        if let Some(gops) = inputs.int8_gops {
+            println!("Int8:   {gops:.1} GOPS (quantized prefill ceiling)");
+        }
     }
     println!();
     println!(
@@ -815,9 +834,16 @@ pub fn run(
     };
     let bandwidth = resolve_bandwidth(bandwidth_gbps, spread_pct, bench.as_ref())?;
 
+    // Measured after the bandwidth probe, never alongside it.
+    let int8_gops = if gflops.is_some() || quants.iter().all(|q| *q == Quant::Fp16) {
+        None
+    } else {
+        measured_int8_gops(bench.as_ref())
+    };
     let hw = HwInputs {
         bw_gbps: bandwidth.gbps,
         flops_gflops: compute.gflops,
+        int8_gops,
     };
     let context = ReportContext {
         label: &label,
@@ -1016,6 +1042,7 @@ mod tests {
                 resources: None,
             }),
             flops: None,
+            int8: None,
             resources: None,
             e2e: Some(E2eResult {
                 engine: "11804".to_string(),
@@ -1246,6 +1273,7 @@ mod tests {
             hw: HwInputs {
                 bw_gbps: 20.0,
                 flops_gflops: 50.0,
+                int8_gops: None,
             },
             clock_ghz: 4.0,
             ram_avail_bytes: None,

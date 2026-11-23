@@ -675,6 +675,7 @@ pub fn run(
         .parse()
         .map_err(|err: TuneError| anyhow!("{err}"))?;
 
+    let explicit_gflops = gflops.is_some();
     // Fail fast on unusable overrides before starting either probe.
     for (name, value) in [("--bandwidth-gbps", bandwidth_gbps), ("--gflops", gflops)] {
         if let Some(value) = value {
@@ -703,9 +704,16 @@ pub fn run(
         total_bytes,
         physical_cores,
     } = hardware;
+    // Sequential with the bandwidth probe above so the two never compete.
+    let int8_gops = if explicit_gflops {
+        None
+    } else {
+        super::estimate::measured_int8_gops(None)
+    };
     let hw = HwInputs {
         bw_gbps,
         flops_gflops: gflops,
+        int8_gops,
     };
 
     // Full slice-2 grid (threads/ctx/batch/KV) restricted to the requested
@@ -907,6 +915,7 @@ mod tests {
         let hw = HwInputs {
             bw_gbps: 20.0,
             flops_gflops: 100.0,
+            int8_gops: None,
         };
         TuneReport::new(
             label,

@@ -27,6 +27,35 @@ The M2 benches live in `crates/attune-bench/src/`. Three families:
   `-t`), scrapes the `llama_perf` block from stderr, and folds RAM / CPU
   / (Linux) power readings into the `e2e` block.
 
+## Int8 dot-product kernel (`int8.rs`)
+
+llama.cpp's quantized prefill runs on int8 dot products, so FP32 FMA is the
+wrong compute ceiling for q8_0 / q4_* prefill (issue #69: llama.cpp reached
+665 GFLOPS effective on an 8B model, above the 563 GFLOPS FP32 "peak").
+`attune bench` therefore also measures `u8 x i8 -> i32` multiply-accumulate
+throughput and reports it as `int8` (`int8_gops`, `best_gops`, `path`,
+`threads`, `reps`). One multiply-add counts as 2 ops, like FLOPs, and GOPS is
+decimal.
+
+* **Paths**: AVX-VNNI `vpdpbusd` (`_mm256_dpbusd_avx_epi32`, stable on
+  rustc 1.99, runtime-gated on `avxvnni`), else AVX2 `vpmaddubsw` +
+  `vpmaddwd` + `vpaddd`, else scalar.
+* **Tile**: a 2 x 4 register tile (6 loads per 8 dot-product instructions)
+  over L1-resident buffers with 8 accumulators, like a real int8 GEMM
+  micro-kernel. One fresh load pair per instruction is load-port bound and
+  under-reports the multiply units.
+* **Budget**: about 70 ms per timed pass on AVX-VNNI (fewer iterations on
+  slower paths), 1 warm-up + 3 timed passes, one worker per physical core.
+* **Where it is used**: `estimate` / `tune` without `--gflops` run this quick
+  probe (after the bandwidth probe, never alongside it) or read the `int8`
+  block of `--bench-json`, and use it as the prefill ceiling for quantized
+  formats. fp16 keeps the FP32 ceiling; an explicit `--gflops` keeps the old
+  FP32-for-everything behaviour. The measured ceiling already includes the
+  quantized-matmul cost, so the heuristic dequant penalty is not applied on
+  top of it (llama.cpp reached 90-95% of the measured int8 ceiling on
+  Q4_K_M); the penalty still applies to the FP32 ceiling.
+* Old bench JSON without the `int8` field still parses (`serde(default)`).
+
 ## Working-set sizing
 
 `BandwidthConfig::full_from_hardware` chooses a buffer that is:

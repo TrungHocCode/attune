@@ -2,8 +2,8 @@
 
 use attune_bench::e2e::E2eResult;
 use attune_estimate::{
-    kv_elem_bytes, kv_filled_tokens, predict_decode_tps_from_bytes, predict_prefill_ms_quant,
-    weight_bytes_for, BenchCalibration, CalibrationReport, HwInputs, Quant, RamFit,
+    kv_elem_bytes, kv_filled_tokens, predict_decode_tps_from_bytes, weight_bytes_for,
+    BenchCalibration, CalibrationReport, HwInputs, Quant, RamFit,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -254,12 +254,7 @@ pub fn rank_by_estimate(
             kv_per_token,
             kv_filled_tokens(prompt_tokens, gen_tokens, config.n_ctx),
         )?;
-        let ttft_ms = predict_prefill_ms_quant(
-            model.params,
-            u64::from(config.n_ctx),
-            hw.flops_gflops,
-            config.quant,
-        )?;
+        let ttft_ms = hw.predict_prefill_ms(model.params, u64::from(config.n_ctx), config.quant)?;
         let fit = RamFit::new(
             weight_bytes,
             kv_per_token * f64::from(config.n_ctx),
@@ -391,6 +386,7 @@ mod tests {
         HwInputs {
             bw_gbps: 20.0,
             flops_gflops: 50.0,
+            int8_gops: None,
         }
     }
 
@@ -586,6 +582,7 @@ mod tests {
                 resources: None,
             }),
             flops: None,
+            int8: None,
             resources: None,
             e2e: Some(E2eResult {
                 engine: "test".to_string(),

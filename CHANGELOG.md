@@ -7,7 +7,10 @@ All notable changes to this project will be documented in this file.
 ### Added
 - `estimate`/`tune --model <file>` accept extension-less GGUF files (detected by the `GGUF` magic, e.g. Ollama blobs), and derive the parameter count from the tensor-info table when `general.parameter_count` is absent (reads up to 32 MiB of header in that case) (#74).
 
+- `attune-bench`: int8 dot-product throughput kernel (AVX-VNNI `vpdpbusd`, AVX2 `vpmaddubsw` fallback, scalar) reported as the optional `int8` block of the bench JSON (`int8_gops`). `attune-hal`: `AVX-VNNI` (CPUID 7.1 EAX bit 4) and `AVX512-VNNI` appear in `simd_flags`.
+
 ### Fixed
+- #69: uncalibrated quantized prefill/TTFT now uses the measured int8 throughput (live quick probe, or `int8` from `--bench-json`) as the compute ceiling instead of the FP32 base-clock peak, with no extra dequant penalty on top of it; fp16 and an explicit `--gflops` keep the FP32 path. `estimate` JSON gains optional `inputs.int8_gops`. The `clock_ghz` docs now say best-effort (Windows reports the base clock). Qwen3 4B/8B TTFT error on the reference machine drops from +45%/+54% to -13%/-3%.
 - #75: `tune --save` now records the llama.cpp build observed by `--verify` as `engine.version` (still `unknown (estimate-only)` otherwise) and defaults the profile `name` to `<file stem>-<objective>` instead of the full model path; path separators in the name become `-`. `model.path` is unchanged.
 - `estimate --model <file.gguf>` now reads `<arch>.context_length` from the header as the default `--ctx`, matching catalog and `config.json` sources (#73).
 - #71: for a GGUF `--model` file, `estimate` and `tune` now use the file size

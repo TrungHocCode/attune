@@ -330,6 +330,7 @@ mod tests {
         let hw = HwInputs {
             bw_gbps: 20.0,
             flops_gflops: 50.0,
+            int8_gops: None,
         };
         let bytes_per_param = Quant::Q4_K_M.bytes_per_param();
         let via_model = hw
