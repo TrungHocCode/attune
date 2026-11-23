@@ -499,7 +499,7 @@ fn print_table(
         );
     } else {
         println!(
-            "Note: estimate-only ranking (weights-only decode, full-context prefill TTFT); no llama.cpp run."
+            "Note: estimate-only ranking (decode = weights + filled KV, full-context prefill TTFT); no llama.cpp run."
         );
     }
     for warning in &report.warnings {
