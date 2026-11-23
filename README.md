@@ -68,6 +68,11 @@ While serving, the proxy answers `GET /v1/metrics` (JSON) and `GET /metrics`
 (Prometheus text) with measured TTFT, TPOT, tok/s, request counters, and
 llama-server RSS.
 
+The proxy listens on `127.0.0.1` by default. Any other `--listen` host is
+refused unless `--api-key <KEY>` (or `ATTUNE_API_KEY`) is set; with a key every
+route except `/health` needs `Authorization: Bearer <KEY>`. On Windows,
+llama-server is killed with attune even on a hard kill.
+
 `estimate --model` accepts a catalog name, an `org/model` Hugging Face id
 (30-day cache, offline fallback), or a local GGUF path:
 

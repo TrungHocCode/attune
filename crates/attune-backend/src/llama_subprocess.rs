@@ -396,6 +396,87 @@ fn quoted_list<'a, I: IntoIterator<Item = &'a str>>(names: I) -> String {
 
 // ---- process guard ----------------------------------------------------------
 
+/// Windows Job Object that kills its processes when the last handle closes, so
+/// a hard-killed attune (`taskkill /F`, crash) cannot orphan llama-server (#77).
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    pub(super) struct KillOnCloseJob(HANDLE);
+
+    // SAFETY: a job HANDLE is a process-wide kernel handle, valid on any thread.
+    unsafe impl Send for KillOnCloseJob {}
+
+    impl KillOnCloseJob {
+        /// Best effort: on failure warn and return `None`; cleanup then falls
+        /// back to `ServerGuard::drop` only.
+        pub(super) fn adopt(child: &Child) -> Option<Self> {
+            // SAFETY: null attributes/name are valid; the result is checked.
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                warn("CreateJobObjectW failed");
+                return None;
+            }
+            // Owns the handle from here on; closed on every early return.
+            let job = Self(handle);
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: `info` is a live, correctly sized struct for this info class.
+            let set = unsafe {
+                SetInformationJobObject(
+                    job.0,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::addr_of!(info).cast(),
+                    std::mem::size_of_val(&info) as u32,
+                )
+            };
+            if set == 0 {
+                warn("SetInformationJobObject failed");
+                return None;
+            }
+            // SAFETY: the child handle stays valid while `child` is borrowed.
+            if unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) } == 0 {
+                warn("AssignProcessToJobObject failed");
+                return None;
+            }
+            Some(job)
+        }
+
+        /// Whether `child` is a member of this job.
+        #[cfg(test)]
+        pub(super) fn contains(&self, child: &Child) -> bool {
+            use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+            let mut result = 0;
+            // SAFETY: both handles are valid and `result` is a live out-pointer.
+            let ok =
+                unsafe { IsProcessInJob(child.as_raw_handle() as HANDLE, self.0, &mut result) };
+            ok != 0 && result != 0
+        }
+    }
+
+    impl Drop for KillOnCloseJob {
+        fn drop(&mut self) {
+            // SAFETY: we own the handle and close it exactly once.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    fn warn(what: &str) {
+        eprintln!(
+            "[attune] warning: {what} ({}); llama-server will not be killed if attune is hard-killed",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
 /// Owns a spawned `llama-server` plus the threads draining its pipes.
 ///
 /// The invariant: whenever a [`ServerGuard`] is dropped the child is *dead and
@@ -410,6 +491,9 @@ pub struct ServerGuard {
     /// Non-fatal argv warnings, surfaced by the launcher.
     warnings: Vec<String>,
     reaped: bool,
+    /// Windows only: closing this (guard drop or attune dying) kills the child.
+    #[cfg(windows)]
+    _job: Option<job::KillOnCloseJob>,
 }
 
 impl ServerGuard {
@@ -444,6 +528,8 @@ impl ServerGuard {
         // full pipe buffer while we wait for health.
         let stdout = child.stdout.take().map(spawn_reader);
         let stderr = child.stderr.take().map(spawn_reader);
+        #[cfg(windows)]
+        let job = job::KillOnCloseJob::adopt(&child);
         Ok(Self {
             child,
             binary: binary.display().to_string(),
@@ -451,6 +537,8 @@ impl ServerGuard {
             stderr,
             warnings,
             reaped: false,
+            #[cfg(windows)]
+            _job: job,
         })
     }
 
@@ -1001,6 +1089,14 @@ mod tests {
         );
         // Idempotent: a second call must not panic or hang.
         guard.shutdown();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn child_is_placed_in_a_kill_on_close_job() {
+        let guard = spawn_sleeper(60);
+        let job = guard._job.as_ref().expect("job handle held by the guard");
+        assert!(job.contains(&guard.child), "child must be in the job");
     }
 
     #[test]

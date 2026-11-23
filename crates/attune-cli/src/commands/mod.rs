@@ -136,7 +136,8 @@ pub enum Command {
     },
     /// Serve a tuned profile through llama-server behind an OpenAI-compatible
     /// proxy (M5 slices 2-3: profile validation + spawn + health check + proxy +
-    /// `/v1/metrics`; `--api-key` enforcement in slice 4).
+    /// `/v1/metrics`; slice 4: `--api-key` auth, non-loopback guard, and
+    /// llama-server dies with attune on Windows).
     Serve {
         /// Profile JSON written by `attune tune --save`
         #[arg(long, value_name = "PATH")]
@@ -151,15 +152,15 @@ pub enum Command {
         /// Port llama-server (the upstream) listens on
         #[arg(long, value_name = "PORT", default_value_t = 8081)]
         port: u16,
-        /// Interface the OpenAI-compatible proxy binds to. Keep loopback
-        /// unless the network is trusted: `--api-key` is not enforced yet.
+        /// Interface the OpenAI-compatible proxy binds to. A non-loopback
+        /// host is refused unless `--api-key` (or `ATTUNE_API_KEY`) is set.
         #[arg(long, value_name = "HOST", default_value = "127.0.0.1")]
         listen: String,
         /// Port for the OpenAI-compatible proxy
         #[arg(long, value_name = "PORT", default_value_t = 8080)]
         listen_port: u16,
-        /// Bearer key clients send. Accepted for forward compatibility but
-        /// NOT enforced yet (harden lands in slice 4); a warning is printed.
+        /// Bearer key clients must send (`Authorization: Bearer <KEY>`) on
+        /// every route except `/health`. Also read from `ATTUNE_API_KEY`.
         #[arg(long, value_name = "KEY")]
         api_key: Option<String>,
         /// Seconds to wait for `/health` before giving up

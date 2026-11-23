@@ -39,6 +39,9 @@ pub struct ProxyConfig {
     pub upstream_base: String,
     /// Pid of the upstream child, used for the `llama_server_rss_bytes` metric.
     pub upstream_pid: Option<u32>,
+    /// Bearer key required on every route except `/health` (`--api-key`).
+    /// Mandatory when `listen` is not a loopback address.
+    pub api_key: Option<String>,
 }
 
 /// The OpenAI endpoints the proxy serves.
@@ -145,6 +148,8 @@ impl Proxy {
             ));
         }
 
+        check_listen(host, config.api_key.as_deref())?;
+
         let addr = format!("{host}:{}", config.listen_port);
         let server = Server::http(addr.as_str())
             .map_err(|error| ServeError::Proxy(format!("failed to bind {addr}: {error}")))?;
@@ -158,6 +163,7 @@ impl Proxy {
             state: Arc::new(ProxyState::new(
                 config.upstream_base.clone(),
                 config.upstream_pid,
+                config.api_key.clone().filter(|key| !key.is_empty()),
             )),
             local_addr,
         })
@@ -221,6 +227,18 @@ impl Proxy {
 }
 
 fn handle_request(request: Request, state: &ProxyState) {
+    if let Some(key) = &state.api_key {
+        let path = request.url().split('?').next().unwrap_or("");
+        if path != "/health" && !bearer_matches(&request, key) {
+            proxy::respond_error(
+                request,
+                401,
+                "authentication_error",
+                "invalid or missing API key",
+            );
+            return;
+        }
+    }
     match route(request.method(), request.url()) {
         Routing::Serve(route) => proxy::handle(request, route, state),
         Routing::MethodNotAllowed(route) => proxy::respond_error(
@@ -239,6 +257,42 @@ fn handle_request(request: Request, state: &ProxyState) {
             proxy::respond_error(request, 404, "not_found", &format!("no route for `{path}`"))
         }
     }
+}
+
+/// Refuse a non-loopback `--listen` without an API key. The CLI calls this
+/// before spawning llama-server so the failure is instant.
+pub fn check_listen(listen: &str, api_key: Option<&str>) -> Result<(), ServeError> {
+    // An empty key would let any `Bearer ` header through, so it counts as none.
+    if !api_key.is_some_and(|key| !key.is_empty()) && !is_loopback_host(listen) {
+        return Err(ServeError::InvalidConfig(format!(
+            "--listen {listen} is not a loopback address: set --api-key (or ATTUNE_API_KEY) to expose the proxy"
+        )));
+    }
+    Ok(())
+}
+
+/// `true` for `localhost` or an IP literal that is loopback; anything else is
+/// treated as reachable from the network.
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Constant-time byte equality (length is not secret).
+pub(crate) fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn bearer_matches(request: &Request, key: &str) -> bool {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("Authorization"))
+        .and_then(|header| header.value.as_str().strip_prefix("Bearer "))
+        .is_some_and(|token| ct_eq(token.as_bytes(), key.as_bytes()))
 }
 
 // ---- tests ------------------------------------------------------------------
@@ -569,6 +623,99 @@ mod tests {
         assert_eq!(not_found.status, 404);
     }
 
+    // ---- api key + listen guard --------------------------------------------
+
+    #[test]
+    fn loopback_detection() {
+        for host in ["127.0.0.1", "::1", "[::1]", "localhost", "LOCALHOST"] {
+            assert!(is_loopback_host(host), "{host}");
+        }
+        for host in ["0.0.0.0", "192.168.1.5", "::", "example.com"] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
+    }
+
+    #[test]
+    fn constant_time_compare() {
+        assert!(ct_eq(b"secret", b"secret"));
+        assert!(!ct_eq(b"secret", b"secreT"));
+        assert!(!ct_eq(b"secret", b"secret2"));
+        assert!(!ct_eq(b"", b"x"));
+    }
+
+    fn config(listen: &str, api_key: Option<&str>) -> ProxyConfig {
+        ProxyConfig {
+            listen: listen.to_string(),
+            listen_port: 0,
+            upstream_base: "http://127.0.0.1:1".to_string(),
+            upstream_pid: None,
+            api_key: api_key.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn bind_refuses_non_loopback_without_a_key() {
+        let error = match Proxy::bind(&config("0.0.0.0", None)) {
+            Ok(_) => panic!("must refuse"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("--listen") && error.contains("--api-key"),
+            "{error}"
+        );
+        assert!(Proxy::bind(&config("0.0.0.0", Some(""))).is_err());
+        assert!(Proxy::bind(&config("0.0.0.0", Some("k"))).is_ok());
+    }
+
+    #[test]
+    fn api_key_gates_every_route_but_health() {
+        let stub = StubUpstream::start();
+        let proxy = TestProxy::start_with_key(&format!("http://{}", stub.addr), Some("secret"));
+        let get = |path: &str, auth: Option<&str>| {
+            let auth_line = auth
+                .map(|value| format!("Authorization: {value}\r\n"))
+                .unwrap_or_default();
+            let request = format!(
+                "GET {path} HTTP/1.1\r\nHost: {}\r\n{auth_line}Connection: close\r\n\r\n",
+                proxy.addr
+            );
+            http_raw(&proxy.addr, &request).0
+        };
+
+        let denied = get("/v1/models", None);
+        assert_eq!(denied.status, 401);
+        let error: serde_json::Value = serde_json::from_slice(&denied.body).expect("401 JSON");
+        assert_eq!(error["error"]["type"], "authentication_error");
+        assert_eq!(get("/v1/models", Some("Bearer wrong")).status, 401);
+        assert_eq!(get("/v1/metrics", None).status, 401);
+        assert_eq!(get("/metrics", None).status, 401);
+        let post = post_request(&proxy.addr, "/v1/chat/completions", "{}", None);
+        assert_eq!(http_raw(&proxy.addr, &post).0.status, 401);
+        assert!(
+            stub.authorizations().is_empty(),
+            "denied requests reached upstream"
+        );
+
+        assert_eq!(get("/health", None).status, 200);
+        assert_eq!(get("/v1/metrics", Some("Bearer secret")).status, 200);
+        let ok = get("/v1/models", Some("Bearer secret"));
+        assert_eq!(ok.status, 200);
+        assert_eq!(ok.body, UPSTREAM_MODELS.as_bytes());
+        let post = post_request(
+            &proxy.addr,
+            "/v1/chat/completions",
+            r#"{"model":"stub","messages":[]}"#,
+            Some("Bearer secret"),
+        );
+        assert_eq!(http_raw(&proxy.addr, &post).0.status, 200);
+        let seen = stub.authorizations();
+        assert!(!seen.is_empty());
+        assert!(
+            seen.iter().all(Option::is_none),
+            "key leaked upstream: {seen:?}"
+        );
+    }
+
     // ---- stub upstream -----------------------------------------------------
 
     struct StubUpstream {
@@ -714,11 +861,16 @@ mod tests {
 
     impl TestProxy {
         fn start(upstream_base: &str) -> Self {
+            Self::start_with_key(upstream_base, None)
+        }
+
+        fn start_with_key(upstream_base: &str, api_key: Option<&str>) -> Self {
             let config = ProxyConfig {
                 listen: "127.0.0.1".to_string(),
                 listen_port: 0,
                 upstream_base: upstream_base.to_string(),
                 upstream_pid: None,
+                api_key: api_key.map(str::to_string),
             };
             let proxy = Proxy::bind(&config).expect("bind proxy");
             let addr = proxy.local_addr().to_string();

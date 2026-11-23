@@ -20,7 +20,11 @@
 //! request counters over a bounded window, served by the proxy itself at
 //! `GET /v1/metrics` (JSON) and `GET /metrics` (Prometheus text).
 //!
-//! `--api-key` enforcement is a later slice.
+//! Slice 4 hardens the proxy: with [`ProxyConfig::api_key`] set, every route
+//! except `/health` requires `Authorization: Bearer <key>` (constant-time
+//! compare, 401 otherwise) and the client's header is never forwarded to
+//! `llama-server`. [`Proxy::bind`] refuses a non-loopback `listen` without a
+//! key.
 
 pub mod launcher;
 pub mod metrics;
@@ -31,7 +35,7 @@ pub mod shutdown;
 pub use launcher::{
     fingerprint_of, launch, prepare_profile, PreparedProfile, ReadyReport, ServeOptions, Serving,
 };
-pub use server::{Proxy, ProxyConfig};
+pub use server::{check_listen, Proxy, ProxyConfig};
 pub use shutdown::{install_shutdown, ShutdownSignal};
 
 use thiserror::Error;
