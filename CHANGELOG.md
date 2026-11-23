@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- docs: M3/M4 acceptance re-validated on Qwen3 4B/8B Q4_K_M with a held-out protocol (new "Acceptance protocol (M3/M4)" section in `docs/benchmark-methodology.md`, #78). M3 holds: uncalibrated decode -4%..+6%, calibrated held-out median error 0.8-2.8% (max 5.8%). M4 does not: tuned vs defaults on the 4B is **+2.9%** median (target > 20% not met), so the ROADMAP M4 check is now "re-validation pending". The v0.4.0 numbers below (M3 "0%" in-sample, M4 "+25.7%" on SmolLM2-135M) are superseded.
+
 ### Added
 - `estimate`/`tune --model <file>` accept extension-less GGUF files (detected by the `GGUF` magic, e.g. Ollama blobs), and derive the parameter count from the tensor-info table when `general.parameter_count` is absent (reads up to 32 MiB of header in that case) (#74).
 

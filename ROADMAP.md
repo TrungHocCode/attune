@@ -46,10 +46,17 @@
 - `attune estimate --params --quant [--quant fp16,q8_0,q4_k_m]` compares
   configs in one table (GGUF parsing deferred to M4).
 - Acceptance: uncalibrated error < 25%, calibrated error < 12%.
-- Validated on SmolLM2-135M Q4_K_M: bench measured 148.05 tok/s,
-  calibrated estimate 148.1 (eta=0.420) — 0% error.
+- Re-validated 2026-11-23 on Qwen3 4B and 8B Q4_K_M (held-out protocol,
+  [docs/benchmark-methodology.md](docs/benchmark-methodology.md#acceptance-protocol-m3m4)):
+  uncalibrated decode +5.8% (4B) / -4.1% (8B) vs llama-bench, TTFT -12.3% /
+  -21.6% (target < 25%: met, 8B TTFT close to the limit); calibrated on one
+  run and scored on 4 held-out runs: median decode +0.8% (4B, range
+  +0.2..+1.8%) / -2.5% (8B, -4.3..-0.2%), median TTFT -2.8% (4B,
+  -5.8..-1.6%) / -0.2% (8B, -1.9..+1.7%) (target < 12%: met).
+  Superseded: the in-sample "0% error" on SmolLM2-135M (fit and scored on
+  the same report).
 
-## M4 — Tune ✅ (v0.4.0)
+## M4 — Tune ⚠ re-validation pending (v0.4.0)
 
 **Goal:** find the best config automatically.
 
@@ -60,9 +67,14 @@
   fallbacks (hardware mismatch warns, low RAM suggests smaller settings).
 - Acceptance: > 20% better than llama.cpp defaults on the test machine;
   profile round-trips through validation.
-- Validated on SmolLM2-135M Q4_K_M: defaults 125.3 tok/s median vs tuned
-  best 157.5 tok/s median (**+25.7%**; noisy on a 135M model, reported as
-  directional).
+- M4 re-run 2026-11-23 on Qwen3 4B Q4_K_M, 5 alternating default/tuned
+  runs: defaults 10.74 tok/s median (10.70-10.95) vs tuned 11.05 median
+  (10.85-11.07), **+2.9%** (best-vs-best +1.1%); **target > 20% not met on
+  4B**, and the tuned profile's prefill was ~17% slower (TTFT +19.9%). Decode
+  here is memory-bound, so little headroom exists over the defaults. See
+  [docs/benchmark-methodology.md](docs/benchmark-methodology.md#acceptance-protocol-m3m4).
+  Superseded: +25.7% on SmolLM2-135M (a 135M model whose same command varied
+  by 35% within a day).
 
 ## M5 — Serve 🚧 (current, v0.5.0 planned, MVP)
 

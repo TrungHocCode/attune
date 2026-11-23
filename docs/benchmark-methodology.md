@@ -183,6 +183,102 @@ the quoted peak is an *upper bound*, not a like-for-like measurement. Treat
 read `eta_comp < 1` as wasted silicon without checking the kernel's actual
 precision first.
 
+## Acceptance protocol (M3/M4)
+
+A milestone acceptance number is only published when it comes from this
+protocol. The original M3 "0% error" (fit and scored on the same report) and
+M4 "+25.7%" (135M model, 5 consecutive runs per side) did not, and are
+superseded.
+
+* **Reference models are 4B or larger** (Qwen3 4B Q4_K_M, Qwen3 8B
+  Q4_K_M). SmolLM2-135M is a CI smoke size only: its run-to-run spread
+  (168.8 vs 227.2 tok/s for the same command in one day) is larger than the
+  effects being measured.
+* **M3 uncalibrated:** `attune estimate` vs the measured value
+  (`llama-bench` tg128 / pp512, `-r 3`, default threads; also the e2e runs).
+  Pass `--ctx 2048` to `estimate` so KV sizing matches the bench (a GGUF's
+  header context, e.g. 262144 for Qwen3-4B-2507, otherwise sizes the KV cache
+  at 24 GB and reports OOM).
+* **M3 calibrated:** fit eta on ONE `attune bench --model` run, then score the
+  calibrated decode/TTFT against at least 4 other (held-out) runs. Report the
+  per-run error, the median and the min-max. Never score against the fit run.
+* **M4:** at least 5 ALTERNATING default/tuned runs (D,T,D,T,...) with the
+  same prompt and generation length; report each side's median and min-max,
+  the median-vs-median % and the best-vs-best %.
+* **Record** power source, power plan, background load, llama.cpp build and
+  the attune commit next to every table.
+
+### Results (2026-11-23)
+
+Conditions: Intel Core 5 210H (8C/12T), 15.6 GB RAM (7.6-9.2 GB free), AC
+power, Windows "Balanced" plan, browser (Edge) and the Claude desktop app
+open but idle (highest CPU-time processes), nothing else started; every
+bench/run strictly sequential. llama.cpp b11804 (`0.7.0-dev`, CPU
+`alderlake` backend), attune `2bcf0ff`. Default llama.cpp threads = 8.
+
+**M3, uncalibrated** (target < 25%; error = (estimate - measured) / measured,
+ctx 2048):
+
+| Model | Metric | Estimate | llama-bench (default `-t 8`) | Error | vs attune e2e runs (llama-cli) |
+|---|---|---|---|---|---|
+| Qwen3 4B Q4_K_M | decode tok/s | 12.34 | 11.67 ± 0.44 (11.96 ± 0.19 on a second `-t 8` run) | +5.8% (+3.2%) | +14.0% to +16.0% (e2e 10.64-10.83) |
+| Qwen3 4B Q4_K_M | TTFT, 512 tok | 6173 ms | 7038 ms (pp512 72.75 ± 0.51; 6484 ms on the second run, pp512 78.97) | -12.3% (-4.8%) | n/a |
+| Qwen3 8B Q4_K_M | decode tok/s | 5.87 | 6.12 ± 0.12 | -4.1% | +0.1% to +4.7% (e2e 5.61-5.86) |
+| Qwen3 8B Q4_K_M | TTFT, 512 tok | 9702 ms | 12380 ms (pp512 41.36 ± 0.18) | -21.6% | n/a |
+
+Met, but note the 8B TTFT is within 4 points of the limit, and on the 4B the
+`llama-cli` decode path that `attune bench`/`tune` drive is ~8% slower than
+`llama-bench` (10.8 vs 11.7 tok/s), so the error depends on which baseline is
+used. `-t 12` (all logical cores) is slower for decode (11.03 ± 0.11).
+
+**M3, calibrated, held-out** (target < 12%): eta fitted on `attune bench`
+e2e run 1 (`--ctx 2048 --bench-quant q4_k_m --calibrate`, prompt 464 tokens),
+scored on e2e runs 2-5.
+
+| Model | Metric | Fit run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Median error | Min-max |
+|---|---|---|---|---|---|---|---|---|
+| 4B | decode tok/s measured | 10.83 | 10.81 | 10.70 | 10.64 | 10.78 | | |
+| 4B | decode error | (fit) | +0.2% | +1.1% | +1.8% | +0.4% | +0.8% | +0.2% to +1.8% |
+| 4B | TTFT ms measured | 6112 | 6486 | 6329 | 6211 | 6245 | | |
+| 4B | TTFT error | (fit) | -5.8% | -3.4% | -1.6% | -2.1% | -2.8% | -5.8% to -1.6% |
+| 8B | decode tok/s measured | 5.61 | 5.62 | 5.86 | 5.85 | 5.66 | | |
+| 8B | decode error | (fit) | -0.2% | -4.3% | -4.1% | -0.8% | -2.5% | -4.3% to -0.2% |
+| 8B | TTFT ms measured | 11787 | 12018 | 11812 | 11795 | 11589 | | |
+| 8B | TTFT error | (fit) | -1.9% | -0.2% | -0.1% | +1.7% | -0.2% | -1.9% to +1.7% |
+
+Met. This only says the calibration transfers between runs of the same
+workload on the same machine; it is not a prediction for a different model or
+quant (the uncalibrated table above is that).
+
+**M4, Qwen3 4B Q4_K_M** (target > 20% over llama.cpp defaults):
+
+* Tuned profile from `attune tune --objective throughput --verify --top-k 2
+  --max-configs 8`: `-t 8 -tb 8 -c 2048 -b 128 -ub 128 --flash-attn on
+  --cache-type-k q8_0 --cache-type-v q8_0` (tune measured 10.6 tok/s for it
+  and 10.2 for the runner-up, `-t 4`).
+* Defaults: `llama-cli -m <4B> -p <464-token prompt> -n 128 -c 2048 -st -v`,
+  no other flags. Tuned: the same plus the flags above. Same prompt, 5
+  alternating D,T,D,T,... runs, decode rate from llama.cpp's own timing line.
+
+| | Runs (tok/s) | Median | Min-max |
+|---|---|---|---|
+| default | 10.95, 10.73, 10.74, 10.70, 10.77 | 10.74 | 10.70-10.95 |
+| tuned | 10.89, 11.06, 11.07, 11.05, 10.85 | 11.05 | 10.85-11.07 |
+
+Median-vs-median **+2.9%**, best-vs-best +1.1%: **target not met**. Decode on
+this machine is memory-bound (~33 GB/s against 2.4 GB of weights per token),
+so no thread/batch/KV setting can beat the roofline the defaults already sit
+on. The tuned profile was also **slower at prefill**: prompt eval median 59.1
+vs 70.8 tok/s (TTFT 7856 vs 6551 ms, +19.9%), probably because `-ub 128` shrinks
+the prefill micro-batch (not isolated).
+
+Observation (not fixed here): `tune`'s estimate-only TTFT column shows
+22982 ms for every candidate, versus 6173 ms from `attune estimate` for the
+same model, so the estimate-side TTFT in `tune` is not trustworthy for this
+model.
+
+Raw per-run JSON/logs are kept outside the repo.
+
 ## Caveats
 
 These are real failure modes the bench will not catch:
