@@ -27,8 +27,8 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
-    calibrate_with_bench, classify, decode_ai, is_hf_id, kv_bytes_per_token, kv_filled_tokens,
-    parse_arch, parse_bench_report, parse_model, parse_params, parse_quants,
+    calibrate_with_bench, classify, decode_ai, is_gguf_file, is_hf_id, kv_bytes_per_token,
+    kv_filled_tokens, parse_arch, parse_bench_report, parse_model, parse_params, parse_quants,
     predict_decode_tps_from_bytes, predict_prefill_ms_quant, probe_gguf_file, resolve_hf_model,
     ridge_ai, spread_pct_from_stats, weight_bytes_for, Arch, Confidence, ConfigSource,
     EstimateError, EstimateInputs, EstimateReport, GgufProbe, HwInputs, MultiEstimateReport, Quant,
@@ -243,15 +243,11 @@ struct ModelResolution {
     warnings: Vec<String>,
 }
 
-/// True when `--model` points at an existing `.gguf` file (case-insensitive
-/// extension), which is probed instead of being looked up as a catalog name.
+/// The path when `--model` is an existing GGUF file (`.gguf` extension or
+/// `GGUF` magic), which is probed instead of being looked up as a catalog name.
 fn as_gguf_path(value: &str) -> Option<&Path> {
     let path = Path::new(value.trim());
-    let is_gguf = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"));
-    (is_gguf && path.is_file()).then_some(path)
+    is_gguf_file(path).then_some(path)
 }
 
 /// Resolve the context window for KV sizing.

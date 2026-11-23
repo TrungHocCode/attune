@@ -27,12 +27,12 @@ pub use calibrate::{
 };
 pub use error::EstimateError;
 pub use model::{
-    cache_is_fresh, cache_path, fetch_config, is_hf_id, kv_bytes_per_token, kv_elem_bytes,
-    kv_filled_tokens, kv_total_bytes, parse_arch, parse_config_json, parse_model, parse_params,
-    parse_quants, probe_gguf, probe_gguf_file, read_cache, resolve_hf_model, weight_bytes_for,
-    write_cache, Arch, CachedConfig, ConfigSource, FetchedConfig, GgufFacts, GgufProbe, ModelEntry,
-    ModelSpec, Quant, ResolvedHfModel, ARCH_PRESETS, BITS_PER_WEIGHT, CACHE_DIR, CACHE_FILE,
-    CACHE_MAX_AGE_SECS, FETCH_TIMEOUT_SECS, MAX_HEADER_BYTES, MODEL_CATALOG,
+    cache_is_fresh, cache_path, fetch_config, is_gguf_file, is_hf_id, kv_bytes_per_token,
+    kv_elem_bytes, kv_filled_tokens, kv_total_bytes, parse_arch, parse_config_json, parse_model,
+    parse_params, parse_quants, probe_gguf, probe_gguf_file, read_cache, resolve_hf_model,
+    weight_bytes_for, write_cache, Arch, CachedConfig, ConfigSource, FetchedConfig, GgufFacts,
+    GgufProbe, ModelEntry, ModelSpec, Quant, ResolvedHfModel, ARCH_PRESETS, BITS_PER_WEIGHT,
+    CACHE_DIR, CACHE_FILE, CACHE_MAX_AGE_SECS, FETCH_TIMEOUT_SECS, MAX_HEADER_BYTES, MODEL_CATALOG,
 };
 pub use prefill::{predict_prefill_ms, predict_prefill_ms_quant};
 pub use report::{
