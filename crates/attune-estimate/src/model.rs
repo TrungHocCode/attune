@@ -19,7 +19,10 @@ pub use fetch::{
     resolve_hf_model, write_cache, CachedConfig, ConfigSource, FetchedConfig, ResolvedHfModel,
     CACHE_DIR, CACHE_FILE, CACHE_MAX_AGE_SECS, FETCH_TIMEOUT_SECS,
 };
-pub use gguf::{probe_gguf, probe_gguf_file, GgufFacts, GgufProbe, MAX_HEADER_BYTES};
+pub use gguf::{
+    is_gguf_file, probe_gguf, probe_gguf_file, GgufFacts, GgufProbe, MAX_HEADER_BYTES,
+    MAX_TENSOR_TABLE_BYTES,
+};
 
 /// Supported weight formats. The JSON names are pinned explicitly so a
 /// future variant rename cannot silently change the report contract.

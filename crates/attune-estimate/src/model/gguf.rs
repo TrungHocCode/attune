@@ -41,6 +41,14 @@ use crate::EstimateError;
 /// converters before the (often multi-megabyte) tokenizer arrays.
 pub const MAX_HEADER_BYTES: u64 = 64 * 1024;
 
+/// Larger cap used only when `general.parameter_count` is absent: the
+/// tensor-info table sits after the tokenizer arrays (several MiB for 128k+
+/// vocabularies), so the 64 KiB prefix can never reach it.
+pub const MAX_TENSOR_TABLE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// GGUF defines at most 4 dims per tensor; anything above this is corrupt.
+const MAX_TENSOR_DIMS: u32 = 8;
+
 /// Current GGUF magic.
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
 
@@ -123,6 +131,25 @@ impl GgufProbe {
     }
 }
 
+/// True when `path` is an existing regular file starting with the `GGUF`
+/// magic (any extension, e.g. Ollama's extension-less blobs) or ending in
+/// `.gguf`.
+pub fn is_gguf_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let by_extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"));
+    let mut magic = [0u8; 4];
+    let by_magic = File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok()
+        && &magic == GGUF_MAGIC;
+    by_extension || by_magic
+}
+
 /// Read the header-only facts from `path`.
 ///
 /// See the module docs for the fields and limits. I/O failures, a bad magic,
@@ -184,24 +211,34 @@ impl ParsedHeader {
 }
 
 /// Read up to [`MAX_HEADER_BYTES`] and parse the metadata prefix.
-fn parse_header(path: &Path) -> Result<ParsedHeader, EstimateError> {
+fn read_prefix(path: &Path, cap: u64) -> Result<Vec<u8>, EstimateError> {
     let file = File::open(path).map_err(|err| {
         EstimateError::InvalidGguf(format!("cannot open {}: {err}", path.display()))
     })?;
 
     // `take` bounds the read, and `BufReader` keeps it buffered: no mmap, no
     // weight payload, no more than 64 KiB of I/O.
-    let mut reader = BufReader::new(file).take(MAX_HEADER_BYTES);
-    let mut header = Vec::with_capacity(MAX_HEADER_BYTES as usize);
+    let mut reader = BufReader::new(file).take(cap);
+    let mut header = Vec::new();
     reader.read_to_end(&mut header).map_err(|err| {
         EstimateError::InvalidGguf(format!("cannot read {}: {err}", path.display()))
     })?;
 
-    parse_metadata(&header)
+    Ok(header)
+}
+
+/// Parse the 64 KiB prefix; when the file carries no `general.parameter_count`,
+/// re-read up to [`MAX_TENSOR_TABLE_BYTES`] and sum the tensor-info table.
+fn parse_header(path: &Path) -> Result<ParsedHeader, EstimateError> {
+    let mut parsed = parse_metadata(&read_prefix(path, MAX_HEADER_BYTES)?, false)?;
+    if parsed.facts.param_estimate == 0 {
+        parsed = parse_metadata(&read_prefix(path, MAX_TENSOR_TABLE_BYTES)?, true)?;
+    }
+    Ok(parsed)
 }
 
 /// Parse the GGUF prefix held in `data`.
-fn parse_metadata(data: &[u8]) -> Result<ParsedHeader, EstimateError> {
+fn parse_metadata(data: &[u8], derive_params: bool) -> Result<ParsedHeader, EstimateError> {
     let mut reader = ByteReader::new(data);
 
     let magic = reader.take(4).map_err(header_error)?;
@@ -219,7 +256,7 @@ fn parse_metadata(data: &[u8]) -> Result<ParsedHeader, EstimateError> {
         )));
     }
 
-    let _tensor_count = reader.u64().map_err(header_error)?;
+    let tensor_count = reader.u64().map_err(header_error)?;
     let kv_count = reader.u64().map_err(header_error)?;
 
     let mut architecture: Option<String> = None;
@@ -294,6 +331,14 @@ fn parse_metadata(data: &[u8]) -> Result<ParsedHeader, EstimateError> {
             .find_map(|(candidate, value)| (candidate == key).then_some(*value))
     };
 
+    let mut param_estimate = lookup_global("general.parameter_count").unwrap_or(0);
+    if param_estimate == 0 && derive_params {
+        if truncated {
+            return Err(table_budget_error());
+        }
+        param_estimate = sum_tensor_elements(&mut reader, tensor_count)?;
+    }
+
     let block_count = narrow("block_count", lookup("block_count"))?.unwrap_or(0);
     let embedding_length = narrow("embedding_length", lookup("embedding_length"))?.unwrap_or(0);
     let context_length = lookup("context_length").and_then(|v| u32::try_from(v).ok());
@@ -309,10 +354,53 @@ fn parse_metadata(data: &[u8]) -> Result<ParsedHeader, EstimateError> {
             // head.
             n_kv_heads: head_count_kv.or(head_count).unwrap_or(0),
             context_length,
-            param_estimate: lookup_global("general.parameter_count").unwrap_or(0),
+            param_estimate,
         },
         head_count: head_count.unwrap_or(0),
     })
+}
+
+fn table_budget_error() -> EstimateError {
+    EstimateError::InvalidGguf(format!(
+        "no general.parameter_count and the tensor table is not within the first {} MiB; \
+         pass --params <SIZE> --arch <NAME> instead of --model",
+        MAX_TENSOR_TABLE_BYTES / (1024 * 1024)
+    ))
+}
+
+/// Sum element counts (not bytes) over the tensor-info table at the reader.
+fn sum_tensor_elements(reader: &mut ByteReader, tensor_count: u64) -> Result<u64, EstimateError> {
+    let mut total: u64 = 0;
+    for _ in 0..tensor_count {
+        let walk = (|| {
+            reader.gguf_str()?;
+            let n_dims = reader.u32()?;
+            if n_dims > MAX_TENSOR_DIMS {
+                return Err(HeaderError::Invalid(format!(
+                    "tensor has absurd n_dims {n_dims}"
+                )));
+            }
+            let mut elements: u64 = 1;
+            for _ in 0..n_dims {
+                elements = elements.checked_mul(reader.u64()?).ok_or_else(|| {
+                    HeaderError::Invalid("tensor element count overflows".to_string())
+                })?;
+            }
+            reader.u32()?; // ggml type
+            reader.u64()?; // offset
+            Ok(elements)
+        })();
+        match walk {
+            Ok(elements) => {
+                total = total.checked_add(elements).ok_or_else(|| {
+                    EstimateError::InvalidGguf("parameter count overflows".to_string())
+                })?;
+            }
+            Err(HeaderError::Truncated) => return Err(table_budget_error()),
+            Err(err) => return Err(header_error(err)),
+        }
+    }
+    Ok(total)
 }
 
 /// Convert a metadata integer to the `u32` the architecture keys use.
@@ -628,6 +716,100 @@ mod tests {
         }
     }
 
+    impl FakeGguf {
+        /// Append one tensor-info entry and bump the header's tensor_count.
+        fn tensor(&mut self, name: &str, dims: &[u64]) {
+            let count = u64::from_le_bytes(self.bytes[8..16].try_into().unwrap()) + 1;
+            self.bytes[8..16].copy_from_slice(&count.to_le_bytes());
+            self.tensor_raw(name, dims.len() as u32, dims);
+        }
+
+        fn tensor_raw(&mut self, name: &str, n_dims: u32, dims: &[u64]) {
+            push_string(&mut self.bytes, name);
+            push_u32(&mut self.bytes, n_dims);
+            for dim in dims {
+                push_u64(&mut self.bytes, *dim);
+            }
+            push_u32(&mut self.bytes, 12); // ggml type (Q4_K)
+            push_u64(&mut self.bytes, 0); // offset
+        }
+    }
+
+    fn arch_file(kv_count: u64) -> FakeGguf {
+        let mut file = FakeGguf::new(3, kv_count);
+        file.string("general.architecture", "qwen3");
+        file
+    }
+
+    #[test]
+    fn derives_params_from_tensor_table_when_count_absent() {
+        let mut file = arch_file(1);
+        file.tensor("token_embd.weight", &[1024, 151_936]);
+        file.tensor("blk.0.attn_norm.weight", &[1024]);
+        file.tensor("blk.0.ffn_up.weight", &[1024, 3072, 1, 1]);
+        let path = write_temp("derive", "blob", file.bytes());
+        let facts = probe_gguf(&path).expect("derived");
+        assert_eq!(facts.param_estimate, 1024 * 151_936 + 1024 + 1024 * 3072);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn present_parameter_count_wins_over_tensor_table() {
+        let mut file = arch_file(2);
+        file.u64("general.parameter_count", 42);
+        file.tensor("a", &[10, 10]);
+        let path = write_temp("present", "m.gguf", file.bytes());
+        assert_eq!(probe_gguf(&path).expect("probe").param_estimate, 42);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn tensor_table_beyond_budget_errors_with_params_hint() {
+        let mut file = arch_file(2);
+        // Padding array pushes the table past the read budget.
+        file.u32_array("pad", &vec![0u32; (MAX_TENSOR_TABLE_BYTES / 4) as usize]);
+        file.tensor("a", &[10, 10]);
+        let path = write_temp("budget", "big.gguf", file.bytes());
+        let err = probe_gguf(&path)
+            .expect_err("table does not fit")
+            .to_string();
+        assert!(err.contains("--params"), "{err}");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn absurd_dims_and_overflow_are_rejected() {
+        let mut file = arch_file(1);
+        file.bytes[8..16].copy_from_slice(&1u64.to_le_bytes());
+        file.tensor_raw("x", 9, &[1; 9]);
+        let path = write_temp("dims", "d.gguf", file.bytes());
+        assert!(probe_gguf(&path).is_err());
+        cleanup(&path);
+
+        let mut file = arch_file(1);
+        file.tensor("x", &[u64::MAX, 2]);
+        let path = write_temp("overflow", "o.gguf", file.bytes());
+        assert!(probe_gguf(&path).is_err());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn is_gguf_file_detects_magic_without_extension() {
+        let file = arch_file(1);
+        let magic = write_temp("magic", "sha256-abc", file.bytes());
+        assert!(is_gguf_file(&magic));
+        cleanup(&magic);
+
+        let other = write_temp("nomagic", "sha256-def", b"not a gguf file");
+        assert!(!is_gguf_file(&other));
+        cleanup(&other);
+
+        let named = write_temp("named", "x.GGUF", b"junk");
+        assert!(is_gguf_file(&named));
+        cleanup(&named);
+        assert!(!is_gguf_file(Path::new("definitely/missing.gguf")));
+    }
+
     fn push_u32(bytes: &mut Vec<u8>, value: u32) {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
@@ -849,12 +1031,14 @@ mod tests {
     fn truncated_metadata_still_returns_the_facts_already_seen() {
         // Claim more entries than the file contains: the walk hits the end of
         // the buffer after the facts, which is the normal tokenizer-array case.
-        let mut file = FakeGguf::new(3, 10);
+        let mut file = FakeGguf::new(3, 11);
         file.string("general.architecture", "llama");
         file.u32("llama.block_count", 30);
         file.u32("llama.embedding_length", 576);
         file.u32("llama.attention.head_count", 9);
         file.u32("llama.attention.head_count_kv", 3);
+        // Present count keeps the probe from needing the (unreachable) table.
+        file.u64("general.parameter_count", 1);
 
         let path = write_temp("truncated", "truncated.gguf", file.bytes());
         let facts = probe_gguf(&path).expect("facts before the truncation");

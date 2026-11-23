@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `estimate`/`tune --model <file>` accept extension-less GGUF files (detected by the `GGUF` magic, e.g. Ollama blobs), and derive the parameter count from the tensor-info table when `general.parameter_count` is absent (reads up to 32 MiB of header in that case) (#74).
+
 ### Fixed
 - `estimate --model <file.gguf>` now reads `<arch>.context_length` from the header as the default `--ctx`, matching catalog and `config.json` sources (#73).
 - #71: for a GGUF `--model` file, `estimate` and `tune` now use the file size
