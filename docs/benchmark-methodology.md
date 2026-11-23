@@ -70,9 +70,24 @@ decimal.
 The full-mode copy kernel allocates 2× that, since it bills both the
 read and the write of every element.
 
+## Read kernel (issue #70)
+
+The read kernel is a wrapping sum of every `u64` word: AVX2 (runtime-detected)
+with four independent 256-bit accumulators over 128 B per iteration, scalar
+fallback elsewhere. Findings on the reference laptop (Core 5 210H, 1 DIMM
+DDR5-5200, 41.6 GB/s theoretical): a threads {4,6,8,12} x buffer {256 MiB,
+1 GiB} x reps {3,10} sweep shows the scalar and AVX2 kernels share the same
+~35 GB/s ceiling (best pass), thread count and buffer size barely matter, and
+llama.cpp decode implies 30-33 GB/s (qwen3 8B/4B Q4_K_M, file size x tg128).
+The run-to-run spread comes from short samples (a 256 MiB pass is ~8 ms), so
+`--quick` takes best-of 20 passes (~0.2 s) instead of 3, and uses AVX2 loads
+so the kernel is never the limiter. Theoretical bandwidth uses the DIMM's
+configured speed (`ConfiguredClockSpeed`) when non-zero, else the rated
+`Speed`.
+
 ## Pass count and stats
 
-`FULL_REPS` is 5 for full mode, `DEFAULT_REPS` is 3 for `--quick`.
+`FULL_REPS` is 5 for full mode, `DEFAULT_REPS` is 20 for `--quick`.
 Each kernel reports the *median* GB/s and the *best-of* GB/s (the full
 sweep reports both; quick reports only the best-of). Median is the
 robust figure (a noisy rep cannot drag it), best is the headline (a
