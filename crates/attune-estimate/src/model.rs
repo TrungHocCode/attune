@@ -223,6 +223,35 @@ pub fn kv_total_bytes(arch: &Arch, ctx: u32) -> f64 {
     kv_bytes_per_token(arch) * ctx as f64
 }
 
+/// Bytes per KV element for a cache type: f16 = 2 B, q8_0 = 34/32 B (32
+/// values plus an f16 scale), q4_0 = 18/32 B. Formats with no KV-cache
+/// type (`q4_k_m`) fall back to f16.
+pub fn kv_elem_bytes(cache: Quant) -> f64 {
+    match cache {
+        Quant::Q8_0 => 34.0 / 32.0,
+        Quant::Q4_0 => 18.0 / 32.0,
+        Quant::Fp16 | Quant::Q4_K_M => 2.0,
+    }
+}
+
+/// KV tokens a decode step reads on average: `prompt + gen / 2`, capped at
+/// the context window. This is the *throughput* length; RAM capacity still
+/// uses the full `n_ctx` (see [`kv_total_bytes`]).
+pub fn kv_filled_tokens(prompt_tokens: u64, gen_tokens: u64, n_ctx: u32) -> u32 {
+    let filled = prompt_tokens.saturating_add(gen_tokens / 2);
+    u32::try_from(filled).unwrap_or(u32::MAX).min(n_ctx)
+}
+
+/// Weight bytes streamed per token: the GGUF file size when the source is a
+/// file (embeddings and mixed-precision tensors included), otherwise the
+/// nominal `params × bytes_per_param`.
+pub fn weight_bytes_for(params: u64, quant: Quant, file_bytes: Option<u64>) -> f64 {
+    file_bytes.map_or_else(
+        || params as f64 * quant.bytes_per_param(),
+        |bytes| bytes as f64,
+    )
+}
+
 /// A parsed model description: parameter count plus weight format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelSpec {
@@ -470,5 +499,28 @@ mod tests {
         // 2 × 28 × 4 × 128 × 2 = 57_344 B/token.
         assert_eq!(kv_bytes_per_token(qwen), 57_344.0);
         assert_eq!(kv_total_bytes(qwen, 0), 0.0);
+    }
+
+    #[test]
+    fn kv_filled_tokens_is_prompt_plus_half_gen_capped_at_ctx() {
+        assert_eq!(kv_filled_tokens(512, 128, 2048), 576);
+        assert_eq!(kv_filled_tokens(512, 128, 8192), 576);
+        assert_eq!(kv_filled_tokens(512, 128, 256), 256);
+    }
+
+    #[test]
+    fn q8_0_kv_is_about_half_of_f16() {
+        let ratio = kv_elem_bytes(Quant::Q8_0) / kv_elem_bytes(Quant::Fp16);
+        assert!((ratio - 0.531_25).abs() < 1e-12, "ratio {ratio}");
+    }
+
+    #[test]
+    fn weight_bytes_prefers_the_file_size() {
+        assert_eq!(
+            weight_bytes_for(135_000_000, Quant::Q4_K_M, Some(103_700_000)),
+            103_700_000.0
+        );
+        let nominal = weight_bytes_for(135_000_000, Quant::Q4_K_M, None);
+        assert!((nominal - 135_000_000.0 * 0.6118).abs() < 1.0);
     }
 }

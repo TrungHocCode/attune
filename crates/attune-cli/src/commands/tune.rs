@@ -23,8 +23,9 @@ use anyhow::{anyhow, Context, Result};
 use attune_bench::e2e::{DEFAULT_GEN_TOKENS, DEFAULT_PROMPT_TOKENS};
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
-    is_hf_id, parse_arch, parse_bench_report, parse_model, parse_params, parse_quants,
-    probe_gguf_file, resolve_hf_model, Arch, BenchCalibration, HwInputs, Quant,
+    is_hf_id, kv_bytes_per_token, parse_arch, parse_bench_report, parse_model, parse_params,
+    parse_quants, probe_gguf_file, resolve_hf_model, weight_bytes_for, Arch, BenchCalibration,
+    HwInputs, Quant,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
@@ -33,7 +34,7 @@ use attune_tune::ProfileInputs;
 use attune_tune::{
     calibrate_ranked, expand_full_grid_with_quants, from_best, hardware_fingerprint, prune,
     rank_by_estimate, run_verify_topk, stars, Objective, PruneReason, RankedConfig, TuneConfig,
-    TuneError, TuneReport,
+    TuneError, TuneModel, TuneReport,
 };
 
 /// `engine.version` recorded by slice 3: no llama.cpp binary is inspected on
@@ -86,6 +87,8 @@ struct ModelResolution {
     params: u64,
     /// Resolved KV shape, when the source had one (display only in slice 1).
     arch: Option<Arch>,
+    /// GGUF file size; the real weight footprint when the source is a file.
+    weight_bytes: Option<u64>,
     /// Every non-fatal notice from resolution.
     warnings: Vec<String>,
 }
@@ -122,6 +125,9 @@ fn resolve_model(
                     path.display()
                 )
             })?;
+            let weight_bytes = fs::metadata(path)
+                .map_err(|err| anyhow!("failed to stat {}: {err}", path.display()))?
+                .len();
             let mut warnings = Vec::new();
             if let Some(warning) = probe.warning.clone() {
                 warnings.push(warning);
@@ -131,6 +137,7 @@ fn resolve_model(
                 display: name.to_string(),
                 params,
                 arch: probe.arch,
+                weight_bytes: Some(weight_bytes),
                 warnings,
             });
         }
@@ -142,6 +149,7 @@ fn resolve_model(
                 display: resolved.label,
                 params: resolved.params,
                 arch: Some(resolved.arch),
+                weight_bytes: None,
                 warnings: resolved.warnings,
             });
         }
@@ -156,6 +164,7 @@ fn resolve_model(
             display: format!("{}/{}", entry.provider, entry.name),
             params: entry.params,
             arch: Some(entry.arch),
+            weight_bytes: None,
             warnings: Vec::new(),
         });
     }
@@ -170,6 +179,7 @@ fn resolve_model(
         display: params.trim().to_string(),
         params: parse_params(params)?,
         arch,
+        weight_bytes: None,
         warnings: Vec::new(),
     })
 }
@@ -531,7 +541,7 @@ fn build_profile(report: &TuneReport, resolution: &ModelResolution, name: &str) 
         .first()
         .ok_or_else(|| anyhow!("cannot save a profile without a ranked config"))?;
     let quant = best.config.quant;
-    let size_bytes = (report.params as f64 * quant.bytes_per_param()).round() as u64;
+    let size_bytes = weight_bytes_for(report.params, quant, resolution.weight_bytes).round() as u64;
     let fingerprint = current_hardware_fingerprint();
     let inputs = ProfileInputs {
         name,
@@ -685,10 +695,15 @@ pub fn run(
 
     // Full slice-2 grid (threads/ctx/batch/KV) restricted to the requested
     // formats, then prune by OOM, context fit, thread count and the cap.
+    let model = TuneModel {
+        params: resolution.params,
+        weight_bytes: resolution.weight_bytes,
+        kv_f16_per_token: resolution.arch.as_ref().map_or(0.0, kv_bytes_per_token),
+    };
     let (grid, cap_from_expand) = expand_full_grid_with_quants(physical_cores, &quants);
     let (mut kept, mut pruned) = prune(
         &grid,
-        resolution.params,
+        &model,
         avail_bytes.unwrap_or(0.0),
         PROMPT_TOKENS,
         GEN_TOKENS,
@@ -707,7 +722,7 @@ pub fn run(
         {
             let (fallback_kept, fallback_pruned) = prune(
                 &grid,
-                resolution.params,
+                &model,
                 total,
                 PROMPT_TOKENS,
                 GEN_TOKENS,
@@ -731,10 +746,12 @@ pub fn run(
 
     let mut ranked = rank_by_estimate(
         &kept,
-        resolution.params,
+        &model,
         hw,
         effective_avail.unwrap_or(0.0),
         objective,
+        PROMPT_TOKENS,
+        GEN_TOKENS,
     )?;
 
     // Opt-in slice 5: fit one eta pair against the best estimate config and
