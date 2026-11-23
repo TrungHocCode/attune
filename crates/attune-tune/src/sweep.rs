@@ -2,8 +2,8 @@
 
 use attune_bench::e2e::E2eResult;
 use attune_estimate::{
-    predict_decode_tps, predict_prefill_ms_quant, BenchCalibration, CalibrationReport, HwInputs,
-    Quant, RamFit,
+    kv_elem_bytes, kv_filled_tokens, predict_decode_tps_from_bytes, predict_prefill_ms_quant,
+    weight_bytes_for, BenchCalibration, CalibrationReport, HwInputs, Quant, RamFit,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -12,6 +12,40 @@ use crate::{Objective, TuneConfig, TuneError};
 /// Context tokens reserved for chat templates / BOS overhead when checking
 /// whether a config can hold `prompt_tokens + gen_tokens`.
 pub const CTX_SAFETY_MARGIN: u64 = 32;
+
+/// What the sweep needs to know about the model's bytes.
+///
+/// `weight_bytes` is the GGUF file size when the source is a file (it replaces
+/// the nominal bytes-per-param table for every config); `kv_f16_per_token` is
+/// the f16 KV size per token, `0.0` when the architecture is unknown. Each
+/// config scales it by its own KV cache type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TuneModel {
+    pub params: u64,
+    pub weight_bytes: Option<u64>,
+    pub kv_f16_per_token: f64,
+}
+
+impl TuneModel {
+    /// Weights only, nominal bytes per parameter (no file, no KV shape).
+    pub fn nominal(params: u64) -> Self {
+        Self {
+            params,
+            weight_bytes: None,
+            kv_f16_per_token: 0.0,
+        }
+    }
+
+    /// Weight bytes for `quant`: the file size when known, else nominal.
+    pub fn weight_bytes_for(&self, quant: Quant) -> f64 {
+        weight_bytes_for(self.params, quant, self.weight_bytes)
+    }
+
+    /// KV bytes per token for this config's cache type.
+    pub fn kv_per_token(&self, cache_kv: Quant) -> f64 {
+        self.kv_f16_per_token * kv_elem_bytes(cache_kv) / 2.0
+    }
+}
 
 /// Why [`prune`] dropped a candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,7 +166,7 @@ pub fn expand_grid(
 /// input order, which keeps cap truncation deterministic.
 pub fn prune(
     configs: &[TuneConfig],
-    params: u64,
+    model: &TuneModel,
     avail_bytes: f64,
     prompt_tokens: u64,
     gen_tokens: u64,
@@ -146,8 +180,10 @@ pub fn prune(
     let mut pruned = Vec::new();
 
     for config in configs {
-        let weight_bytes = params as f64 * config.quant.bytes_per_param();
-        let fits = RamFit::new(weight_bytes, 0.0, avail_bytes).is_none_or(|fit| fit.fits);
+        // Capacity: weights plus the KV cache for the full window.
+        let kv_bytes = model.kv_per_token(config.cache_kv) * f64::from(config.n_ctx);
+        let fits = RamFit::new(model.weight_bytes_for(config.quant), kv_bytes, avail_bytes)
+            .is_none_or(|fit| fit.fits);
         if !fits {
             pruned.push((config.clone(), PruneReason::Oom));
             continue;
@@ -178,13 +214,15 @@ pub fn prune(
 /// `avail_bytes` means "unknown": the fit check is skipped and `fits` stays
 /// `true` rather than claiming an OOM from missing data.
 ///
-/// **Slice-1 prediction model:**
-/// - decode is [`predict_decode_tps`] (weights only; no `Arch`, so the KV
-///   cache read is omitted and the number is optimistic at large contexts);
+/// **Prediction model:**
+/// - decode is [`predict_decode_tps_from_bytes`]: [`TuneModel`] weight bytes
+///   (file size for a GGUF source) plus the KV cache read at the expected
+///   filled length `prompt_tokens + gen_tokens / 2` (capped at `n_ctx`), using
+///   each config's own KV cache element size; no `Arch` means no KV term;
 /// - TTFT is [`predict_prefill_ms_quant`] for the full `n_ctx` window, the
 ///   worst-case prefill available without a separate prompt-length input;
-/// - RAM fit and the near-ceiling score penalty count weights only, for the
-///   same no-`Arch` reason.
+/// - RAM fit and the near-ceiling score penalty count weights plus the KV
+///   cache for the full `n_ctx` window.
 ///
 /// Ties keep the input (grid) order because [`slice::sort_by`] is stable.
 /// The `Result` exists because the roofline math rejects invalid inputs
@@ -192,10 +230,12 @@ pub fn prune(
 /// nonsense.
 pub fn rank_by_estimate(
     configs: &[TuneConfig],
-    params: u64,
+    model: &TuneModel,
     hw: HwInputs,
     avail_bytes: f64,
     objective: Objective,
+    prompt_tokens: u64,
+    gen_tokens: u64,
 ) -> Result<Vec<RankedConfig>, TuneError> {
     if configs.is_empty() {
         return Err(TuneError::EmptyGrid);
@@ -205,16 +245,24 @@ pub fn rank_by_estimate(
     for config in configs {
         config.validate()?;
 
-        let decode_tps = predict_decode_tps(params, config.quant.bytes_per_param(), hw.bw_gbps)?;
+        let weight_bytes = model.weight_bytes_for(config.quant);
+        let kv_per_token = model.kv_per_token(config.cache_kv);
+        // Decode reads the expected filled KV; RAM fit below uses the full window.
+        let decode_tps = predict_decode_tps_from_bytes(
+            weight_bytes,
+            hw.bw_gbps,
+            kv_per_token,
+            kv_filled_tokens(prompt_tokens, gen_tokens, config.n_ctx),
+        )?;
         let ttft_ms = predict_prefill_ms_quant(
-            params,
+            model.params,
             u64::from(config.n_ctx),
             hw.flops_gflops,
             config.quant,
         )?;
         let fit = RamFit::new(
-            params as f64 * config.quant.bytes_per_param(),
-            0.0,
+            weight_bytes,
+            kv_per_token * f64::from(config.n_ctx),
             avail_bytes,
         );
         let fits = fit.is_none_or(|fit| fit.fits);
@@ -320,6 +368,25 @@ where
 mod tests {
     use super::*;
 
+    // Weights-only nominal model with the default 512/128 workload.
+    fn rank_nominal(
+        configs: &[TuneConfig],
+        params: u64,
+        hw: HwInputs,
+        avail: f64,
+        objective: Objective,
+    ) -> Result<Vec<RankedConfig>, TuneError> {
+        rank_by_estimate(
+            configs,
+            &TuneModel::nominal(params),
+            hw,
+            avail,
+            objective,
+            512,
+            128,
+        )
+    }
+
     fn hw() -> HwInputs {
         HwInputs {
             bw_gbps: 20.0,
@@ -373,8 +440,8 @@ mod tests {
             &[512],
             &[Quant::Fp16],
         );
-        let ranked = rank_by_estimate(&configs, 135_000_000, hw(), 16e9, Objective::Throughput)
-            .expect("rank");
+        let ranked =
+            rank_nominal(&configs, 135_000_000, hw(), 16e9, Objective::Throughput).expect("rank");
 
         assert_eq!(ranked.len(), 2);
         assert_eq!(ranked[0].config.quant, Quant::Q4_K_M);
@@ -393,7 +460,7 @@ mod tests {
             &[Quant::Fp16],
         );
         let ranked =
-            rank_by_estimate(&configs, 135_000_000, hw(), 16e9, Objective::Latency).expect("rank");
+            rank_nominal(&configs, 135_000_000, hw(), 16e9, Objective::Latency).expect("rank");
 
         assert_eq!(ranked[0].config.n_ctx, 2_048);
         assert!(ranked[0].score > ranked[1].score);
@@ -409,7 +476,7 @@ mod tests {
             &[Quant::Fp16],
         );
         // 70B FP16 (140 GB) and 70B Q4_K_M (~43 GB) both exceed 16 GB.
-        let ranked = rank_by_estimate(&configs, 70_000_000_000, hw(), 16e9, Objective::Throughput)
+        let ranked = rank_nominal(&configs, 70_000_000_000, hw(), 16e9, Objective::Throughput)
             .expect("rank");
 
         assert!(ranked.iter().all(|config| !config.fits));
@@ -421,8 +488,8 @@ mod tests {
     #[test]
     fn equal_scores_keep_the_input_order() {
         let configs = expand_grid(&[Quant::Q4_K_M], &[2_048], &[4, 8], &[512], &[Quant::Fp16]);
-        let ranked = rank_by_estimate(&configs, 135_000_000, hw(), 16e9, Objective::Throughput)
-            .expect("rank");
+        let ranked =
+            rank_nominal(&configs, 135_000_000, hw(), 16e9, Objective::Throughput).expect("rank");
 
         assert_eq!(ranked[0].config.n_threads, 4);
         assert_eq!(ranked[1].config.n_threads, 8);
@@ -437,14 +504,14 @@ mod tests {
     #[test]
     fn unknown_ram_does_not_claim_oom() {
         let configs = expand_grid(&[Quant::Q4_K_M], &[2_048], &[4], &[512], &[Quant::Fp16]);
-        let ranked = rank_by_estimate(&configs, 135_000_000, hw(), 0.0, Objective::Throughput)
-            .expect("rank");
+        let ranked =
+            rank_nominal(&configs, 135_000_000, hw(), 0.0, Objective::Throughput).expect("rank");
         assert!(ranked[0].fits);
     }
 
     #[test]
     fn empty_grid_is_an_error() {
-        let err = rank_by_estimate(&[], 135_000_000, hw(), 16e9, Objective::Throughput)
+        let err = rank_nominal(&[], 135_000_000, hw(), 16e9, Objective::Throughput)
             .expect_err("empty grid must fail");
         assert!(matches!(err, TuneError::EmptyGrid), "got {err:?}");
     }
@@ -452,7 +519,7 @@ mod tests {
     #[test]
     fn invalid_config_is_an_error() {
         let configs = [TuneConfig::new(Quant::Q4_K_M, 0, 4, 512, Quant::Fp16)];
-        let err = rank_by_estimate(&configs, 135_000_000, hw(), 16e9, Objective::Throughput)
+        let err = rank_nominal(&configs, 135_000_000, hw(), 16e9, Objective::Throughput)
             .expect_err("invalid config must fail");
         assert!(matches!(err, TuneError::InvalidConfig(_)), "got {err:?}");
     }
@@ -460,10 +527,11 @@ mod tests {
     #[test]
     fn decode_matches_the_estimate_weights_only_formula() {
         let configs = [TuneConfig::new(Quant::Q4_K_M, 2_048, 4, 512, Quant::Fp16)];
-        let ranked = rank_by_estimate(&configs, 135_000_000, hw(), 16e9, Objective::Throughput)
-            .expect("rank");
-        let expected = predict_decode_tps(135_000_000, Quant::Q4_K_M.bytes_per_param(), 20.0)
-            .expect("estimate");
+        let ranked =
+            rank_nominal(&configs, 135_000_000, hw(), 16e9, Objective::Throughput).expect("rank");
+        let expected =
+            attune_estimate::predict_decode_tps(135_000_000, Quant::Q4_K_M.bytes_per_param(), 20.0)
+                .expect("estimate");
         assert!(
             (ranked[0].decode_tps - expected).abs() < 1e-9,
             "got {} want {expected}",
@@ -477,7 +545,7 @@ mod tests {
         let params = 1_000_000_000_u64;
         let avail = 700_000_000.0;
         let ranked =
-            rank_by_estimate(&[config], params, hw(), avail, Objective::Throughput).expect("rank");
+            rank_nominal(&[config], params, hw(), avail, Objective::Throughput).expect("rank");
 
         let weight = params as f64 * Quant::Q4_K_M.bytes_per_param();
         let ratio = weight / avail;
@@ -546,8 +614,8 @@ mod tests {
             &[512],
             &[Quant::Fp16],
         );
-        let raw = rank_by_estimate(&configs, 135_000_000, hw(), 16e9, Objective::Throughput)
-            .expect("rank");
+        let raw =
+            rank_nominal(&configs, 135_000_000, hw(), 16e9, Objective::Throughput).expect("rank");
 
         // Fit against the best estimate: half the predicted decode and a
         // prefill 1.25x slower than predicted (both inside the clamp bounds).
@@ -636,7 +704,15 @@ mod tests {
             &[512],
             &[Quant::Fp16],
         );
-        let (kept, pruned) = prune(&configs, 70_000_000_000, 16e9, 512, 128, 8, 64);
+        let (kept, pruned) = prune(
+            &configs,
+            &TuneModel::nominal(70_000_000_000),
+            16e9,
+            512,
+            128,
+            8,
+            64,
+        );
 
         assert!(kept.is_empty());
         assert_eq!(pruned.len(), 2);
@@ -652,7 +728,15 @@ mod tests {
     fn prune_drops_context_overflow() {
         let configs = expand_grid(&[Quant::Q4_K_M], &[2_048], &[4], &[512], &[Quant::Fp16]);
         // 2048 + 128 + 32 = 2208 > 2048.
-        let (kept, pruned) = prune(&configs, 135_000_000, 16e9, 2048, 128, 8, 64);
+        let (kept, pruned) = prune(
+            &configs,
+            &TuneModel::nominal(135_000_000),
+            16e9,
+            2048,
+            128,
+            8,
+            64,
+        );
         assert!(kept.is_empty());
         assert_eq!(pruned[0].1, PruneReason::CtxOverflow);
     }
@@ -660,7 +744,15 @@ mod tests {
     #[test]
     fn prune_drops_too_many_threads() {
         let configs = [TuneConfig::new(Quant::Q4_K_M, 2_048, 16, 512, Quant::Fp16)];
-        let (kept, pruned) = prune(&configs, 135_000_000, 16e9, 512, 128, 8, 64);
+        let (kept, pruned) = prune(
+            &configs,
+            &TuneModel::nominal(135_000_000),
+            16e9,
+            512,
+            128,
+            8,
+            64,
+        );
         assert!(kept.is_empty());
         assert_eq!(pruned[0].1, PruneReason::TooManyThreads);
     }
@@ -668,8 +760,24 @@ mod tests {
     #[test]
     fn prune_cap_is_deterministic_and_reports_the_count() {
         let (configs, _) = crate::expand_full_grid_with_quants(8, &[Quant::Q4_K_M]);
-        let (first, first_pruned) = prune(&configs, 135_000_000, 16e9, 512, 128, 8, 5);
-        let (second, second_pruned) = prune(&configs, 135_000_000, 16e9, 512, 128, 8, 5);
+        let (first, first_pruned) = prune(
+            &configs,
+            &TuneModel::nominal(135_000_000),
+            16e9,
+            512,
+            128,
+            8,
+            5,
+        );
+        let (second, second_pruned) = prune(
+            &configs,
+            &TuneModel::nominal(135_000_000),
+            16e9,
+            512,
+            128,
+            8,
+            5,
+        );
 
         assert_eq!(first, second);
         assert_eq!(first.len(), 5);
@@ -687,8 +795,62 @@ mod tests {
     #[test]
     fn prune_skips_checks_when_ram_or_cores_are_unknown() {
         let configs = expand_grid(&[Quant::Q4_K_M], &[2_048], &[4], &[512], &[Quant::Fp16]);
-        let (kept, pruned) = prune(&configs, 135_000_000, 0.0, 0, 0, 0, 64);
+        let (kept, pruned) = prune(&configs, &TuneModel::nominal(135_000_000), 0.0, 0, 0, 0, 64);
         assert_eq!(kept.len(), 1);
         assert!(pruned.is_empty());
+    }
+
+    fn kv_model() -> TuneModel {
+        TuneModel {
+            params: 135_000_000,
+            weight_bytes: Some(103_700_000),
+            kv_f16_per_token: 100_000.0,
+        }
+    }
+
+    #[test]
+    fn decode_uses_file_bytes_and_ctx_independent_kv_with_per_config_elem_size() {
+        let configs = [
+            TuneConfig::new(Quant::Q4_K_M, 2_048, 4, 512, Quant::Fp16),
+            TuneConfig::new(Quant::Q4_K_M, 8_192, 4, 512, Quant::Fp16),
+            TuneConfig::new(Quant::Q4_K_M, 2_048, 4, 512, Quant::Q8_0),
+        ];
+        let ranked = rank_by_estimate(
+            &configs,
+            &kv_model(),
+            hw(),
+            16e9,
+            Objective::Throughput,
+            512,
+            128,
+        )
+        .expect("rank");
+        let tps = |ctx: u32, kv: Quant| {
+            ranked
+                .iter()
+                .find(|r| r.config.n_ctx == ctx && r.config.cache_kv == kv)
+                .expect("config")
+                .decode_tps
+        };
+        // 20 GB/s over file bytes + 576 tokens of f16 KV, whatever the ctx.
+        let expected = 20e9 / (103_700_000.0 + 576.0 * 100_000.0);
+        assert!((tps(2_048, Quant::Fp16) - expected).abs() < 1e-6 * expected);
+        assert!((tps(8_192, Quant::Fp16) - expected).abs() < 1e-6 * expected);
+        // q8_0 KV is charged 34/32 B per element, not 2 B.
+        let expected_q8 = 20e9 / (103_700_000.0 + 576.0 * 100_000.0 * 34.0 / 64.0);
+        assert!((tps(2_048, Quant::Q8_0) - expected_q8).abs() < 1e-6 * expected_q8);
+    }
+
+    #[test]
+    fn prune_counts_full_ctx_kv_for_capacity() {
+        let configs = [
+            TuneConfig::new(Quant::Q4_K_M, 2_048, 4, 512, Quant::Fp16),
+            TuneConfig::new(Quant::Q4_K_M, 65_536, 4, 512, Quant::Fp16),
+        ];
+        // 65536 x 100 kB = 6.5 GB of KV does not fit in 2 GB; 2048 x 100 kB does.
+        let (kept, pruned) = prune(&configs, &kv_model(), 2e9, 512, 128, 8, 64);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].n_ctx, 2_048);
+        assert_eq!(pruned[0].1, PruneReason::Oom);
     }
 }

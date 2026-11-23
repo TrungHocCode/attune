@@ -27,11 +27,12 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
-    calibrate_with_bench, classify, decode_ai, is_hf_id, kv_bytes_per_token, parse_arch,
-    parse_bench_report, parse_model, parse_params, parse_quants, predict_prefill_ms_quant,
-    probe_gguf_file, resolve_hf_model, ridge_ai, spread_pct_from_stats, Arch, Confidence,
-    ConfigSource, EstimateError, EstimateInputs, EstimateReport, GgufProbe, HwInputs,
-    MultiEstimateReport, Quant, RamFit,
+    calibrate_with_bench, classify, decode_ai, is_hf_id, kv_bytes_per_token, kv_filled_tokens,
+    parse_arch, parse_bench_report, parse_model, parse_params, parse_quants,
+    predict_decode_tps_from_bytes, predict_prefill_ms_quant, probe_gguf_file, resolve_hf_model,
+    ridge_ai, spread_pct_from_stats, weight_bytes_for, Arch, Confidence, ConfigSource,
+    EstimateError, EstimateInputs, EstimateReport, GgufProbe, HwInputs, MultiEstimateReport, Quant,
+    RamFit,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
@@ -234,6 +235,9 @@ struct ModelResolution {
     /// Probe result when `--model` was a `.gguf` file path. Drives the
     /// human-readable probe line.
     gguf: Option<GgufProbe>,
+    /// GGUF file size in bytes: the real weight footprint when the source is a
+    /// file. `None` keeps the nominal bytes-per-param table.
+    weight_bytes: Option<u64>,
     /// Every non-fatal notice from resolution (fetch fallbacks, catalog/file
     /// disagreement, omitted KV).
     warnings: Vec<String>,
@@ -289,6 +293,9 @@ fn resolve_model(
                     path.display()
                 )
             })?;
+            let weight_bytes = fs::metadata(path)
+                .map_err(|err| anyhow!("failed to stat {}: {err}", path.display()))?
+                .len();
             let arch = probe.arch;
             let mut warnings = Vec::new();
             if let Some(warning) = probe.warning.clone() {
@@ -306,6 +313,7 @@ fn resolve_model(
                 ctx_default: probe.facts.context_length,
                 provenance: ModelProvenance::Gguf,
                 gguf: Some(probe),
+                weight_bytes: Some(weight_bytes),
                 warnings,
             });
         }
@@ -331,6 +339,7 @@ fn resolve_model(
                 ctx_default: resolved.ctx_default,
                 provenance,
                 gguf: None,
+                weight_bytes: None,
                 warnings: resolved.warnings,
             });
         }
@@ -349,6 +358,7 @@ fn resolve_model(
             ctx_default: Some(entry.ctx_default),
             provenance: ModelProvenance::Catalog,
             gguf: None,
+            weight_bytes: None,
             warnings: Vec::new(),
         });
     }
@@ -367,6 +377,7 @@ fn resolve_model(
         ctx_default: None,
         provenance: ModelProvenance::Manual,
         gguf: None,
+        weight_bytes: None,
         warnings: arch
             .is_none()
             .then(|| KV_EXCLUDED_WARNING.to_string())
@@ -401,6 +412,9 @@ struct ReportContext<'a> {
     label: &'a str,
     params: u64,
     prompt_tokens: u64,
+    gen_tokens: u64,
+    /// GGUF file size; replaces the nominal weight bytes when present.
+    weight_bytes: Option<u64>,
     /// Context length used for KV sizing (already resolved).
     ctx: u32,
     /// Resolved KV shape name (`gguf`, `hf-config`, a catalog/preset name),
@@ -419,12 +433,14 @@ struct ReportContext<'a> {
 
 /// Build one config's report by calling the pure `attune-estimate` math.
 fn build_report(ctx: &ReportContext<'_>, quant: Quant) -> Result<EstimateReport, EstimateError> {
-    let bytes_per_param = quant.bytes_per_param();
-    let decode_tps = ctx.hw.predict_decode_tps_with_kv(
-        ctx.params,
-        bytes_per_param,
+    let weight_bytes = weight_bytes_for(ctx.params, quant, ctx.weight_bytes);
+    let bytes_per_param = weight_bytes / ctx.params as f64;
+    // Decode reads the expected filled KV; RAM fit below uses the full window.
+    let decode_tps = predict_decode_tps_from_bytes(
+        weight_bytes,
+        ctx.hw.bw_gbps,
         ctx.kv_per_token,
-        ctx.ctx,
+        kv_filled_tokens(ctx.prompt_tokens, ctx.gen_tokens, ctx.ctx),
     )?;
     let prefill_ms_ttft =
         predict_prefill_ms_quant(ctx.params, ctx.prompt_tokens, ctx.hw.flops_gflops, quant)?;
@@ -447,9 +463,11 @@ fn build_report(ctx: &ReportContext<'_>, quant: Quant) -> Result<EstimateReport,
     // Weights + KV must fit in RAM before tok/s means anything. Sizing lives
     // in `attune-estimate`; the CLI only supplies the detected available RAM.
     if let Some(avail_bytes) = ctx.ram_avail_bytes {
-        if let Some(ram_fit) =
-            RamFit::for_model(ctx.params, quant, ctx.kv_per_token, ctx.ctx, avail_bytes)
-        {
+        if let Some(ram_fit) = RamFit::new(
+            weight_bytes,
+            ctx.kv_per_token * f64::from(ctx.ctx),
+            avail_bytes,
+        ) {
             report = report.with_ram_fit(ram_fit);
         }
     }
@@ -586,6 +604,7 @@ fn print_single(
     clock_fallback: bool,
     display: &str,
     params: u64,
+    weight_bytes: Option<u64>,
 ) {
     let bw_gbps = report.inputs.as_ref().map_or(0.0, |inputs| inputs.bw_gbps);
     let flops_gflops = report.inputs.as_ref().map_or(0.0, |inputs| inputs.gflops);
@@ -595,7 +614,9 @@ fn print_single(
         .map_or(0.0, |inputs| inputs.clock_ghz);
     let ai_star = report.ridge_ai.unwrap_or(0.0);
     let margin_pct = report.margin_pct.unwrap_or(0.0);
-    let workload_ai = decode_ai(report.quant.bytes_per_param()).unwrap_or(0.0);
+    let workload_ai =
+        decode_ai(weight_bytes_for(params, report.quant, weight_bytes) / params as f64)
+            .unwrap_or(0.0);
     let prefill_ms_ttft = report.prefill_ms_ttft.unwrap_or(0.0);
 
     println!(
@@ -750,7 +771,7 @@ pub fn run(
     gflops: Option<f64>,
     arch: Option<&str>,
     prompt_tokens: u64,
-    _gen_tokens: u64,
+    gen_tokens: u64,
     ctx: Option<u32>,
     bench_json: Option<&Path>,
     bench_quant: Option<&str>,
@@ -767,6 +788,7 @@ pub fn run(
         ctx_default,
         provenance,
         gguf,
+        weight_bytes,
         warnings: model_warnings,
     } = resolve_model(model, params, arch, refresh_catalog)?;
     // One resolver result feeds every config below, so multi-quant tables and
@@ -805,6 +827,8 @@ pub fn run(
         label: &label,
         params: params_count,
         prompt_tokens,
+        gen_tokens,
+        weight_bytes,
         ctx,
         arch: arch.map(|arch| arch.name),
         kv_per_token,
@@ -862,6 +886,7 @@ pub fn run(
             compute.clock_fallback,
             &display,
             params_count,
+            weight_bytes,
         );
     } else {
         print_table(
@@ -1217,6 +1242,8 @@ mod tests {
             label: "135M",
             params: 135_000_000,
             prompt_tokens: 512,
+            gen_tokens: 128,
+            weight_bytes: None,
             ctx: 2048,
             arch: None,
             kv_per_token: 0.0,
@@ -1342,6 +1369,8 @@ mod tests {
         assert_eq!(resolved.arch.map(|arch| arch.name), Some("gguf"));
         // No `context_length` key in this header: falls back to 2048 later.
         assert_eq!(resolved.ctx_default, None);
+        // Weights come from the file size, not the nominal bytes-per-param.
+        assert_eq!(resolved.weight_bytes, Some(bytes.len() as u64));
         assert_eq!(resolved.provenance, ModelProvenance::Gguf);
         assert!(resolved.warnings.is_empty());
 
@@ -1429,7 +1458,12 @@ mod tests {
             .expect("weights-only prediction");
         let expected = ctx
             .hw
-            .predict_decode_tps_with_kv(ctx.params, bytes_per_param, ctx.kv_per_token, ctx.ctx)
+            .predict_decode_tps_with_kv(
+                ctx.params,
+                bytes_per_param,
+                ctx.kv_per_token,
+                kv_filled_tokens(ctx.prompt_tokens, ctx.gen_tokens, ctx.ctx),
+            )
             .expect("kv prediction");
 
         assert_eq!(report.decode_tps, expected);
@@ -1442,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn build_report_resolved_ctx_changes_kv_bytes_and_decode() {
+    fn build_report_ctx_changes_ram_fit_but_not_decode() {
         let mut short = context(None, "unavailable: test");
         short.arch = Some("llama-3.1-8b");
         short.kv_per_token = kv_bytes_per_token(parse_arch("llama-3.1-8b").expect("preset"));
@@ -1457,7 +1491,7 @@ mod tests {
         let short_report = build_report(&short, Quant::Q4_K_M).expect("short ctx report");
         let long_report = build_report(&long, Quant::Q4_K_M).expect("long ctx report");
 
-        // KV bytes scale with ctx in both decode and the RAM fit.
+        // KV capacity (RAM fit) scales with ctx.
         let short_fit = short_report.ram_fit.expect("short ram fit");
         let long_fit = long_report.ram_fit.expect("long ram fit");
         assert_eq!(short_fit.kv_bytes, short.kv_per_token * 2_048.0);
@@ -1466,17 +1500,35 @@ mod tests {
             long_fit.kv_bytes > short_fit.kv_bytes,
             "ctx 8192 must need more KV than 2048"
         );
+        // Decode reads the filled KV (512 + 128 / 2 = 576 tokens), not the
+        // window, so ctx does not change it.
         assert!(
-            long_report.decode_tps < short_report.decode_tps,
-            "larger ctx must lower decode: {} vs {}",
+            (long_report.decode_tps - short_report.decode_tps).abs() < 1e-9,
+            "ctx must not change decode: {} vs {}",
             long_report.decode_tps,
             short_report.decode_tps
         );
+        let weights = Quant::Q4_K_M.bytes_per_param() * 135_000_000.0;
+        let expected = 20e9 / (weights + 576.0 * short.kv_per_token);
+        assert!((short_report.decode_tps - expected).abs() < 1e-6 * expected);
 
         // `inputs` echoes the resolved arch/ctx used, not the raw flags.
         let inputs = short_report.inputs.expect("inputs");
         assert_eq!(inputs.arch.as_deref(), Some("llama-3.1-8b"));
         assert_eq!(inputs.ctx, Some(2_048));
+    }
+
+    #[test]
+    fn build_report_uses_gguf_file_bytes_for_decode_and_ram_fit() {
+        let mut ctx = context(None, "unavailable: test");
+        ctx.weight_bytes = Some(103_700_000);
+        ctx.ram_avail_bytes = Some(16e9);
+
+        let report = build_report(&ctx, Quant::Q4_K_M).expect("report");
+        let expected = 20e9 / 103_700_000.0;
+        assert!((report.decode_tps - expected).abs() < 1e-6 * expected);
+        let fit = report.ram_fit.expect("ram fit");
+        assert!((fit.weight_bytes - 103_700_000.0).abs() < 1.0);
     }
 
     #[test]
