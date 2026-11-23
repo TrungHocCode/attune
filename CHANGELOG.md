@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- `estimate --model <file.gguf>` now reads `<arch>.context_length` from the header as the default `--ctx`, matching catalog and `config.json` sources (#73).
 - #71: for a GGUF `--model` file, `estimate` and `tune` now use the file size
   as the weight bytes (decode prediction, RAM fit, exported profile
   `size_bytes`) instead of `params x nominal bits-per-weight`, which

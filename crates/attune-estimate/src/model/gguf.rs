@@ -8,6 +8,7 @@
 //! - `general.architecture` (required),
 //! - `<arch>.block_count`,
 //! - `<arch>.embedding_length`,
+//! - `<arch>.context_length` (optional),
 //! - `<arch>.attention.head_count_kv`, falling back to
 //!   `<arch>.attention.head_count` when the KV variant is absent (the
 //!   documented MHA fallback: without GQA every head is a KV head),
@@ -80,6 +81,8 @@ pub struct GgufFacts {
     /// `<arch>.attention.head_count_kv`, falling back to
     /// `<arch>.attention.head_count`; 0 when both are absent.
     pub n_kv_heads: u32,
+    /// `<arch>.context_length`; `None` when absent or too large for `u32`.
+    pub context_length: Option<u32>,
     /// `general.parameter_count`; 0 when absent (the file is *not* stat'ed
     /// here, so a file without this key cannot supply a parameter count).
     pub param_estimate: u64,
@@ -293,6 +296,7 @@ fn parse_metadata(data: &[u8]) -> Result<ParsedHeader, EstimateError> {
 
     let block_count = narrow("block_count", lookup("block_count"))?.unwrap_or(0);
     let embedding_length = narrow("embedding_length", lookup("embedding_length"))?.unwrap_or(0);
+    let context_length = lookup("context_length").and_then(|v| u32::try_from(v).ok());
     let head_count = narrow("attention.head_count", lookup("attention.head_count"))?;
     let head_count_kv = narrow("attention.head_count_kv", lookup("attention.head_count_kv"))?;
 
@@ -304,6 +308,7 @@ fn parse_metadata(data: &[u8]) -> Result<ParsedHeader, EstimateError> {
             // MQA/GQA fallback: with no KV-specific key every head is a KV
             // head.
             n_kv_heads: head_count_kv.or(head_count).unwrap_or(0),
+            context_length,
             param_estimate: lookup_global("general.parameter_count").unwrap_or(0),
         },
         head_count: head_count.unwrap_or(0),
@@ -326,6 +331,7 @@ fn is_integer_fact(key: &str) -> bool {
     key == "general.parameter_count"
         || key.ends_with(".block_count")
         || key.ends_with(".embedding_length")
+        || key.ends_with(".context_length")
         || key.ends_with(".attention.head_count")
         || key.ends_with(".attention.head_count_kv")
 }
@@ -688,6 +694,36 @@ mod tests {
         assert_eq!(probe.catalog.map(|entry| entry.name), Some("smollm2-135m"));
         assert_eq!(probe.params(), Some(135_000_000));
         assert_eq!(probe.warning, None);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn probe_reads_context_length_as_u32_or_u64_and_none_when_absent() {
+        let mut file = FakeGguf::new(3, 2);
+        file.string("general.architecture", "llama");
+        file.u32("llama.context_length", 8_192);
+        let path = write_temp("ctx32", "ctx32.gguf", file.bytes());
+        assert_eq!(probe_gguf(&path).unwrap().context_length, Some(8_192));
+        cleanup(&path);
+
+        let mut file = FakeGguf::new(3, 2);
+        file.string("general.architecture", "llama");
+        file.u64("llama.context_length", 131_072);
+        let path = write_temp("ctx64", "ctx64.gguf", file.bytes());
+        assert_eq!(probe_gguf(&path).unwrap().context_length, Some(131_072));
+        cleanup(&path);
+
+        let mut file = FakeGguf::new(3, 2);
+        file.string("general.architecture", "llama");
+        file.u64("llama.context_length", u64::MAX);
+        let path = write_temp("ctxhuge", "ctxhuge.gguf", file.bytes());
+        assert_eq!(probe_gguf(&path).unwrap().context_length, None);
+        cleanup(&path);
+
+        let mut file = FakeGguf::new(3, 1);
+        file.string("general.architecture", "llama");
+        let path = write_temp("noctx", "noctx.gguf", file.bytes());
+        assert_eq!(probe_gguf(&path).unwrap().context_length, None);
         cleanup(&path);
     }
 
