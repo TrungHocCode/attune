@@ -56,10 +56,17 @@ pub(crate) struct ProxyState {
     metrics: Metrics,
     /// Pid of the spawned llama-server, for the RSS gauge.
     upstream_pid: Option<u32>,
+    /// attune-level bearer key; when set, the client `Authorization` header is
+    /// attune's own credential and must never reach llama-server.
+    pub(crate) api_key: Option<String>,
 }
 
 impl ProxyState {
-    pub(crate) fn new(upstream_base: String, upstream_pid: Option<u32>) -> Self {
+    pub(crate) fn new(
+        upstream_base: String,
+        upstream_pid: Option<u32>,
+        api_key: Option<String>,
+    ) -> Self {
         let agent = Agent::config_builder()
             // Upstream 4xx/5xx responses are forwarded verbatim, so ureq must
             // hand them back as responses instead of `Error::StatusCode`.
@@ -72,6 +79,7 @@ impl ProxyState {
             upstream_base: upstream_base.trim_end_matches('/').to_string(),
             metrics: Metrics::new(),
             upstream_pid,
+            api_key,
         }
     }
 
@@ -116,7 +124,11 @@ fn forward_request(mut request: Request, route: Route, state: &ProxyState) {
     let received = Instant::now();
     // Only completions are measured; /v1/models and /health are plumbing.
     let tracker = route.is_post().then(|| state.metrics.begin());
-    let authorization = header_value(&request, "Authorization");
+    let authorization = if state.api_key.is_some() {
+        None
+    } else {
+        header_value(&request, "Authorization")
+    };
     let mut body = Vec::new();
     if route.is_post() {
         if let Err(error) = request.as_reader().read_to_end(&mut body) {

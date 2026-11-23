@@ -17,3 +17,9 @@ thiserror = "1"
 # separate dependency entry: the health endpoint is plain localhost HTTP, so no
 # TLS feature is enabled and `rustls`/`ring` stay out of the serving path.
 ureq = { version = "3", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+# Justification (AGENTS 3.4): std has no Job Object API; the job makes the OS
+# kill llama-server when attune dies (#77). Raw bindings, no runtime cost, and
+# 0.61 is already in the lockfile via ctrlc/clap.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
