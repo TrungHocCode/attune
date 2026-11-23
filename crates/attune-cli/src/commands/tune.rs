@@ -37,8 +37,8 @@ use attune_tune::{
     TuneError, TuneModel, TuneReport,
 };
 
-/// `engine.version` recorded by slice 3: no llama.cpp binary is inspected on
-/// the estimate-only path, so the field states that instead of guessing.
+/// `engine.version` when no llama.cpp build was observed (no `--verify`, or
+/// every verification run failed), so the field says so instead of guessing.
 const ENGINE_VERSION_ESTIMATE_ONLY: &str = "unknown (estimate-only)";
 
 /// Confidence recorded for an uncalibrated slice-3 prediction.
@@ -530,8 +530,27 @@ fn print_pruned(pruned: &[(TuneConfig, PruneReason)], cap_from_expand: usize) {
     );
 }
 
+/// Default profile name: `<model>-<objective>`, where a GGUF source contributes
+/// its file stem (not the full path) and any path separator becomes `-`, so
+/// the name is portable and leaks no directory layout.
+fn default_profile_name(label: &str, objective: Objective) -> String {
+    let model = match as_gguf_path(label) {
+        Some(path) => path.file_stem().map_or_else(
+            || label.to_string(),
+            |stem| stem.to_string_lossy().into_owned(),
+        ),
+        None => label.to_string(),
+    };
+    format!("{model}-{objective}").replace(['/', '\\'], "-")
+}
+
 /// Build the versioned profile for the highest-ranked config.
-fn build_profile(report: &TuneReport, resolution: &ModelResolution, name: &str) -> Result<Profile> {
+fn build_profile(
+    report: &TuneReport,
+    resolution: &ModelResolution,
+    name: &str,
+    engine_version: Option<&str>,
+) -> Result<Profile> {
     let best = report
         .configs
         .first()
@@ -542,7 +561,7 @@ fn build_profile(report: &TuneReport, resolution: &ModelResolution, name: &str) 
     let inputs = ProfileInputs {
         name,
         fingerprint: &fingerprint,
-        engine_version: ENGINE_VERSION_ESTIMATE_ONLY,
+        engine_version: engine_version.unwrap_or(ENGINE_VERSION_ESTIMATE_ONLY),
         model_path: &resolution.label,
         quant,
         size_bytes,
@@ -794,6 +813,7 @@ pub fn run(
     // Opt-in slice 4: measure the top-K estimate configs and re-score them.
     // Setup errors fail here; a single bad run becomes a warning and keeps
     // that config's estimate score.
+    let mut observed_engine_version = None;
     if let Some(model_path) = verify_model.as_deref() {
         let outcome = run_verify_topk(
             &ranked,
@@ -807,6 +827,7 @@ pub fn run(
         )?;
         ranked = outcome.configs;
         warnings.extend(outcome.warnings);
+        observed_engine_version = outcome.engine_version;
     }
     let report = TuneReport::new(
         resolution.label.clone(),
@@ -820,9 +841,14 @@ pub fn run(
 
     let profile = match save {
         Some(path) => {
-            let default_name = format!("{}-{}", resolution.label, objective);
+            let default_name = default_profile_name(&resolution.label, objective);
             let profile_name = name.unwrap_or(default_name.as_str());
-            let profile = build_profile(&report, &resolution, profile_name)?;
+            let profile = build_profile(
+                &report,
+                &resolution,
+                profile_name,
+                observed_engine_version.as_deref(),
+            )?;
             let document = profile.to_json_string()?;
             std::fs::write(path, document)
                 .with_context(|| format!("failed to write profile to {}", path.display()))?;
@@ -860,4 +886,86 @@ pub fn run(
         println!("Profile saved: {}", path.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn report_for(label: &str) -> TuneReport {
+        let config = TuneConfig::new(Quant::Q4_K_M, 2048, 4, 512, Quant::Fp16);
+        let ranked = RankedConfig {
+            config,
+            decode_tps: 100.0,
+            ttft_ms: 50.0,
+            fits: true,
+            score: 1.0,
+            verified: false,
+            measured: None,
+            calibration: None,
+        };
+        let hw = HwInputs {
+            bw_gbps: 20.0,
+            flops_gflops: 100.0,
+        };
+        TuneReport::new(
+            label,
+            135_000_000,
+            Objective::Throughput,
+            hw,
+            None,
+            vec![ranked],
+        )
+    }
+
+    fn resolution(label: &str, weight_bytes: Option<u64>) -> ModelResolution {
+        ModelResolution {
+            label: label.to_string(),
+            display: label.to_string(),
+            params: 135_000_000,
+            arch: None,
+            weight_bytes,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn gguf_default_name_is_the_file_stem_plus_objective() {
+        let dir = std::env::temp_dir().join("attune-tune-name-test");
+        fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("smollm2-135m-instruct-q4_k_m.gguf");
+        fs::write(&file, b"GGUF").expect("write");
+        let label = file.display().to_string();
+        let name = default_profile_name(&label, Objective::Throughput);
+        assert_eq!(name, "smollm2-135m-instruct-q4_k_m-throughput");
+        assert!(!name.contains('/') && !name.contains('\\'));
+        let _ = fs::remove_file(&file);
+    }
+
+    #[test]
+    fn non_file_labels_have_separators_replaced() {
+        let name = default_profile_name("org/model", Objective::Throughput);
+        assert_eq!(name, "org-model-throughput");
+        let name = default_profile_name("C:\\x\\missing.gguf", Objective::Throughput);
+        assert!(!name.contains('/') && !name.contains('\\'));
+    }
+
+    #[test]
+    fn profile_uses_observed_engine_version_else_estimate_only() {
+        let report = report_for("m");
+        let res = resolution("m", None);
+        let observed = build_profile(&report, &res, "n", Some("0.7.0-dev")).expect("profile");
+        assert_eq!(observed.engine.version, "0.7.0-dev");
+        let estimate = build_profile(&report, &res, "n", None).expect("profile");
+        assert_eq!(estimate.engine.version, ENGINE_VERSION_ESTIMATE_ONLY);
+    }
+
+    #[test]
+    fn profile_size_bytes_is_the_gguf_file_size() {
+        let report = report_for("m");
+        let res = resolution("m", Some(105_454_432));
+        let profile = build_profile(&report, &res, "n", None).expect("profile");
+        assert_eq!(profile.model.size_bytes, 105_454_432);
+        assert_eq!(profile.model.path, "m");
+    }
 }
