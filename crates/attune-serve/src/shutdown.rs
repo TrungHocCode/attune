@@ -10,9 +10,10 @@
 //!
 //! * **Windows**: the handler covers Ctrl+C and console close/logoff/shutdown
 //!   events delivered through the console control handler. Windows has no
-//!   POSIX `SIGTERM`; `taskkill`/`Stop-Process` terminate the process without
-//!   running any handler, so the caller should kill the process tree or accept
-//!   that `llama-server` outlives an abrupt kill.
+//!   POSIX `SIGTERM`; `taskkill /F`/`Stop-Process` terminate the process without
+//!   running any handler. `llama-server` still dies with attune because
+//!   [`attune_backend::ServerGuard`] puts it in a Job Object with
+//!   `KILL_ON_JOB_CLOSE` (best effort; a warning is printed if that fails).
 //! * **Linux/macOS**: the `termination` feature of `ctrlc` adds `SIGTERM` and
 //!   `SIGHUP` next to `SIGINT`, which is what `systemd stop`, `docker stop` and
 //!   `kill` send. A single handler therefore covers interactive Ctrl+C and

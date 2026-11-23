@@ -4,16 +4,15 @@
 //! Everything that touches a profile, the filesystem, a child process or an
 //! HTTP socket lives in `attune-serve` / `attune-backend`; this module only
 //! translates CLI flags, renders warnings/JSON and blocks until Ctrl+C.
-//! `--api-key` is accepted for forward compatibility but not enforced yet
-//! (slice 4 harden); a non-loopback `--listen` without enforcement should be
-//! treated as trusted-network only.
+//! `--api-key` / `ATTUNE_API_KEY` is enforced by the proxy, and a non-loopback
+//! `--listen` without a key is refused by `Proxy::bind`.
 
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
-use attune_serve::{install_shutdown, launch, Proxy, ProxyConfig, ServeOptions};
+use attune_serve::{check_listen, install_shutdown, launch, Proxy, ProxyConfig, ServeOptions};
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -28,6 +27,12 @@ pub fn run(
     force: bool,
     json: bool,
 ) -> Result<()> {
+    // clap's `env` feature is not enabled; read the variable by hand.
+    let env_key = std::env::var("ATTUNE_API_KEY")
+        .ok()
+        .filter(|key| !key.is_empty());
+    let api_key = api_key.filter(|key| !key.is_empty()).or(env_key.as_deref());
+    check_listen(listen, api_key)?;
     let options = ServeOptions {
         profile: profile.to_path_buf(),
         llama_server: llama_server.map(Path::to_path_buf),
@@ -41,16 +46,12 @@ pub fn run(
     for warning in &serving.warnings {
         eprintln!("[attune] warning: {warning}");
     }
-    if api_key.is_some() {
-        eprintln!(
-            "[attune] note: --api-key was accepted but is not enforced yet (harden lands in slice 4)"
-        );
-    }
-
     let proxy_config = ProxyConfig {
+        api_key: api_key.map(str::to_string),
         listen: listen.to_string(),
         listen_port,
         upstream_base: format!("http://{}", serving.upstream),
+        upstream_pid: Some(serving.guard.pid()),
     };
     let proxy = Proxy::bind(&proxy_config)?;
     let proxy_url = format!("http://{}", proxy.local_addr());
