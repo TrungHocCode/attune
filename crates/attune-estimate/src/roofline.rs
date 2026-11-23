@@ -70,6 +70,7 @@ pub fn predict_decode_tps(
 /// tok/s = bandwidth_bytes_per_second / (weights + kv_per_token × ctx)
 /// ```
 ///
+/// `ctx` is the KV length read per token (see [`crate::kv_filled_tokens`]).
 /// `kv_per_token` is the per-token KV traffic in bytes (see
 /// [`crate::kv_bytes_per_token`]); pass `0.0` to reproduce the weights-only
 /// prediction. A zero `ctx` therefore also drops the KV term. All inputs are
@@ -93,6 +94,23 @@ pub fn predict_decode_tps_with_kv(
             "bytes per parameter must be finite and > 0, got {bytes_per_param}"
         )));
     }
+    predict_decode_tps_from_bytes(params as f64 * bytes_per_param, bw_gbps, kv_per_token, ctx)
+}
+
+/// Decode throughput from an explicit weight size (e.g. a GGUF file size)
+/// instead of `params × bytes_per_param`. `kv_tokens` is the KV length read
+/// per generated token (see [`crate::kv_filled_tokens`]), not the capacity.
+pub fn predict_decode_tps_from_bytes(
+    weight_bytes: f64,
+    bw_gbps: f64,
+    kv_per_token: f64,
+    kv_tokens: u32,
+) -> Result<f64, EstimateError> {
+    if !weight_bytes.is_finite() || weight_bytes <= 0.0 {
+        return Err(EstimateError::InvalidModel(
+            "model weight footprint must be finite and > 0".to_string(),
+        ));
+    }
     if !bw_gbps.is_finite() || bw_gbps <= 0.0 {
         return Err(EstimateError::BadHw(format!(
             "bandwidth must be finite and > 0 GB/s, got {bw_gbps}"
@@ -103,15 +121,7 @@ pub fn predict_decode_tps_with_kv(
             "KV bytes per token must be finite and >= 0, got {kv_per_token}"
         )));
     }
-
-    let weight_bytes = params as f64 * bytes_per_param;
-    if !weight_bytes.is_finite() || weight_bytes <= 0.0 {
-        return Err(EstimateError::InvalidModel(
-            "model weight footprint overflowed".to_string(),
-        ));
-    }
-
-    let kv_bytes = kv_per_token * ctx as f64;
+    let kv_bytes = kv_per_token * kv_tokens as f64;
     let total_bytes = weight_bytes + kv_bytes;
     if !total_bytes.is_finite() || total_bytes <= 0.0 {
         return Err(EstimateError::InvalidModel(

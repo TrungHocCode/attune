@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- #71: for a GGUF `--model` file, `estimate` and `tune` now use the file size
+  as the weight bytes (decode prediction, RAM fit, exported profile
+  `size_bytes`) instead of `params x nominal bits-per-weight`, which
+  under-counted small models by 10-20%. `--params`, catalog and HF sources keep
+  the nominal table. Because the file size is per source, every `--quant` of
+  one GGUF now shares the same weight bytes.
+- #72: decode now charges the KV cache read at the expected filled length
+  (`prompt + gen / 2`, default 576 tokens, capped at `n_ctx`) instead of the
+  full context window, so `--ctx` no longer changes the decode estimate. RAM fit
+  and `tune` OOM pruning still use the full `n_ctx`. `tune` sizes KV per config
+  from its cache type (f16 = 2 B, q8_0 = 34/32 B per element) when the model has
+  a KV shape. JSON: `ram_fit.kv_bytes` is unchanged (full-window capacity), but
+  `decode_tps` values change.
+
 ## [0.4.0] - 2026-10-28
 
 Calibrated sweep plus the M4 acceptance measurement on SmolLM2-135M Q4_K_M.
