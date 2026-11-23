@@ -26,8 +26,8 @@ pub struct TuneConfig {
     /// Weight format.
     #[serde(default)]
     pub quant: Quant,
-    /// Context window in tokens. Also used as the slice-1 prefill length for
-    /// TTFT (see [`crate::rank_by_estimate`]).
+    /// Context window in tokens. Caps the prefill length for TTFT when smaller
+    /// than the prompt (see [`crate::rank_by_estimate`]).
     #[serde(default)]
     pub n_ctx: u32,
     /// Worker thread count.

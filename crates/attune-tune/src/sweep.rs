@@ -489,6 +489,33 @@ mod tests {
     }
 
     #[test]
+    fn ttft_matches_estimate_for_same_model_quant_prompt() {
+        let configs = [
+            TuneConfig::new(Quant::Q4_K_M, 2_048, 4, 512, Quant::Fp16),
+            TuneConfig::new(Quant::Q4_K_M, 4_096, 4, 512, Quant::Fp16),
+        ];
+        let prompt_tokens = 512;
+        let ranked = rank_by_estimate(
+            &configs,
+            &TuneModel::nominal(135_000_000),
+            hw(),
+            16e9,
+            Objective::Latency,
+            prompt_tokens,
+            128,
+        )
+        .expect("rank");
+
+        let expected_ttft = hw()
+            .predict_prefill_ms(135_000_000, prompt_tokens, Quant::Q4_K_M)
+            .expect("estimate prefill");
+
+        // tune and estimate agree on TTFT for the same model/quant/prompt (<= 1% tolerance)
+        assert!((ranked[0].ttft_ms - expected_ttft).abs() / expected_ttft < 0.01);
+        assert!((ranked[1].ttft_ms - expected_ttft).abs() / expected_ttft < 0.01);
+    }
+
+    #[test]
     fn oom_configs_score_negative_infinity() {
         let configs = expand_grid(
             &[Quant::Fp16, Quant::Q4_K_M],
