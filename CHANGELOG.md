@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- `estimate --model <file.gguf>` now reads `<arch>.context_length` from the header as the default `--ctx`, matching catalog and `config.json` sources (#73).
+
 ## [0.4.0] - 2026-10-28
 
 Calibrated sweep plus the M4 acceptance measurement on SmolLM2-135M Q4_K_M.

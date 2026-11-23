@@ -303,8 +303,7 @@ fn resolve_model(
                 params,
                 arch,
                 kv_per_token: arch.map_or(0.0, |arch| kv_bytes_per_token(&arch)),
-                // GGUF headers carry no context-window metadata in the probe.
-                ctx_default: None,
+                ctx_default: probe.facts.context_length,
                 provenance: ModelProvenance::Gguf,
                 gguf: Some(probe),
                 warnings,
@@ -1268,7 +1267,7 @@ mod tests {
         assert_eq!(resolve_ctx(Some(2_048), Some(131_072)), 2_048);
         // No explicit value: use the source default.
         assert_eq!(resolve_ctx(None, Some(8_192)), 8_192);
-        // No source default (GGUF/manual): keep the historical 2048.
+        // No source default (GGUF without context_length, or manual): keep 2048.
         assert_eq!(resolve_ctx(None, None), DEFAULT_CTX);
         assert_eq!(DEFAULT_CTX, 2_048);
     }
@@ -1341,6 +1340,7 @@ mod tests {
         // 2 (K+V) × 36 layers × 8 KV heads × (4096/32) × 2 bytes.
         assert_eq!(resolved.kv_per_token, 2.0 * 36.0 * 8.0 * 128.0 * 2.0);
         assert_eq!(resolved.arch.map(|arch| arch.name), Some("gguf"));
+        // No `context_length` key in this header: falls back to 2048 later.
         assert_eq!(resolved.ctx_default, None);
         assert_eq!(resolved.provenance, ModelProvenance::Gguf);
         assert!(resolved.warnings.is_empty());
@@ -1350,6 +1350,23 @@ mod tests {
         assert_eq!(probe.facts.block_count, 36);
         assert_eq!(probe.facts.n_kv_heads, 8);
         assert_eq!(probe.warning, None);
+        cleanup_temp_gguf(&path);
+    }
+
+    #[test]
+    fn resolve_model_gguf_context_length_is_the_ctx_default() {
+        let mut bytes = fake_gguf("llama", 36, 4096, 32, Some(8), Some(8_200_000_000));
+        // Bump kv_count (header offset 16) and append `llama.context_length`.
+        bytes[16] += 1;
+        push_key(&mut bytes, "llama.context_length", TYPE_UINT32);
+        push_u32(&mut bytes, 8_192);
+        let path = write_temp_gguf("ctxlen", "local-model.gguf", &bytes);
+        let name = path.to_str().expect("temp path is UTF-8");
+
+        let resolved = resolve_model(Some(name), None, None, false).expect("GGUF resolves");
+        assert_eq!(resolved.ctx_default, Some(8_192));
+        assert_eq!(resolve_ctx(None, resolved.ctx_default), 8_192);
+        assert_eq!(resolve_ctx(Some(512), resolved.ctx_default), 512);
         cleanup_temp_gguf(&path);
     }
 
