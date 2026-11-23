@@ -47,7 +47,7 @@ OS:         windows
 ```
 
 ```
-Memory bandwidth (read): 33.2 GB/s (buffer 256 MiB, 8 threads, 3 reps)
+Memory bandwidth (read): 33.2 GB/s (buffer 256 MiB, 8 threads, 20 reps)
 ```
 
 ## Usage

@@ -29,8 +29,10 @@ pub const DEFAULT_BUFFER_MIB: u64 = 256;
 /// Floor for the working set. Below this the measurement is dominated by
 /// cache/TLB noise rather than DRAM.
 pub const MIN_BUFFER_MIB: u64 = 16;
-/// Timed passes for `--quick` (best-of wins).
-pub const DEFAULT_REPS: usize = 3;
+/// Timed passes for `--quick` (best-of wins). A 256 MiB pass takes ~8 ms, so
+/// 20 passes still finish in ~0.2 s and make best-of robust to a pass that
+/// the scheduler or an E-core hiccup slowed down.
+pub const DEFAULT_REPS: usize = 20;
 /// Timed passes for full mode (median reported, best also captured).
 pub const FULL_REPS: usize = 5;
 /// Passes executed and discarded before timing starts.
@@ -106,7 +108,7 @@ pub struct BandwidthConfig {
 
 impl BandwidthConfig {
     /// Quick-path default: 256 MiB working set (raised to ≥4× L3, clamped to
-    /// ≤¼ of available RAM) spread over the physical core count, 3 reps.
+    /// ≤¼ of available RAM) spread over the physical core count, 20 reps.
     pub fn from_hardware(hw: &HardwareInfo) -> Self {
         let buffer_bytes = choose_buffer_bytes(hw.memory.available_bytes, hw.cache.l3_bytes);
         let threads = usize::try_from(hw.cpu.physical_cores.max(1)).unwrap_or(1);
@@ -456,6 +458,43 @@ fn run_copy_pass(src: &[u8], dst: &mut [u8], per_thread: usize) -> Result<(), Be
 /// Four independent `u64` accumulators so a single loop-carried add cannot
 /// cap the thread at 1 byte/cycle.
 fn sum_read(chunk: &[u8]) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 support was just verified at runtime.
+        return unsafe { sum_read_avx2(chunk) };
+    }
+    sum_read_scalar(chunk)
+}
+
+/// 4 independent 256-bit accumulators over 128 B per iteration (two cache
+/// lines), so loads are full-width vector loads with no dependency chain.
+/// Same checksum as [`sum_read_scalar`] (wrapping sum of all u64 words).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn sum_read_avx2(chunk: &[u8]) -> u64 {
+    use std::arch::x86_64::{
+        __m256i, _mm256_add_epi64, _mm256_loadu_si256, _mm256_setzero_si256, _mm256_storeu_si256,
+    };
+    let (blocks, tail) = chunk.as_chunks::<128>();
+    let z = _mm256_setzero_si256();
+    let (mut a0, mut a1, mut a2, mut a3) = (z, z, z, z);
+    for block in blocks {
+        let p = block.as_ptr().cast::<__m256i>();
+        a0 = _mm256_add_epi64(a0, _mm256_loadu_si256(p));
+        a1 = _mm256_add_epi64(a1, _mm256_loadu_si256(p.add(1)));
+        a2 = _mm256_add_epi64(a2, _mm256_loadu_si256(p.add(2)));
+        a3 = _mm256_add_epi64(a3, _mm256_loadu_si256(p.add(3)));
+    }
+    let sum = _mm256_add_epi64(_mm256_add_epi64(a0, a1), _mm256_add_epi64(a2, a3));
+    let mut lanes = [0u64; 4];
+    _mm256_storeu_si256(lanes.as_mut_ptr().cast::<__m256i>(), sum);
+    let checksum = lanes
+        .iter()
+        .fold(sum_read_scalar(tail), |acc, &l| acc.wrapping_add(l));
+    std::hint::black_box(checksum)
+}
+
+fn sum_read_scalar(chunk: &[u8]) -> u64 {
     let (mut a0, mut a1, mut a2, mut a3) = (0u64, 0u64, 0u64, 0u64);
     // `as_chunks` (stable since 1.88) gives fixed-size groups without any
     // per-byte bounds checks.
@@ -558,6 +597,14 @@ mod tests {
         // Odd length exercises the <32 byte tail path.
         assert_ne!(sum_read(&[1u8; 31]), 0);
         assert_ne!(sum_read(&[1u8; 33]), 0);
+    }
+
+    #[test]
+    fn sum_read_matches_scalar_reference() {
+        let buf: Vec<u8> = (0..1000u32).map(|i| (i * 7 + 3) as u8).collect();
+        for len in [0, 1, 31, 127, 128, 129, 300, 1000] {
+            assert_eq!(sum_read(&buf[..len]), sum_read_scalar(&buf[..len]), "{len}");
+        }
     }
 
     #[test]

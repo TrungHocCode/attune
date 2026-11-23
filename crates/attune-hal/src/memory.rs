@@ -133,9 +133,10 @@ fn windows_dram_speed_channels() -> (u64, u32) {
     // exactly zero or one DIMM, so `.Count` is defined downstream.
     let script = "$cim = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue); \
                   if ($cim.Count -gt 0) { \
-                    $speed = 0; \
+                    $speed = 0; $conf = 0; \
                     if ($null -ne $cim[0].Speed) { $speed = [int64]$cim[0].Speed }; \
-                    Write-Output \"$speed|$($cim.Count)\" \
+                    if ($null -ne $cim[0].ConfiguredClockSpeed) { $conf = [int64]$cim[0].ConfiguredClockSpeed }; \
+                    Write-Output \"$speed|$conf|$($cim.Count)\" \
                   }";
 
     let child = match Command::new("powershell")
@@ -189,32 +190,35 @@ fn windows_dram_speed_channels() -> (u64, u32) {
     }
 }
 
-/// Pure parser for the `"<speed>|<count>"` line emitted by the Windows
-/// PowerShell probe. Kept platform-independent so its unit tests run on
-/// every OS; the only production caller is Windows-gated, hence the
+/// Prefer the speed the DIMM actually runs at (`ConfiguredClockSpeed`) over
+/// its rated `Speed`; fall back to rated when the configured value is 0.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn select_speed_mts(configured: u64, rated: u64) -> u64 {
+    if configured > 0 {
+        configured
+    } else {
+        rated
+    }
+}
+
+/// Pure parser for the `"<speed>|<configured>|<count>"` line emitted by the
+/// Windows PowerShell probe. Kept platform-independent so its unit tests run
+/// on every OS; the only production caller is Windows-gated, hence the
 /// `allow(dead_code)` on other platforms (plain `cargo clippy` without
 /// `--all-targets` does not count `#[cfg(test)]` uses).
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_speed_channels(s: &str) -> (u64, u32) {
-    let trimmed = s.trim();
-    let mut parts = trimmed.split('|');
-    let speed_str = match parts.next() {
-        Some(p) => p.trim(),
-        None => return (0, 0),
-    };
-    let count_str = match parts.next() {
-        Some(p) => p.trim(),
-        None => return (0, 0),
-    };
-    let speed = match speed_str.parse::<u64>() {
-        Ok(n) => n,
-        Err(_) => return (0, 0),
-    };
-    let count = match count_str.parse::<u32>() {
-        Ok(n) => n,
-        Err(_) => return (0, 0),
-    };
-    (speed, count)
+    let fields: Vec<&str> = s.trim().split('|').map(str::trim).collect();
+    if let [rated, configured, count] = fields[..] {
+        if let (Ok(r), Ok(c), Ok(n)) = (
+            rated.parse::<u64>(),
+            configured.parse::<u64>(),
+            count.parse::<u32>(),
+        ) {
+            return (select_speed_mts(c, r), n);
+        }
+    }
+    (0, 0)
 }
 
 #[cfg(test)]
@@ -301,20 +305,27 @@ mod tests {
 
     #[test]
     fn parse_speed_channels_handles_clean_input() {
-        assert_eq!(parse_speed_channels("3200|2"), (3200, 2));
+        assert_eq!(parse_speed_channels("3200|0|2"), (3200, 2));
+    }
+
+    #[test]
+    fn parse_speed_channels_prefers_configured_clock() {
+        assert_eq!(parse_speed_channels("5600|5200|1"), (5200, 1));
+        assert_eq!(select_speed_mts(0, 0), 0);
     }
 
     #[test]
     fn parse_speed_channels_handles_trailing_whitespace() {
-        assert_eq!(parse_speed_channels("  2666 | 4\n"), (2666, 4));
+        assert_eq!(parse_speed_channels("  2666 | 0 | 4\n"), (2666, 4));
     }
 
     #[test]
     fn parse_speed_channels_returns_zero_on_garbage() {
         assert_eq!(parse_speed_channels(""), (0, 0));
         assert_eq!(parse_speed_channels("nope"), (0, 0));
-        assert_eq!(parse_speed_channels("3200|"), (0, 0));
-        assert_eq!(parse_speed_channels("|4"), (0, 0));
+        assert_eq!(parse_speed_channels("3200|0|"), (0, 0));
+        assert_eq!(parse_speed_channels("3200|2"), (0, 0));
+        assert_eq!(parse_speed_channels("|0|4"), (0, 0));
         assert_eq!(parse_speed_channels("oops|four"), (0, 0));
     }
 }
