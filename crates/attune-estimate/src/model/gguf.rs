@@ -232,7 +232,11 @@ fn read_prefix(path: &Path, cap: u64) -> Result<Vec<u8>, EstimateError> {
 fn parse_header(path: &Path) -> Result<ParsedHeader, EstimateError> {
     let mut parsed = parse_metadata(&read_prefix(path, MAX_HEADER_BYTES)?, false)?;
     if parsed.facts.param_estimate == 0 {
-        parsed = parse_metadata(&read_prefix(path, MAX_TENSOR_TABLE_BYTES)?, true)?;
+        // An unreadable tensor table must not block the catalog-name fallback;
+        // callers already hint `--params` when no count is found at all.
+        if let Ok(full) = parse_metadata(&read_prefix(path, MAX_TENSOR_TABLE_BYTES)?, true) {
+            parsed = full;
+        }
     }
     Ok(parsed)
 }
@@ -764,32 +768,34 @@ mod tests {
     }
 
     #[test]
-    fn tensor_table_beyond_budget_errors_with_params_hint() {
+    fn tensor_table_beyond_budget_leaves_the_count_unknown() {
         let mut file = arch_file(2);
         // Padding array pushes the table past the read budget.
         file.u32_array("pad", &vec![0u32; (MAX_TENSOR_TABLE_BYTES / 4) as usize]);
         file.tensor("a", &[10, 10]);
         let path = write_temp("budget", "big.gguf", file.bytes());
-        let err = probe_gguf(&path)
-            .expect_err("table does not fit")
-            .to_string();
-        assert!(err.contains("--params"), "{err}");
+        // Unknown (0) lets the catalog match or the CLI's `--params` hint apply.
+        let facts = probe_gguf(&path).expect("header facts still returned");
+        assert_eq!(facts.param_estimate, 0);
+        assert!(table_budget_error().to_string().contains("--params"));
         cleanup(&path);
     }
 
     #[test]
-    fn absurd_dims_and_overflow_are_rejected() {
+    fn absurd_dims_and_overflow_never_become_a_param_count() {
         let mut file = arch_file(1);
         file.bytes[8..16].copy_from_slice(&1u64.to_le_bytes());
         file.tensor_raw("x", 9, &[1; 9]);
         let path = write_temp("dims", "d.gguf", file.bytes());
-        assert!(probe_gguf(&path).is_err());
+        assert!(parse_metadata(file.bytes(), true).is_err());
+        assert_eq!(probe_gguf(&path).expect("facts").param_estimate, 0);
         cleanup(&path);
 
         let mut file = arch_file(1);
         file.tensor("x", &[u64::MAX, 2]);
         let path = write_temp("overflow", "o.gguf", file.bytes());
-        assert!(probe_gguf(&path).is_err());
+        assert!(parse_metadata(file.bytes(), true).is_err());
+        assert_eq!(probe_gguf(&path).expect("facts").param_estimate, 0);
         cleanup(&path);
     }
 
