@@ -31,7 +31,7 @@ pub fn run(
     let env_key = std::env::var("ATTUNE_API_KEY")
         .ok()
         .filter(|key| !key.is_empty());
-    let api_key = api_key.or(env_key.as_deref());
+    let api_key = api_key.filter(|key| !key.is_empty()).or(env_key.as_deref());
     check_listen(listen, api_key)?;
     let options = ServeOptions {
         profile: profile.to_path_buf(),

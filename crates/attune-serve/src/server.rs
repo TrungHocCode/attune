@@ -163,7 +163,7 @@ impl Proxy {
             state: Arc::new(ProxyState::new(
                 config.upstream_base.clone(),
                 config.upstream_pid,
-                config.api_key.clone(),
+                config.api_key.clone().filter(|key| !key.is_empty()),
             )),
             local_addr,
         })
@@ -262,7 +262,8 @@ fn handle_request(request: Request, state: &ProxyState) {
 /// Refuse a non-loopback `--listen` without an API key. The CLI calls this
 /// before spawning llama-server so the failure is instant.
 pub fn check_listen(listen: &str, api_key: Option<&str>) -> Result<(), ServeError> {
-    if api_key.is_none() && !is_loopback_host(listen) {
+    // An empty key would let any `Bearer ` header through, so it counts as none.
+    if !api_key.is_some_and(|key| !key.is_empty()) && !is_loopback_host(listen) {
         return Err(ServeError::InvalidConfig(format!(
             "--listen {listen} is not a loopback address: set --api-key (or ATTUNE_API_KEY) to expose the proxy"
         )));
@@ -662,6 +663,7 @@ mod tests {
             error.contains("--listen") && error.contains("--api-key"),
             "{error}"
         );
+        assert!(Proxy::bind(&config("0.0.0.0", Some(""))).is_err());
         assert!(Proxy::bind(&config("0.0.0.0", Some("k"))).is_ok());
     }
 
