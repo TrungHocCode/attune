@@ -180,6 +180,11 @@ pub struct EstimateInputs {
     /// JSON documents (and hand-built reports).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx: Option<u32>,
+    /// Measured int8 GOPS used as the prefill ceiling for quantized formats
+    /// (issue #69). `None` when `gflops` was an explicit override or the probe
+    /// was unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub int8_gops: Option<f64>,
 }
 
 /// Whether the model fits in the RAM available on this machine.
@@ -499,6 +504,7 @@ mod tests {
                 clock_ghz: 4.0,
                 arch: Some("llama-3.1-8b".to_string()),
                 ctx: Some(2048),
+                int8_gops: None,
             })
             .with_prefill_ms(2764.8)
             .with_ridge(2.5, 33.333_333)
@@ -569,6 +575,7 @@ mod tests {
                 clock_ghz: 4.0,
                 arch: Some("llama-3.1-8b".to_string()),
                 ctx: Some(2048),
+                int8_gops: None,
             })
             .with_prefill_ms(2764.8)
             .with_ridge(2.5, 33.333_333);

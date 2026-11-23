@@ -17,6 +17,7 @@
 pub mod bandwidth;
 pub mod e2e;
 pub mod flops;
+pub mod int8;
 pub mod llama;
 pub mod monitor;
 
@@ -116,6 +117,10 @@ pub struct BenchReport {
     /// FP32 FMA throughput. `None` in quick mode (the sweep is skipped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flops: Option<flops::FlopsResult>,
+    /// Int8 dot-product throughput (the quantized-prefill ceiling). `None` in
+    /// quick mode and in reports written before issue #69.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub int8: Option<int8::Int8Result>,
     /// Resource-usage summary from the bandwidth + flops phase. `None` in
     /// quick mode (no monitor is running).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,6 +180,7 @@ pub fn run_quick() -> Result<BenchReport, BenchError> {
         mode: "quick".to_string(),
         bandwidth: BandwidthReport::Quick(result),
         flops: None,
+        int8: None,
         resources: None,
         e2e: None,
     })
@@ -202,6 +208,7 @@ pub fn run_full(
     let monitor = monitor::Monitor::start_sysinfo(monitor::DEFAULT_INTERVAL_MS)?;
     let mut bandwidth_result = bandwidth::full_bandwidth(&bw_cfg)?;
     let flops_result = flops::measure_flops(&fp_cfg)?;
+    let int8_result = int8::quick_int8()?;
     let resources = monitor.stop();
     bandwidth_result.flops = Some(flops_result);
     bandwidth_result.resources = Some(resources);
@@ -218,6 +225,7 @@ pub fn run_full(
         mode: "full".to_string(),
         bandwidth: BandwidthReport::Full(bandwidth_result),
         flops: bandwidth_result.flops,
+        int8: Some(int8_result),
         resources: bandwidth_result.resources,
         e2e,
     })
@@ -349,6 +357,7 @@ mod tests {
             mode: "quick".to_string(),
             bandwidth: quick_bandwidth(),
             flops: None,
+            int8: None,
             resources: None,
             e2e: None,
         };
@@ -370,6 +379,7 @@ mod tests {
             mode: "full".to_string(),
             bandwidth: full_bandwidth_value(),
             flops: Some(sample_flops()),
+            int8: None,
             resources: Some(sample_resources()),
             e2e: None,
         };
@@ -391,6 +401,7 @@ mod tests {
             mode: "full".to_string(),
             bandwidth: full_bandwidth_value(),
             flops: Some(sample_flops()),
+            int8: None,
             resources: Some(sample_resources()),
             e2e: Some(sample_e2e()),
         };
@@ -428,6 +439,7 @@ mod tests {
             mode: "full".to_string(),
             bandwidth: full_bandwidth_value(),
             flops: None,
+            int8: None,
             resources: None,
             e2e: None,
         };
@@ -479,6 +491,7 @@ mod tests {
         assert_eq!(back.schema, "attune-bench/1");
         assert_eq!(back.mode, "full");
         assert!(back.flops.is_none());
+        assert!(back.int8.is_none());
         assert!(back.resources.is_none());
         // e2e was absent from the input — back-compat default is None.
         assert!(back.e2e.is_none());

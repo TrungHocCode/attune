@@ -16,9 +16,35 @@ pub struct HwInputs {
     pub bw_gbps: f64,
     /// Theoretical (or overridden) FP32 peak in decimal GFLOPS.
     pub flops_gflops: f64,
+    /// Measured int8 dot-product throughput in decimal GOPS (issue #69). When
+    /// present it is the compute ceiling for quantized prefill; `None` (an
+    /// explicit `--gflops`, or no measurement) keeps the FP32 ceiling.
+    #[serde(default)]
+    pub int8_gops: Option<f64>,
 }
 
 impl HwInputs {
+    /// Prefill latency for `quant`. A measured int8 ceiling already contains
+    /// the quantized-matmul cost (llama.cpp reaches 90-95% of it on Q4_K_M), so
+    /// it is used with no extra dequant penalty; the FP32 ceiling keeps the
+    /// heuristic [`crate::Quant::dequant_penalty`].
+    pub fn predict_prefill_ms(
+        &self,
+        params: u64,
+        n_tokens: u64,
+        quant: crate::Quant,
+    ) -> Result<f64, EstimateError> {
+        match self.int8_ceiling(quant) {
+            Some(gops) => crate::predict_prefill_ms(params, n_tokens, gops),
+            None => crate::predict_prefill_ms_quant(params, n_tokens, self.flops_gflops, quant),
+        }
+    }
+
+    fn int8_ceiling(&self, quant: crate::Quant) -> Option<f64> {
+        self.int8_gops
+            .filter(|gops| quant != crate::Quant::Fp16 && gops.is_finite() && *gops > 0.0)
+    }
+
     /// Convenience wrapper around [`predict_decode_tps`] that uses
     /// `self.bw_gbps`.
     ///
@@ -144,6 +170,34 @@ mod tests {
     use crate::model::{kv_bytes_per_token, Arch, Quant};
 
     #[test]
+    fn prefill_uses_int8_ceiling_for_quantized_and_fp32_for_fp16() {
+        let hw = HwInputs {
+            bw_gbps: 20.0,
+            flops_gflops: 500.0,
+            int8_gops: Some(1000.0),
+        };
+        // 2 x 1e9 x 512 / 1000e9 x 1000 = 1024 ms, no dequant penalty.
+        let q4 = hw
+            .predict_prefill_ms(1_000_000_000, 512, Quant::Q4_K_M)
+            .expect("q4");
+        assert!((q4 - 1024.0).abs() < 1e-6, "got {q4}");
+        // fp16 stays on the 500 GFLOPS FP32 path: 2048 ms.
+        let fp16 = hw
+            .predict_prefill_ms(1_000_000_000, 512, Quant::Fp16)
+            .expect("fp16");
+        assert!((fp16 - 2048.0).abs() < 1e-6, "got {fp16}");
+        // No measurement: FP32 ceiling plus the heuristic penalty.
+        let none = HwInputs {
+            int8_gops: None,
+            ..hw
+        };
+        let q8 = none
+            .predict_prefill_ms(1_000_000_000, 512, Quant::Q8_0)
+            .expect("q8");
+        assert!((q8 - 2048.0 * 1.15).abs() < 1e-6, "got {q8}");
+    }
+
+    #[test]
     fn canned_q4_k_m_135m_on_20_gbps() {
         // 20e9 / (135e6 × 0.6) = 246.91358 tok/s.
         let tps = predict_decode_tps(135_000_000, 0.6, 20.0).expect("valid inputs");
@@ -162,6 +216,7 @@ mod tests {
         let hw = HwInputs {
             bw_gbps: 20.0,
             flops_gflops: 50.0,
+            int8_gops: None,
         };
         let via_method = hw.predict_decode_tps(135_000_000, 0.6).expect("valid");
         let via_fn = predict_decode_tps(135_000_000, 0.6, 20.0).expect("valid");

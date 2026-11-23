@@ -102,6 +102,7 @@ mod tests {
             HwInputs {
                 bw_gbps: 20.0,
                 flops_gflops: 50.0,
+                int8_gops: None,
             },
             Some(16e9),
             vec![ranked(246.913_58), ranked(114.1)],
@@ -184,6 +185,7 @@ mod tests {
             HwInputs {
                 bw_gbps: 20.0,
                 flops_gflops: 50.0,
+                int8_gops: None,
             },
             Some(16e9),
             vec![ranked(f64::NEG_INFINITY)],
@@ -229,6 +231,7 @@ mod tests {
             HwInputs {
                 bw_gbps: 20.0,
                 flops_gflops: 50.0,
+                int8_gops: None,
             },
             Some(16e9),
             vec![config],
@@ -294,6 +297,7 @@ mod tests {
             HwInputs {
                 bw_gbps: 20.0,
                 flops_gflops: 50.0,
+                int8_gops: None,
             },
             Some(16e9),
             vec![config],
