@@ -135,8 +135,8 @@ pub enum Command {
         json: bool,
     },
     /// Serve a tuned profile through llama-server behind an OpenAI-compatible
-    /// proxy (M5 slice 2: profile validation + spawn + health check + proxy;
-    /// metrics land in slice 3, `--api-key` enforcement in slice 4).
+    /// proxy (M5 slices 2-3: profile validation + spawn + health check + proxy +
+    /// `/v1/metrics`; `--api-key` enforcement in slice 4).
     Serve {
         /// Profile JSON written by `attune tune --save`
         #[arg(long, value_name = "PATH")]

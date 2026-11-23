@@ -51,6 +51,7 @@ pub fn run(
         listen: listen.to_string(),
         listen_port,
         upstream_base: format!("http://{}", serving.upstream),
+        upstream_pid: Some(serving.guard.pid()),
     };
     let proxy = Proxy::bind(&proxy_config)?;
     let proxy_url = format!("http://{}", proxy.local_addr());

@@ -16,9 +16,14 @@
 //!   a flag that closes the listener; dropping [`Serving`] then kills and reaps
 //!   `llama-server` through [`attune_backend::ServerGuard`].
 //!
-//! Metrics and `--api-key` enforcement are later slices.
+//! Slice 3 adds **proxy-measured metrics** ([`metrics`]): TTFT, TPOT, tok/s and
+//! request counters over a bounded window, served by the proxy itself at
+//! `GET /v1/metrics` (JSON) and `GET /metrics` (Prometheus text).
+//!
+//! `--api-key` enforcement is a later slice.
 
 pub mod launcher;
+pub mod metrics;
 pub mod proxy;
 pub mod server;
 pub mod shutdown;

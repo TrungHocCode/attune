@@ -79,6 +79,25 @@ pub fn detect() -> Result<MemoryInfo, HalError> {
     })
 }
 
+/// Live available RAM in bytes (cheap: refreshes memory only). `0` if unknown.
+pub fn available_bytes() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    sys.available_memory()
+}
+
+/// Resident set size of process `pid` in bytes, or `None` if it is gone.
+pub fn process_rss_bytes(pid: u32) -> Option<u64> {
+    let pid = sysinfo::Pid::from_u32(pid);
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_memory(),
+    );
+    sys.process(pid).map(sysinfo::Process::memory)
+}
+
 /// Best-effort probe for DRAM speed (MT/s) and DIMM count.
 ///
 /// On Windows we shell out to PowerShell and parse
