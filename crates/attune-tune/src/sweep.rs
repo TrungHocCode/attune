@@ -219,8 +219,8 @@ pub fn prune(
 ///   (file size for a GGUF source) plus the KV cache read at the expected
 ///   filled length `prompt_tokens + gen_tokens / 2` (capped at `n_ctx`), using
 ///   each config's own KV cache element size; no `Arch` means no KV term;
-/// - TTFT is [`predict_prefill_ms_quant`] for the full `n_ctx` window, the
-///   worst-case prefill available without a separate prompt-length input;
+/// - TTFT is [`predict_prefill_ms_quant`] for the prompt (`prompt_tokens`,
+///   clamped to `n_ctx`), the same model `attune estimate` uses;
 /// - RAM fit and the near-ceiling score penalty count weights plus the KV
 ///   cache for the full `n_ctx` window.
 ///
@@ -254,7 +254,11 @@ pub fn rank_by_estimate(
             kv_per_token,
             kv_filled_tokens(prompt_tokens, gen_tokens, config.n_ctx),
         )?;
-        let ttft_ms = hw.predict_prefill_ms(model.params, u64::from(config.n_ctx), config.quant)?;
+        let ttft_ms = hw.predict_prefill_ms(
+            model.params,
+            prompt_tokens.min(u64::from(config.n_ctx)),
+            config.quant,
+        )?;
         let fit = RamFit::new(
             weight_bytes,
             kv_per_token * f64::from(config.n_ctx),
@@ -302,18 +306,19 @@ pub fn calibrate_ranked(
     calibration: &BenchCalibration,
     bench_quant: Option<Quant>,
     objective: Objective,
+    prompt_tokens: u64,
 ) -> Vec<RankedConfig> {
     let mut calibrated: Vec<RankedConfig> = ranked
         .iter()
         .map(|entry| {
-            // `attune tune` predicts TTFT as the full-context prefill, so the
-            // config's `n_ctx` is the prompt length this prediction models.
+            // TTFT is predicted for the prompt clamped to `n_ctx` (see
+            // `rank_by_estimate`); report that as the modelled prompt length.
             let report = calibration.report_for(
                 entry.decode_tps,
                 Some(entry.ttft_ms),
                 bench_quant,
                 entry.config.quant,
-                u64::from(entry.config.n_ctx),
+                prompt_tokens.min(u64::from(entry.config.n_ctx)),
             );
             let decode_tps = report.calibrated_decode_tps;
             let ttft_ms = report.calibrated_prefill_ms_ttft.unwrap_or(entry.ttft_ms);
@@ -447,7 +452,8 @@ mod tests {
     }
 
     #[test]
-    fn latency_rank_prefers_the_smaller_context() {
+    fn ttft_follows_the_prompt_length_and_clamps_to_n_ctx() {
+        let params = 135_000_000;
         let configs = expand_grid(
             &[Quant::Q4_K_M],
             &[4_096, 2_048],
@@ -455,11 +461,31 @@ mod tests {
             &[512],
             &[Quant::Fp16],
         );
-        let ranked =
-            rank_nominal(&configs, 135_000_000, hw(), 16e9, Objective::Latency).expect("rank");
+        let model = TuneModel::nominal(params);
 
+        // Prompt fits in every window: TTFT is the prompt prefill, ctx-independent.
+        let ranked = rank_nominal(&configs, params, hw(), 16e9, Objective::Latency).expect("rank");
+        let want = hw()
+            .predict_prefill_ms(params, 512, Quant::Q4_K_M)
+            .expect("prefill");
+        for entry in &ranked {
+            assert!((entry.ttft_ms - want).abs() < 1e-9, "{}", entry.ttft_ms);
+        }
+
+        // Prompt larger than the smaller window: clamps to n_ctx there only.
+        let ranked = rank_by_estimate(&configs, &model, hw(), 16e9, Objective::Latency, 3_000, 128)
+            .expect("rank");
+        for (n_ctx, tokens) in [(4_096_u32, 3_000_u64), (2_048, 2_048)] {
+            let want = hw()
+                .predict_prefill_ms(params, tokens, Quant::Q4_K_M)
+                .expect("prefill");
+            let entry = ranked
+                .iter()
+                .find(|r| r.config.n_ctx == n_ctx)
+                .expect("config");
+            assert!((entry.ttft_ms - want).abs() < 1e-9, "{}", entry.ttft_ms);
+        }
         assert_eq!(ranked[0].config.n_ctx, 2_048);
-        assert!(ranked[0].score > ranked[1].score);
     }
 
     #[test]
@@ -636,7 +662,8 @@ mod tests {
             fit.inputs.eta_comp
         );
 
-        let calibrated = calibrate_ranked(&raw, &fit, Some(Quant::Fp16), Objective::Throughput);
+        let calibrated =
+            calibrate_ranked(&raw, &fit, Some(Quant::Fp16), Objective::Throughput, 512);
         assert_eq!(calibrated.len(), raw.len());
 
         for entry in &calibrated {
@@ -676,8 +703,7 @@ mod tests {
                 report
                     .warnings
                     .iter()
-                    .any(|warning| warning
-                        == &format!("prompt mismatch 128 vs {}", entry.config.n_ctx)),
+                    .any(|warning| warning == "prompt mismatch 128 vs 512"),
                 "{:?}",
                 report.warnings
             );

@@ -495,7 +495,7 @@ fn print_table(
         );
     } else {
         println!(
-            "Note: estimate-only ranking (decode = weights + filled KV, full-context prefill TTFT); no llama.cpp run."
+            "Note: estimate-only ranking (decode = weights + filled KV, prompt-length prefill TTFT); no llama.cpp run."
         );
     }
     for warning in &report.warnings {
@@ -792,7 +792,7 @@ pub fn run(
             .ok_or_else(|| anyhow!("cannot calibrate an empty ranking"))?;
         let fit = BenchCalibration::fit(bench, reference.decode_tps, Some(reference.ttft_ms), path)
             .map_err(|err| anyhow!("{err}"))?;
-        ranked = calibrate_ranked(&ranked, &fit, bench_quant, objective);
+        ranked = calibrate_ranked(&ranked, &fit, bench_quant, objective, PROMPT_TOKENS);
         // Each config carries its own notices; the human table shows the
         // deduplicated union once instead of one line per row.
         for entry in &ranked {
