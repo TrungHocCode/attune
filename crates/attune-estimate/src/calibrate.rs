@@ -237,8 +237,8 @@ impl BenchCalibration {
     /// Apply the fitted factors to one roofline prediction.
     ///
     /// `estimate_prompt_tokens` is the prompt length this prediction models
-    /// (for `attune tune` that is the config's `n_ctx`, because TTFT is the
-    /// full-context prefill). A quant or prompt mismatch, or an eta sitting
+    /// (for `attune tune` that is the prompt length clamped to the config's
+    /// `n_ctx`). A quant or prompt mismatch, or an eta sitting
     /// exactly on a clamp bound, becomes a `warnings` entry instead of a
     /// silent mis-calibration.
     pub fn report_for(

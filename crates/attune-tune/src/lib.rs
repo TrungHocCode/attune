@@ -14,7 +14,7 @@
 //! never by silently retyping fields.
 //!
 //! **Scope:** decode is the weights-only roofline (no `Arch`, so no KV-cache
-//! term) and TTFT is the prefill of the full `n_ctx` window. RAM fit and the
+//! term) and TTFT is the prefill of the prompt (clamped to `n_ctx`). RAM fit and the
 //! near-ceiling score penalty therefore count weights only. Slice 3 adds
 //! [`export`], which turns the winning config into an `attune-profile`
 //! document; slice 4 adds [`verify`], the optional e2e measurement of the
