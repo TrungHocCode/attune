@@ -321,6 +321,7 @@ mod tests {
             verified: false,
             measured: None,
             calibration: None,
+            grid_index: 0,
         }
     }
 
@@ -351,7 +352,7 @@ mod tests {
         assert_eq!(mapped.threads, 8);
         assert_eq!(mapped.ctx_size, 2_048);
         assert_eq!(mapped.n_batch, 512);
-        assert_eq!(mapped.n_ubatch, 128);
+        assert_eq!(mapped.n_ubatch, 512);
         assert_eq!(mapped.cache_type_k.as_deref(), Some("f16"));
         assert_eq!(mapped.cache_type_v.as_deref(), Some("f16"));
         assert!(mapped.flash_attn);

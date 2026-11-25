@@ -102,7 +102,7 @@ impl TuneConfig {
             n_ctx,
             n_threads,
             n_batch,
-            n_ubatch: default_n_ubatch(),
+            n_ubatch: n_batch.min(512),
             n_gpu_layers: 0,
             mmap: default_true(),
             mlock: false,
@@ -143,9 +143,10 @@ impl TuneConfig {
 
 /// Expand the full slice-2 grid for every supported weight format.
 ///
-/// Axis values are fixed by the M4 plan: threads
-/// `{max(1, cores/2), cores}`, contexts `{2048, 4096}`, prompt batches
-/// `{128, 512}` and KV formats `{fp16, q8_0}`. The loop order — quant, context,
+/// Axis values are fixed by the M4 plan, listed llama.cpp-default first so
+/// score ties resolve to the defaults: threads
+/// `{cores, max(1, cores/2)}`, contexts `{2048, 4096}`, prompt batches
+/// `{512, 128}` and KV formats `{fp16, q8_0}`. The loop order — quant, context,
 /// thread, batch, KV (innermost) — is deterministic, and the list is truncated
 /// at [`FULL_GRID_CAP`]. The second return value is the number of points
 /// dropped by that cap.
@@ -170,10 +171,10 @@ pub fn expand_full_grid_with_quants(
     let thread_axis = if half == cores {
         vec![cores]
     } else {
-        vec![half, cores]
+        vec![cores, half]
     };
     let ctx_axis = [2_048_u32, 4_096];
-    let batch_axis = [128_u32, 512];
+    let batch_axis = [512_u32, 128];
     let kv_axis = [Quant::Fp16, Quant::Q8_0];
 
     let total =
@@ -242,7 +243,7 @@ mod tests {
     #[test]
     fn new_fills_the_launch_defaults() {
         let config = valid();
-        assert_eq!(config.n_ubatch, 128);
+        assert_eq!(config.n_ubatch, valid().n_batch.min(512));
         assert_eq!(config.n_gpu_layers, 0);
         assert!(config.mmap);
         assert!(!config.mlock);
@@ -277,8 +278,8 @@ mod tests {
         assert_eq!(first.len(), 64);
         assert_eq!(first[0].quant, Quant::Fp16);
         assert_eq!(first[0].n_ctx, 2_048);
-        assert_eq!(first[0].n_threads, 4);
-        assert_eq!(first[0].n_batch, 128);
+        assert_eq!(first[0].n_threads, 8);
+        assert_eq!(first[0].n_batch, 512);
         assert_eq!(first[0].cache_kv, Quant::Fp16);
         assert!(first.iter().all(|config| config.n_ctx <= 4_096));
         assert!(first
