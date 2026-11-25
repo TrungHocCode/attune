@@ -154,7 +154,7 @@ mod tests {
         assert_eq!(profile.model.size_bytes, 82_600_000);
         assert_eq!(profile.load_config.n_ctx, 2_048);
         assert_eq!(profile.load_config.n_batch, 512);
-        assert_eq!(profile.load_config.n_ubatch, 128);
+        assert_eq!(profile.load_config.n_ubatch, 512);
         assert_eq!(profile.load_config.cache_type_k, "f16");
         assert_eq!(profile.load_config.cache_type_v, "f16");
         assert_eq!(profile.compute_config.n_threads, 8);

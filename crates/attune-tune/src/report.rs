@@ -91,6 +91,7 @@ mod tests {
             verified: false,
             measured: None,
             calibration: None,
+            grid_index: 0,
         }
     }
 

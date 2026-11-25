@@ -911,6 +911,7 @@ mod tests {
             verified: false,
             measured: None,
             calibration: None,
+            grid_index: 0,
         };
         let hw = HwInputs {
             bw_gbps: 20.0,
