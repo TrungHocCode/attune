@@ -179,6 +179,166 @@ pub fn parse_catalog(text: &str) -> Result<Catalog, EstimateError> {
     Ok(catalog)
 }
 
+/// Where the daily GitHub Action publishes the catalog.
+pub const CATALOG_URL: &str =
+    "https://raw.githubusercontent.com/TrungHocCode/attune/catalog/catalog.json";
+/// Cached catalog inside the attune home dir.
+pub const CACHE_FILE: &str = "catalog.json";
+/// When the cached catalog was fetched (`{"fetched_at": <unix secs>}`).
+pub const CACHE_META_FILE: &str = "catalog.meta.json";
+/// A cached catalog younger than this is used without a network call.
+pub const FRESH_SECS: u64 = 24 * 60 * 60;
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Built-in catalog: the floor when there is no network and no usable cache.
+pub const SNAPSHOT: &str = include_str!("../../../../catalog/snapshot.json");
+
+/// Which source a loaded catalog came from (shown to the user).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogOrigin {
+    FreshCache,
+    Fetched,
+    StaleCache,
+    Snapshot,
+}
+
+impl CatalogOrigin {
+    /// Short human label for report footers.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FreshCache => "cached",
+            Self::Fetched => "updated",
+            Self::StaleCache => "cached, offline",
+            Self::Snapshot => "built-in, offline",
+        }
+    }
+}
+
+/// A catalog plus where it came from.
+#[derive(Debug, Clone)]
+pub struct LoadedCatalog {
+    pub catalog: Catalog,
+    pub origin: CatalogOrigin,
+    /// `generated_at` date (`YYYY-MM-DD`).
+    pub date: String,
+    pub warnings: Vec<String>,
+}
+
+/// Load the catalog: fresh cache → network → stale cache → built-in snapshot.
+/// Never fails; the snapshot is always there.
+pub fn load_catalog(refresh: bool) -> LoadedCatalog {
+    let fetch = || {
+        attune_fetch::fetch_text(
+            CATALOG_URL,
+            &attune_fetch::HostPolicy::production(),
+            FETCH_TIMEOUT,
+        )
+        .map_err(|err| err.to_string())
+    };
+    match attune_fetch::home_dir() {
+        Ok(home) => load_catalog_at(&home, refresh, unix_now(), &fetch),
+        Err(err) => {
+            let mut loaded = snapshot();
+            loaded
+                .warnings
+                .push(format!("{err}; using the built-in catalog"));
+            loaded
+        }
+    }
+}
+
+/// [`load_catalog`] with an explicit home dir, clock and fetcher (tests).
+pub fn load_catalog_at(
+    home: &std::path::Path,
+    refresh: bool,
+    now_unix: u64,
+    fetch: &dyn Fn() -> Result<String, String>,
+) -> LoadedCatalog {
+    let cache_path = home.join(CACHE_FILE);
+    let mut warnings = Vec::new();
+    let cached = match std::fs::read_to_string(&cache_path) {
+        Ok(text) => match parse_catalog(&text) {
+            Ok(catalog) => Some(catalog),
+            Err(err) => {
+                warnings.push(format!("ignoring {}: {err}", cache_path.display()));
+                None
+            }
+        },
+        Err(_) => None,
+    };
+    let fetched_at = std::fs::read_to_string(home.join(CACHE_META_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|meta| meta.get("fetched_at")?.as_u64());
+
+    if let (Some(catalog), Some(at), false) = (&cached, fetched_at, refresh) {
+        if now_unix.saturating_sub(at) < FRESH_SECS {
+            return loaded(catalog.clone(), CatalogOrigin::FreshCache, warnings);
+        }
+    }
+    match fetch().and_then(|text| {
+        parse_catalog(&text)
+            .map(|c| (c, text))
+            .map_err(|e| e.to_string())
+    }) {
+        Ok((catalog, text)) => {
+            let meta = format!(r#"{{"fetched_at": {now_unix}}}"#);
+            if let Err(err) = std::fs::write(&cache_path, text)
+                .and_then(|()| std::fs::write(home.join(CACHE_META_FILE), meta))
+            {
+                warnings.push(format!("could not cache the catalog: {err}"));
+            }
+            return loaded(catalog, CatalogOrigin::Fetched, warnings);
+        }
+        Err(err) => warnings.push(format!("catalog update failed ({err})")),
+    }
+    match cached {
+        Some(catalog) => loaded(catalog, CatalogOrigin::StaleCache, warnings),
+        None => {
+            let mut loaded = snapshot();
+            loaded.warnings.splice(0..0, warnings);
+            loaded
+        }
+    }
+}
+
+fn snapshot() -> LoadedCatalog {
+    match parse_catalog(SNAPSHOT) {
+        Ok(catalog) => loaded(catalog, CatalogOrigin::Snapshot, Vec::new()),
+        // A broken snapshot is a build bug; the unit test pins it.
+        Err(err) => LoadedCatalog {
+            catalog: Catalog {
+                schema: SCHEMA.to_string(),
+                generated_at: String::new(),
+                llama_cpp: LlamaPin {
+                    tag: String::new(),
+                    assets: Vec::new(),
+                },
+                models: Vec::new(),
+            },
+            origin: CatalogOrigin::Snapshot,
+            date: String::new(),
+            warnings: vec![format!("built-in catalog is invalid: {err}")],
+        },
+    }
+}
+
+fn loaded(catalog: Catalog, origin: CatalogOrigin, warnings: Vec<String>) -> LoadedCatalog {
+    let date = catalog.generated_at.chars().take(10).collect();
+    LoadedCatalog {
+        catalog,
+        origin,
+        date,
+        warnings,
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
@@ -253,6 +413,115 @@ mod tests {
         let empty_files = catalog(SCHEMA, &[model("a", SHA_A)])
             .replace(r#""files": ["#, r#""files": [], "unused": ["#);
         assert!(parse_catalog(&empty_files).is_err(), "{empty_files}");
+    }
+
+    fn temp_home(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("attune-cat-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    const NOW: u64 = 1_800_000_000;
+    const HOUR: u64 = 3600;
+
+    fn seed_cache(home: &std::path::Path, text: &str, fetched_at: u64) {
+        std::fs::write(home.join(CACHE_FILE), text).expect("cache");
+        std::fs::write(
+            home.join(CACHE_META_FILE),
+            format!(r#"{{"fetched_at": {fetched_at}}}"#),
+        )
+        .expect("meta");
+    }
+
+    fn remote() -> String {
+        catalog(SCHEMA, &[model("remote-model", SHA_A)])
+    }
+
+    #[test]
+    fn snapshot_parses_and_has_every_tier() {
+        let snapshot = parse_catalog(SNAPSHOT).expect("snapshot parses");
+        let tiers = [
+            (0, 2_000_000_000),
+            (2_000_000_000, 5_000_000_000),
+            (5_000_000_000, 10_000_000_000),
+            (10_000_000_000, u64::MAX),
+        ];
+        for (lo, hi) in tiers {
+            assert!(
+                snapshot
+                    .models
+                    .iter()
+                    .any(|m| m.params >= lo && m.params < hi),
+                "no model in tier {lo}..{hi}"
+            );
+        }
+        assert!(snapshot.models.iter().all(|m| !m.gated));
+    }
+
+    #[test]
+    fn fresh_cache_is_used_without_fetching() {
+        let home = temp_home("fresh");
+        seed_cache(&home, &remote(), NOW - HOUR);
+        let loaded = load_catalog_at(&home, false, NOW, &|| panic!("must not fetch"));
+        assert_eq!(loaded.origin, CatalogOrigin::FreshCache);
+        assert_eq!(loaded.catalog.models[0].id, "remote-model");
+    }
+
+    #[test]
+    fn stale_cache_triggers_fetch_and_rewrites_cache() {
+        let home = temp_home("stale");
+        seed_cache(
+            &home,
+            &catalog(SCHEMA, &[model("old", SHA_A)]),
+            NOW - 30 * HOUR,
+        );
+        let loaded = load_catalog_at(&home, false, NOW, &|| Ok(remote()));
+        assert_eq!(loaded.origin, CatalogOrigin::Fetched);
+        let cached = std::fs::read_to_string(home.join(CACHE_FILE)).expect("cache");
+        assert!(cached.contains("remote-model"));
+        let again = load_catalog_at(&home, false, NOW + HOUR, &|| panic!("fresh now"));
+        assert_eq!(again.origin, CatalogOrigin::FreshCache);
+    }
+
+    #[test]
+    fn offline_falls_back_to_stale_cache_then_snapshot() {
+        let home = temp_home("offline");
+        seed_cache(&home, &remote(), NOW - 30 * HOUR);
+        let loaded = load_catalog_at(&home, false, NOW, &|| Err("offline".to_string()));
+        assert_eq!(loaded.origin, CatalogOrigin::StaleCache);
+        assert!(!loaded.warnings.is_empty());
+
+        let empty = temp_home("offline-empty");
+        let loaded = load_catalog_at(&empty, false, NOW, &|| Err("offline".to_string()));
+        assert_eq!(loaded.origin, CatalogOrigin::Snapshot);
+    }
+
+    #[test]
+    fn corrupt_or_newer_schema_cache_falls_back() {
+        for (tag, text) in [
+            ("corrupt", "{oops".to_string()),
+            ("newer", catalog("attune-catalog/2", &[model("x", SHA_A)])),
+        ] {
+            let home = temp_home(tag);
+            seed_cache(&home, &text, NOW - HOUR);
+            let loaded = load_catalog_at(&home, false, NOW, &|| Err("offline".to_string()));
+            assert_eq!(loaded.origin, CatalogOrigin::Snapshot, "{tag}");
+            assert!(
+                loaded.warnings.iter().any(|w| w.contains(CACHE_FILE)),
+                "{tag}: {:?}",
+                loaded.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn refresh_forces_fetch_even_when_fresh() {
+        let home = temp_home("refresh");
+        seed_cache(&home, &catalog(SCHEMA, &[model("old", SHA_A)]), NOW - HOUR);
+        let loaded = load_catalog_at(&home, true, NOW, &|| Ok(remote()));
+        assert_eq!(loaded.origin, CatalogOrigin::Fetched);
+        assert_eq!(loaded.catalog.models[0].id, "remote-model");
     }
 
     #[test]

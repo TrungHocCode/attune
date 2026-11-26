@@ -1,0 +1,161 @@
+{
+  "schema": "attune-catalog/1",
+  "generated_at": "2026-11-26T00:00:00Z",
+  "llama_cpp": {
+    "tag": "b11804",
+    "assets": [
+      {
+        "os": "windows",
+        "arch": "x86_64",
+        "variant": "cpu",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-cpu-x64.zip",
+        "size": 24067910,
+        "sha256": "3a3e417a0816329829081bdd443e3045ff3b2dbe866fcef89a1d919e941ce23f"
+      },
+      {
+        "os": "linux",
+        "arch": "x86_64",
+        "variant": "cpu",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-ubuntu-x64.tar.gz",
+        "size": 22331121,
+        "sha256": "bb800fbd5e905fb8b9887c9a6cb0ab4f14c7267c5f99302874521e7558b0613f"
+      }
+    ]
+  },
+  "models": [
+    {
+      "id": "smollm2-135m-instruct",
+      "display": "SmolLM2 135M Instruct",
+      "publisher": "HuggingFaceTB",
+      "license": "apache-2.0",
+      "released": "2024-10-31",
+      "gated": false,
+      "params": 134515008,
+      "arch": { "n_layer": 30, "n_kv_heads": 3, "head_dim": 64 },
+      "ctx_default": 8192,
+      "files": [
+        { "quant": "q4_k_m", "repo": "bartowski/SmolLM2-135M-Instruct-GGUF", "file": "SmolLM2-135M-Instruct-Q4_K_M.gguf", "revision": "09816acd5d99df7be770d85ea30822623dab342c", "size": 105454432, "sha256": "2e8040ceae7815abe0dcb3540b9995eaa1fa0d2ca9e797d0a635ae4433c68c2d" },
+        { "quant": "q8_0", "repo": "bartowski/SmolLM2-135M-Instruct-GGUF", "file": "SmolLM2-135M-Instruct-Q8_0.gguf", "revision": "09816acd5d99df7be770d85ea30822623dab342c", "size": 144811360, "sha256": "5a1395716f7913741cc51d98581b9b1228d80987a9f7d3664106742eb06bba83" }
+      ]
+    },
+    {
+      "id": "smollm2-360m-instruct",
+      "display": "SmolLM2 360M Instruct",
+      "publisher": "HuggingFaceTB",
+      "license": "apache-2.0",
+      "released": "2024-10-31",
+      "gated": false,
+      "params": 361821120,
+      "arch": { "n_layer": 32, "n_kv_heads": 5, "head_dim": 64 },
+      "ctx_default": 8192,
+      "files": [
+        { "quant": "q4_k_m", "repo": "bartowski/SmolLM2-360M-Instruct-GGUF", "file": "SmolLM2-360M-Instruct-Q4_K_M.gguf", "revision": "7be6f65f1db715fe5dc5a4634c0d459b4eed42ec", "size": 270590880, "sha256": "2fa3f013dcdd7b99f9b237717fa0b12d75bbb89984cc1274be1471a465bac9c2" },
+        { "quant": "q8_0", "repo": "bartowski/SmolLM2-360M-Instruct-GGUF", "file": "SmolLM2-360M-Instruct-Q8_0.gguf", "revision": "7be6f65f1db715fe5dc5a4634c0d459b4eed42ec", "size": 386405280, "sha256": "c004ac34cce45e03e4452bca472535bc371fcb0d07ae560bba2c57ce4a284b7b" }
+      ]
+    },
+    {
+      "id": "qwen3-0.6b",
+      "display": "Qwen3 0.6B",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-04-27",
+      "gated": false,
+      "params": 596049920,
+      "arch": { "n_layer": 28, "n_kv_heads": 8, "head_dim": 128 },
+      "ctx_default": 40960,
+      "files": [
+        { "quant": "q8_0", "repo": "Qwen/Qwen3-0.6B-GGUF", "file": "Qwen3-0.6B-Q8_0.gguf", "revision": "23749fefcc72300e3a2ad315e1317431b06b590a", "size": 639446688, "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031" }
+      ]
+    },
+    {
+      "id": "qwen3-4b-instruct-2507",
+      "display": "Qwen3 4B Instruct 2507",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-08-05",
+      "gated": false,
+      "params": 4022468096,
+      "arch": { "n_layer": 36, "n_kv_heads": 8, "head_dim": 128 },
+      "ctx_default": 262144,
+      "files": [
+        { "quant": "q4_k_m", "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF", "file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf", "revision": "a06e946bb6b655725eafa393f4a9745d460374c9", "size": 2497281120, "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597" },
+        { "quant": "q8_0", "repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF", "file": "Qwen3-4B-Instruct-2507-Q8_0.gguf", "revision": "a06e946bb6b655725eafa393f4a9745d460374c9", "size": 4280405600, "sha256": "391c1e410fd9f4cf2de2b510273b56a84c19ce18f4fa3bfb3774031dac4ef068" }
+      ]
+    },
+    {
+      "id": "phi-4-mini-instruct",
+      "display": "Phi-4 mini Instruct",
+      "publisher": "microsoft",
+      "license": "mit",
+      "released": "2025-02-19",
+      "gated": false,
+      "params": 3836021856,
+      "arch": { "n_layer": 32, "n_kv_heads": 8, "head_dim": 128 },
+      "ctx_default": 131072,
+      "files": [
+        { "quant": "q4_k_m", "repo": "bartowski/microsoft_Phi-4-mini-instruct-GGUF", "file": "microsoft_Phi-4-mini-instruct-Q4_K_M.gguf", "revision": "7ff82c2aaa4dde30121698a973765f39be5288c0", "size": 2491874688, "sha256": "01999f17c39cc3074afae5e9c539bc82d45f2dd7faa3917c66cbef76fce8c0c2" },
+        { "quant": "q8_0", "repo": "bartowski/microsoft_Phi-4-mini-instruct-GGUF", "file": "microsoft_Phi-4-mini-instruct-Q8_0.gguf", "revision": "7ff82c2aaa4dde30121698a973765f39be5288c0", "size": 4084611456, "sha256": "a12f242c4ee379b9da91673e5d78b30bfacfe4fd86a0b2259d2ecad5d93cb6c7" }
+      ]
+    },
+    {
+      "id": "qwen3-8b",
+      "display": "Qwen3 8B",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-04-27",
+      "gated": false,
+      "params": 8190735360,
+      "arch": { "n_layer": 36, "n_kv_heads": 8, "head_dim": 128 },
+      "ctx_default": 40960,
+      "files": [
+        { "quant": "q4_k_m", "repo": "Qwen/Qwen3-8B-GGUF", "file": "Qwen3-8B-Q4_K_M.gguf", "revision": "7c41481f57cb95916b40956ab2f0b139b296d974", "size": 5027783488, "sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785" },
+        { "quant": "q8_0", "repo": "Qwen/Qwen3-8B-GGUF", "file": "Qwen3-8B-Q8_0.gguf", "revision": "7c41481f57cb95916b40956ab2f0b139b296d974", "size": 8709518112, "sha256": "408b955510e196121c1c375201744783b5c9a43c7956d73fc78df54c66e883d6" }
+      ]
+    },
+    {
+      "id": "qwen2.5-7b-instruct",
+      "display": "Qwen2.5 7B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-09-16",
+      "gated": false,
+      "params": 7615616512,
+      "arch": { "n_layer": 28, "n_kv_heads": 4, "head_dim": 128 },
+      "ctx_default": 32768,
+      "files": [
+        { "quant": "q4_k_m", "repo": "bartowski/Qwen2.5-7B-Instruct-GGUF", "file": "Qwen2.5-7B-Instruct-Q4_K_M.gguf", "revision": "8911e8a47f92bac19d6f5c64a2e2095bd2f7d031", "size": 4683074240, "sha256": "65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423" },
+        { "quant": "q8_0", "repo": "bartowski/Qwen2.5-7B-Instruct-GGUF", "file": "Qwen2.5-7B-Instruct-Q8_0.gguf", "revision": "8911e8a47f92bac19d6f5c64a2e2095bd2f7d031", "size": 8098525888, "sha256": "9c6a6e61664446321d9c0dd7ee28a0d03914277609e21bc0e1fce4abe780ce1b" }
+      ]
+    },
+    {
+      "id": "mistral-7b-instruct-v0.3",
+      "display": "Mistral 7B Instruct v0.3",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2024-05-22",
+      "gated": false,
+      "params": 7248023552,
+      "arch": { "n_layer": 32, "n_kv_heads": 8, "head_dim": 128 },
+      "ctx_default": 32768,
+      "files": [
+        { "quant": "q4_k_m", "repo": "bartowski/Mistral-7B-Instruct-v0.3-GGUF", "file": "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf", "revision": "61fd4167fff3ab01ee1cfe0da183fa27a944db48", "size": 4372812000, "sha256": "1270d22c0fbb3d092fb725d4d96c457b7b687a5f5a715abe1e818da303e562b6" },
+        { "quant": "q8_0", "repo": "bartowski/Mistral-7B-Instruct-v0.3-GGUF", "file": "Mistral-7B-Instruct-v0.3-Q8_0.gguf", "revision": "61fd4167fff3ab01ee1cfe0da183fa27a944db48", "size": 7702565088, "sha256": "404857e776114baada71a08ebd3bba79d721ec7fca99705e7e7b892ae8bc583f" }
+      ]
+    },
+    {
+      "id": "qwen2.5-14b-instruct",
+      "display": "Qwen2.5 14B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-09-16",
+      "gated": false,
+      "params": 14770033664,
+      "arch": { "n_layer": 48, "n_kv_heads": 8, "head_dim": 128 },
+      "ctx_default": 32768,
+      "files": [
+        { "quant": "q4_k_m", "repo": "bartowski/Qwen2.5-14B-Instruct-GGUF", "file": "Qwen2.5-14B-Instruct-Q4_K_M.gguf", "revision": "05244aa5d871c661c80082a15d3bce44714d068d", "size": 8988110976, "sha256": "e47ad95dad6ff848b431053b375adb5d39321290ea2c638682577dafca87c008" },
+        { "quant": "q8_0", "repo": "bartowski/Qwen2.5-14B-Instruct-GGUF", "file": "Qwen2.5-14B-Instruct-Q8_0.gguf", "revision": "05244aa5d871c661c80082a15d3bce44714d068d", "size": 15701598336, "sha256": "23ca481b8226b2492ba8f3eb7af41e0f99d8605c16fb6dec7bc5cf6716b673cf" }
+      ]
+    }
+  ]
+}

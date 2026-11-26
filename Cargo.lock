@@ -106,6 +106,7 @@ name = "attune-estimate"
 version = "0.5.0"
 dependencies = [
  "attune-bench",
+ "attune-fetch",
  "serde",
  "serde_json",
  "thiserror",
