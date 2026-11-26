@@ -3,6 +3,7 @@
 
 mod bench;
 mod detect;
+mod download;
 mod estimate;
 mod recommend;
 mod serve;
@@ -170,6 +171,9 @@ pub enum Command {
         /// Launch without validating the profile against this machine
         #[arg(long)]
         force: bool,
+        /// Download the profile's model without asking when it is missing
+        #[arg(long)]
+        yes: bool,
         /// Print one machine-readable JSON line once the upstream is healthy
         /// (the proxy address is printed on stderr)
         #[arg(long)]
@@ -344,6 +348,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             api_key,
             timeout_s,
             force,
+            yes,
             json,
         } => serve::run(
             &profile,
@@ -355,6 +360,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             api_key.as_deref(),
             timeout_s,
             force,
+            yes,
             json,
         ),
         Command::Tune {

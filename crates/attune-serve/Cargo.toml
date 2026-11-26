@@ -9,6 +9,8 @@ description = "Profile launcher and health check for Attune (M5)"
 # the backend adapter + the profile schema. attune-hal supplies the live
 # fingerprint inputs and available RAM for profile validation.
 attune-backend = { path = "../attune-backend" }
+# The attune home dir that `~/.attune/` model paths expand against (M6).
+attune-fetch = { path = "../attune-fetch" }
 attune-profile = { path = "../attune-profile" }
 attune-hal = { path = "../attune-hal" }
 serde = { version = "1", features = ["derive"] }

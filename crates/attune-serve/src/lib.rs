@@ -33,7 +33,8 @@ pub mod server;
 pub mod shutdown;
 
 pub use launcher::{
-    fingerprint_of, launch, prepare_profile, PreparedProfile, ReadyReport, ServeOptions, Serving,
+    fingerprint_of, launch, prepare_profile, resolve_model_file, DownloadConsent, PreparedProfile,
+    ReadyReport, ServeOptions, Serving,
 };
 pub use server::{check_listen, Proxy, ProxyConfig};
 pub use shutdown::{install_shutdown, ShutdownSignal};

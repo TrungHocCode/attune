@@ -730,18 +730,14 @@ pub fn run(
 
     // `--verify` can only measure a real file: a catalog name or `--params`
     // has no GGUF for llama.cpp to load. Fail before the hardware probes.
-    let verify_model = if verify.enabled {
+    // A catalog id is downloaded (after consent) once it is resolved below.
+    let mut verify_model = if verify.enabled {
         let Some(requested) = model else {
             return Err(anyhow!(
-                "--verify requires --model <PATH> to an existing local .gguf file"
+                "--verify requires --model: a local .gguf file or a catalog model"
             ));
         };
-        let path = as_gguf_path(requested).ok_or_else(|| {
-            anyhow!(
-                "--verify requires --model to be an existing local .gguf file (got `{requested}`)"
-            )
-        })?;
-        Some(path.to_path_buf())
+        as_gguf_path(requested).map(Path::to_path_buf)
     } else {
         None
     };
@@ -752,6 +748,25 @@ pub fn run(
     } else {
         Some(resolve_model(model, params, arch, quants[0])?)
     };
+    if verify.enabled && verify_model.is_none() {
+        let Some(source) = resolution.as_ref().and_then(|r| r.source.as_ref()) else {
+            return Err(anyhow!(
+                "--verify needs a model file: pass a local .gguf path or a catalog model id"
+            ));
+        };
+        let home = attune_fetch::home_dir().map_err(|err| anyhow!("{err}"))?;
+        let path = attune_profile::expand_home(&source.home_path(), &home);
+        let mut profile = attune_profile::Profile::default();
+        profile.model.path = source.home_path();
+        profile.model.source = Some(source.clone());
+        attune_serve::resolve_model_file(
+            &mut profile,
+            &home,
+            super::download::consent_for_stdin(false),
+            &mut super::download::progress,
+        )?;
+        verify_model = Some(path);
+    }
     if resolution.as_ref().is_some_and(|r| r.source.is_some()) && quants.len() > 1 {
         return Err(anyhow!(
             "a catalog model is tuned at one --quant at a time (each quant is a different file)"

@@ -25,6 +25,7 @@ pub fn run(
     api_key: Option<&str>,
     timeout_s: u64,
     force: bool,
+    yes: bool,
     json: bool,
 ) -> Result<()> {
     // clap's `env` feature is not enabled; read the variable by hand.
@@ -40,6 +41,12 @@ pub fn run(
         port,
         timeout: Duration::from_secs(timeout_s),
         force,
+        download: super::download::consent_for_stdin(yes),
+        progress: if json {
+            super::download::quiet
+        } else {
+            super::download::progress
+        },
     };
     let serving = launch(&options)?;
 

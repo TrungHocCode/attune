@@ -22,6 +22,7 @@
 
 pub mod error;
 pub mod llama_subprocess;
+pub mod models;
 
 #[path = "trait.rs"]
 pub mod backend;
@@ -32,3 +33,4 @@ pub use llama_subprocess::{
     health_is_ok, health_wait, resolve_llama_server, server_args, server_args_with_warnings,
     LlamaServerSource, ServerArgs, ServerGuard, ENV_LLAMA_SERVER, PATH_CANDIDATES,
 };
+pub use models::ensure_model;
