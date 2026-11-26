@@ -934,12 +934,13 @@ pub fn run(
     // that config's estimate score.
     let mut observed_engine_version = None;
     if let Some(model_path) = verify_model.as_deref() {
+        let llama_cli = super::setup::llama_cli_or_installed(verify.llama_cli);
         let outcome = run_verify_topk(
             &ranked,
             objective,
             verify.top_k,
             model_path,
-            llama_explicit(verify.llama_cli)?,
+            llama_explicit(llama_cli.as_deref())?,
             verify.prompt_tokens.unwrap_or(DEFAULT_PROMPT_TOKENS),
             verify.gen_tokens.unwrap_or(DEFAULT_GEN_TOKENS),
             verify.ctx,

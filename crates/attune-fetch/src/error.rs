@@ -15,6 +15,8 @@ pub enum FetchError {
     SizeMismatch { expected: u64, actual: u64 },
     #[error("not enough disk space: need {need} bytes, {free} free")]
     DiskSpace { need: u64, free: u64 },
+    #[error("cannot unpack {path}: {detail}")]
+    Archive { path: PathBuf, detail: String },
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,

@@ -7,6 +7,7 @@ mod download;
 mod estimate;
 mod recommend;
 mod serve;
+mod setup;
 mod tune;
 
 use anyhow::Result;
@@ -15,6 +16,16 @@ use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Download and install the llama.cpp build attune is tested with
+    /// (pinned by the model catalog) into the attune home dir
+    Setup {
+        /// Download without asking
+        #[arg(long)]
+        yes: bool,
+        /// Re-download the model catalog even if the cached copy is fresh
+        #[arg(long)]
+        refresh_catalog: bool,
+    },
     /// Detect hardware (M1: CPU/SIMD/cache/RAM via raw-cpuid + sysinfo)
     Detect {
         /// Output machine-readable JSON instead of pretty table
@@ -284,6 +295,10 @@ pub enum Command {
 pub fn dispatch(command: Command) -> Result<()> {
     match command {
         Command::Detect { json } => detect::run(json),
+        Command::Setup {
+            yes,
+            refresh_catalog,
+        } => setup::run(yes, refresh_catalog),
         Command::Bench {
             quick,
             json,

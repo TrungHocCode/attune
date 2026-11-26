@@ -14,6 +14,10 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 sha2 = "0.10"
 # Already used by attune-hal; free disk space before a multi-GB download.
 sysinfo = "0.36"
+# Unpack the pinned llama.cpp release: Windows ships .zip, Linux .tar.gz.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tar = "0.4"
+flate2 = "1"
 
 [dev-dependencies]
 sha2 = "0.10"
