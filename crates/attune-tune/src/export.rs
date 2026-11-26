@@ -17,7 +17,7 @@ use attune_profile::{now_unix, Fallbacks, LoadConfig, Profile, RamFallback, PROF
 use crate::{tpot_ms_from_tps, TuneConfig};
 
 /// Inputs the CLI supplies that do not come from the swept [`TuneConfig`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ProfileInputs<'a> {
     /// Profile name recorded in the document.
     pub name: &'a str,
@@ -36,6 +36,9 @@ pub struct ProfileInputs<'a> {
     pub ram_peak_gb: f64,
     /// Confidence in the prediction, `0.0..=1.0`.
     pub confidence: f64,
+    /// Download source for a catalog model (profile v2); `None` for a local
+    /// file or `--params`.
+    pub source: Option<attune_profile::ModelSource>,
 }
 
 /// Build a versioned profile from the winning config and its prediction.
@@ -64,6 +67,7 @@ pub fn from_best(
             path: inputs.model_path.to_string(),
             quant: inputs.quant.as_str().to_string(),
             size_bytes: inputs.size_bytes,
+            source: inputs.source.clone(),
         },
         load_config: LoadConfig {
             n_ctx: config.n_ctx,
@@ -141,6 +145,7 @@ mod tests {
             size_bytes: 82_600_000,
             ram_peak_gb: 0.0826,
             confidence: 0.5,
+            source: None,
         }
     }
 
@@ -198,5 +203,24 @@ mod tests {
         );
         assert_eq!(first, second);
         assert_eq!(first, "AMD Ryzen 9 7950X|16|AVX2, AVX-512F|33500000000");
+    }
+
+    #[test]
+    fn source_lands_in_the_profile() {
+        let source = attune_profile::ModelSource {
+            repo: "Qwen/Qwen3-8B-GGUF".to_string(),
+            file: "Qwen3-8B-Q4_K_M.gguf".to_string(),
+            revision: "rev".to_string(),
+            sha256: "d".repeat(64),
+            size: 5,
+        };
+        let mut with_source = inputs();
+        with_source.source = Some(source.clone());
+        let profile = from_best(&config(), 10.0, 100.0, &with_source);
+        assert_eq!(profile.model.source, Some(source));
+        assert_eq!(
+            from_best(&config(), 10.0, 100.0, &inputs()).model.source,
+            None
+        );
     }
 }

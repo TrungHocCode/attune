@@ -22,6 +22,7 @@ use std::path::Path;
 use anyhow::{anyhow, Context, Result};
 use attune_bench::e2e::{DEFAULT_GEN_TOKENS, DEFAULT_PROMPT_TOKENS};
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
+use attune_estimate::model::registry::{load_catalog, CatalogModel};
 use attune_estimate::{
     is_gguf_file, is_hf_id, kv_bytes_per_token, parse_arch, parse_bench_report, parse_model,
     parse_params, parse_quants, probe_gguf_file, resolve_hf_model, weight_bytes_for, Arch,
@@ -29,7 +30,7 @@ use attune_estimate::{
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::HardwareInfo;
-use attune_profile::Profile;
+use attune_profile::{ModelSource, Profile};
 use attune_tune::ProfileInputs;
 use attune_tune::{
     calibrate_ranked, expand_full_grid_with_quants, from_best, hardware_fingerprint, prune,
@@ -77,6 +78,16 @@ pub struct VerifyArgs<'a> {
     pub ctx: Option<u32>,
 }
 
+/// Recommend-mode knobs (`tune` without `--model`/`--params`).
+pub struct RecommendArgs<'a> {
+    /// `--max-ram`: budget to plan against instead of available RAM.
+    pub max_ram: Option<&'a str>,
+    /// `--all`: every model and quant, not just the picks.
+    pub all: bool,
+    /// `--refresh-catalog`: fetch the catalog even when the cache is fresh.
+    pub refresh_catalog: bool,
+}
+
 /// Model inputs resolved from GGUF, fetch/cache, catalog or manual flags.
 struct ModelResolution {
     /// Report label: catalog name, GGUF path or the literal `--params` text.
@@ -91,6 +102,11 @@ struct ModelResolution {
     weight_bytes: Option<u64>,
     /// Every non-fatal notice from resolution.
     warnings: Vec<String>,
+    /// `model.path` for a saved profile when it differs from `label` (a
+    /// catalog model's portable `~/.attune/models/...` path).
+    model_path: Option<String>,
+    /// Download source for a catalog model (profile v2).
+    source: Option<ModelSource>,
 }
 
 /// The path when `--model` is an existing GGUF file (`.gguf` extension or
@@ -110,6 +126,7 @@ fn resolve_model(
     model: Option<&str>,
     params: Option<&str>,
     arch: Option<&str>,
+    quant: Quant,
 ) -> Result<ModelResolution> {
     if let Some(name) = model {
         if let Some(path) = as_gguf_path(name) {
@@ -135,6 +152,8 @@ fn resolve_model(
                 arch: probe.arch,
                 weight_bytes: Some(weight_bytes),
                 warnings,
+                model_path: None,
+                source: None,
             });
         }
 
@@ -147,12 +166,25 @@ fn resolve_model(
                 arch: Some(resolved.arch),
                 weight_bytes: None,
                 warnings: resolved.warnings,
+                model_path: None,
+                source: None,
             });
         }
 
-        let entry = parse_model(name).map_err(|catalog_err| {
+        // Downloadable catalog first (it pins files), then the estimate-only
+        // names such as `llama-3.1-8b`.
+        let loaded = load_catalog(false);
+        let catalog_err = match loaded.catalog.find(name) {
+            Ok(model) => {
+                let mut resolution = resolve_catalog_model(model, quant)?;
+                resolution.warnings.extend(loaded.warnings);
+                return Ok(resolution);
+            }
+            Err(err) => err,
+        };
+        let entry = parse_model(name).map_err(|_| {
             anyhow!(
-                "{catalog_err}; pass --params <SIZE> --arch <NAME> for a model outside the catalog"
+                "{catalog_err}; run `attune tune` without --model to list models, or pass --params <SIZE> --arch <NAME>"
             )
         })?;
         return Ok(ModelResolution {
@@ -162,6 +194,8 @@ fn resolve_model(
             arch: Some(entry.arch),
             weight_bytes: None,
             warnings: Vec::new(),
+            model_path: None,
+            source: None,
         });
     }
 
@@ -177,6 +211,39 @@ fn resolve_model(
         arch,
         weight_bytes: None,
         warnings: Vec::new(),
+        model_path: None,
+        source: None,
+    })
+}
+
+/// Facts and download source for one catalog model at `quant`. The file
+/// does not need to exist: the catalog pins its exact size and shape.
+fn resolve_catalog_model(model: &CatalogModel, quant: Quant) -> Result<ModelResolution> {
+    let file = model.file_for(quant).ok_or_else(|| {
+        let have: Vec<&str> = model.files.iter().map(|f| f.quant.as_str()).collect();
+        anyhow!(
+            "{} has no {} file in the catalog; available: {}",
+            model.id,
+            quant.as_str(),
+            have.join(", ")
+        )
+    })?;
+    let source = ModelSource {
+        repo: file.repo.clone(),
+        file: file.file.clone(),
+        revision: file.revision.clone(),
+        sha256: file.sha256.clone(),
+        size: file.size,
+    };
+    Ok(ModelResolution {
+        label: model.id.clone(),
+        display: format!("{}/{}", model.publisher, model.display),
+        params: model.params,
+        arch: Some(model.arch.to_arch()),
+        weight_bytes: Some(file.size),
+        warnings: Vec::new(),
+        model_path: Some(source.home_path()),
+        source: Some(source),
     })
 }
 
@@ -562,11 +629,15 @@ fn build_profile(
         name,
         fingerprint: &fingerprint,
         engine_version: engine_version.unwrap_or(ENGINE_VERSION_ESTIMATE_ONLY),
-        model_path: &resolution.label,
+        model_path: resolution
+            .model_path
+            .as_deref()
+            .unwrap_or(&resolution.label),
         quant,
         size_bytes,
         ram_peak_gb: size_bytes as f64 / 1e9,
         confidence: ESTIMATE_ONLY_CONFIDENCE,
+        source: resolution.source.clone(),
     };
     Ok(from_best(
         &best.config,
@@ -626,8 +697,14 @@ pub fn run(
     bench_json: Option<&Path>,
     bench_quant: Option<&str>,
     calibrate: bool,
+    recommend_args: RecommendArgs<'_>,
     json: bool,
 ) -> Result<()> {
+    let recommend_mode = model.is_none() && params.is_none();
+    let max_ram = recommend_args
+        .max_ram
+        .map(super::recommend::parse_size)
+        .transpose()?;
     if max_configs == 0 {
         return Err(anyhow!("--max-configs must be > 0"));
     }
@@ -669,8 +746,17 @@ pub fn run(
         None
     };
 
-    let resolution = resolve_model(model, params, arch)?;
     let quants = parse_quants(quant)?;
+    let resolution = if recommend_mode {
+        None
+    } else {
+        Some(resolve_model(model, params, arch, quants[0])?)
+    };
+    if resolution.as_ref().is_some_and(|r| r.source.is_some()) && quants.len() > 1 {
+        return Err(anyhow!(
+            "a catalog model is tuned at one --quant at a time (each quant is a different file)"
+        ));
+    }
     let objective: Objective = objective
         .parse()
         .map_err(|err: TuneError| anyhow!("{err}"))?;
@@ -714,6 +800,16 @@ pub fn run(
         bw_gbps,
         flops_gflops: gflops,
         int8_gops,
+    };
+    let Some(resolution) = resolution else {
+        return super::recommend::run(
+            hw,
+            avail_bytes.or(total_bytes).unwrap_or(0.0),
+            max_ram,
+            recommend_args.all,
+            recommend_args.refresh_catalog,
+            json,
+        );
     };
 
     // Full slice-2 grid (threads/ctx/batch/KV) restricted to the requested
@@ -936,6 +1032,8 @@ mod tests {
             arch: None,
             weight_bytes,
             warnings: Vec::new(),
+            model_path: None,
+            source: None,
         }
     }
 
@@ -977,5 +1075,35 @@ mod tests {
         let profile = build_profile(&report, &res, "n", None).expect("profile");
         assert_eq!(profile.model.size_bytes, 105_454_432);
         assert_eq!(profile.model.path, "m");
+    }
+
+    #[test]
+    fn catalog_id_tune_needs_no_file_and_saves_source() {
+        use attune_estimate::model::registry::{parse_catalog, SNAPSHOT};
+        let catalog = parse_catalog(SNAPSHOT).expect("snapshot");
+        let model = catalog.find("qwen3-4b").expect("prefix");
+        let resolution = resolve_catalog_model(model, Quant::Q4_K_M).expect("resolve");
+        let file = model.file_for(Quant::Q4_K_M).expect("file");
+        assert_eq!(resolution.weight_bytes, Some(file.size));
+        assert_eq!(resolution.params, model.params);
+        assert_eq!(
+            resolution.model_path.as_deref(),
+            Some("~/.attune/models/unsloth/Qwen3-4B-Instruct-2507-GGUF/Qwen3-4B-Instruct-2507-Q4_K_M.gguf")
+        );
+        let source = resolution.source.expect("source");
+        assert_eq!(source.sha256, file.sha256);
+        assert_eq!(source.revision, file.revision);
+    }
+
+    #[test]
+    fn catalog_model_without_the_quant_lists_what_exists() {
+        use attune_estimate::model::registry::{parse_catalog, SNAPSHOT};
+        let catalog = parse_catalog(SNAPSHOT).expect("snapshot");
+        let model = catalog.find("qwen3-0.6b").expect("id");
+        let err = resolve_catalog_model(model, Quant::Q4_K_M)
+            .err()
+            .expect("no q4_k_m file")
+            .to_string();
+        assert!(err.contains("q8_0"), "{err}");
     }
 }

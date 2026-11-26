@@ -4,6 +4,7 @@
 mod bench;
 mod detect;
 mod estimate;
+mod recommend;
 mod serve;
 mod tune;
 
@@ -174,11 +175,12 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Rank candidate inference configs from roofline estimates (M4 slice 1).
-    /// Estimate-only: no llama.cpp run, no file output.
+    /// Without --model/--params: recommend catalog models that suit this
+    /// machine. With them: rank inference configs for that model and
+    /// optionally save the winner as a profile.
     #[command(group(
         ArgGroup::new("model_source")
-            .required(true)
+            .required(false)
             .args(["model", "params"])
     ))]
     Tune {
@@ -258,6 +260,16 @@ pub enum Command {
         /// cross-quant warning can be produced. Used only with `--calibrate`.
         #[arg(long, value_name = "QUANT", requires = "bench_json")]
         bench_quant: Option<String>,
+        /// Recommend mode: RAM budget to plan against instead of the RAM
+        /// available right now, e.g. `4G` (keeps room for other apps)
+        #[arg(long, value_name = "SIZE")]
+        max_ram: Option<String>,
+        /// Recommend mode: show every catalog model and quant
+        #[arg(long)]
+        all: bool,
+        /// Re-download the model catalog even if the cached copy is fresh
+        #[arg(long)]
+        refresh_catalog: bool,
         /// Output machine-readable JSON instead of the human table
         #[arg(long)]
         json: bool,
@@ -365,6 +377,9 @@ pub fn dispatch(command: Command) -> Result<()> {
             bench_json,
             calibrate,
             bench_quant,
+            max_ram,
+            all,
+            refresh_catalog,
             json,
         } => tune::run(
             model.as_deref(),
@@ -388,6 +403,11 @@ pub fn dispatch(command: Command) -> Result<()> {
             bench_json.as_deref(),
             bench_quant.as_deref(),
             calibrate,
+            tune::RecommendArgs {
+                max_ram: max_ram.as_deref(),
+                all,
+                refresh_catalog,
+            },
             json,
         ),
     }
