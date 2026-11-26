@@ -9,6 +9,7 @@
 Cargo.toml (workspace)
 crates/
   attune-hal/       # detect CPU/SIMD/cache/RAM/NUMA/GPU — no dependency on other attune crates
+  attune-fetch/     # ~/.attune home dir, downloads (resume + SHA-256), archive unpack, llama.cpp install lookup — no dependency on other attune crates
   attune-bench/     # measure BW/FLOPS/e2e — depends only on attune-hal
   attune-estimate/  # roofline + calibrate + bottleneck — depends on attune-bench
   attune-tune/      # sweep + score — depends on estimate/bench
@@ -16,6 +17,7 @@ crates/
   attune-backend/   # Backend trait + llama_subprocess (FFI later)
   attune-serve/     # launcher/health/proxy
   attune-cli/       # thin CLI, depends on all, no logic here
+catalog/   # publishers allow-list + built-in snapshot of the model catalog
 docs/ profiles/ models/ tests/ benches/
 ```
 
@@ -46,9 +48,10 @@ cargo run -p attune-cli -- detect
 
 ## 4. Phase Discipline (do NOT jump ahead)
 
-Current phase: **MVP done (M1–M5, v0.5.0) — next phase not started yet**.
+Current phase: **PHASE 6 — RECOMMEND & DOWNLOADS (M6)**.
 - M1 (detect), M2 (bench), M3 (estimate), M4 (tune), M5 (serve) are done and tagged v0.1.0–v0.5.0. M4's target was revised in #103 (no regression vs defaults + calibrated prediction within 15%).
-- Candidates for the next phase: `attune recommend` (hardware-suitability advisor, design doc pending) and M6 GPU (`docs/gpu-plan.md`). Do not start either until its design is approved and this line names it.
+- M6 design approved 2026-11-26: `docs/superpowers/specs/2026-11-26-recommend-design.md` (`tune` without `--model` recommends, daily catalog, `attune setup`, profile `source` + download on `serve`, new `attune-fetch` crate). Plan slices just before starting.
+- M7 GPU (`docs/gpu-plan.md`) comes after M6; do not start it yet.
 - Each task must meet its Acceptance column in plan §8 before marking done.
 
 **Phase-close checklist (mandatory when a milestone finishes):**
