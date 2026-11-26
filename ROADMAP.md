@@ -85,10 +85,10 @@ will deliver before they commit to it.
   41.0-43.3, decode 6.84-6.85 vs 6.05-6.69: **met**. (2) calibrated held-out
   median error decode +0.8% / -2.5%, TTFT -2.8% / -0.2% (4B / 8B, from the
   M3 re-validation): **met**. Uncalibrated (an M3 target, < 25%) is
-  sensitive to machine load: 4B decode +25% today with 3.4 GB RAM free and a
+  sensitive to machine load: 4B decode +25% on 2026-11-25 with 3.4 GB RAM free and a
   busy browser, vs +5.8% on 2026-11-23; 8B -1.5%.
 
-## M5 — Serve 🚧 (current, v0.5.0 planned, MVP)
+## M5 — Serve ✅ (v0.5.0, MVP)
 
 **Goal:** run the winning profile for real.
 
@@ -100,11 +100,20 @@ will deliver before they commit to it.
   uptime, request counts with mean/p50/p95) and `GET /metrics`
   (Prometheus text for Grafana). Binds `127.0.0.1` by default; remote
   needs explicit `--listen` plus `--api-key`.
+- Slices: 1 launch + health (#62), 2 OpenAI proxy + shutdown (#63),
+  3 metrics (#90), 4 api-key + hardening incl. Windows child cleanup
+  (#91, #77).
 - Acceptance: install-to-first-inference under 5 minutes; profile apply
   success > 95%.
-- Slices: 1 launch + health ✅ (#62), 2 OpenAI proxy + shutdown ✅ (#63),
-  3 metrics (#90), 4 api-key + hardening incl. Windows child cleanup
-  (#91, #77), then the acceptance run and v0.5.0.
+- Results 2026-11-24 (main `de096b5`, release build, llama.cpp b11804 CPU,
+  Windows 11, Core 5 210H): **profile apply 20/20 = 100%** (`tune --save`
+  profiles for SmolLM2-135M, Qwen3 0.6B, 4B and 8B Q4_K_M, 5 serve starts
+  each: health, one chat completion answered by the right model, hard kill;
+  ready in 2.8 / 3.3 / 4.8-6.5 / 13.9-17.0 s, llama-server gone ~1.5 s
+  after attune is killed). **Install to first inference 3 min 38 s**: fresh
+  clone, `cargo build --release` (201 s), `tune --save`, `serve`, first
+  Qwen3 4B reply at 218 s. Excludes the Rust toolchain, llama.cpp and model
+  downloads; the cargo registry cache was warm.
 
 ## Estimate accuracy fixes (after M5)
 
