@@ -1,0 +1,19 @@
+[package]
+name = "attune-fetch"
+version.workspace = true
+edition.workspace = true
+description = "Home dir and verified, resumable downloads for Attune (M6)"
+
+# Leaf crate: depends on no other attune crate (AGENTS.md §1).
+[dependencies]
+thiserror = "1"
+# Already used by attune-estimate; sync HTTP client with rustls for HTTPS model
+# and llama.cpp downloads, no async runtime.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# SHA-256 of downloaded files (models, llama.cpp archives) is the integrity check.
+sha2 = "0.10"
+# Already used by attune-hal; free disk space before a multi-GB download.
+sysinfo = "0.36"
+
+[dev-dependencies]
+sha2 = "0.10"
