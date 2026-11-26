@@ -289,8 +289,9 @@ mod tests {
     #[test]
     fn verdicts_follow_headroom() {
         let m = model("m", 1_000_000_000, None, vec![file(Quant::Q4_K_M, GB)]);
-        let ram = recommend(&[m.clone()], hw(), &opts(100e9))[0].ram_bytes as f64;
-        let at = |factor: f64| recommend(&[m.clone()], hw(), &opts(ram * factor))[0].verdict;
+        let ram = recommend(std::slice::from_ref(&m), hw(), &opts(100e9))[0].ram_bytes as f64;
+        let at =
+            |factor: f64| recommend(std::slice::from_ref(&m), hw(), &opts(ram * factor))[0].verdict;
         assert_eq!(at(1.20), Verdict::Fits);
         assert_eq!(at(1.05), Verdict::Tight);
         match at(0.8) {
