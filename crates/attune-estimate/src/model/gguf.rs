@@ -182,6 +182,9 @@ pub fn probe_gguf_file(path: &Path) -> Result<GgufProbe, EstimateError> {
 struct ParsedHeader {
     facts: GgufFacts,
     head_count: u32,
+    /// `<arch>.attention.key_length`: the explicit head dimension. Qwen3
+    /// sets it (128) where `embedding_length / head_count` would give 80.
+    key_length: Option<u32>,
 }
 
 impl ParsedHeader {
@@ -201,6 +204,9 @@ impl ParsedHeader {
     }
 
     fn head_dim(&self) -> Option<u32> {
+        if let Some(key_length) = self.key_length.filter(|&k| k > 0) {
+            return Some(key_length);
+        }
         if self.head_count == 0 || self.facts.embedding_length == 0 {
             return None;
         }
@@ -348,6 +354,7 @@ fn parse_metadata(data: &[u8], derive_params: bool) -> Result<ParsedHeader, Esti
     let context_length = lookup("context_length").and_then(|v| u32::try_from(v).ok());
     let head_count = narrow("attention.head_count", lookup("attention.head_count"))?;
     let head_count_kv = narrow("attention.head_count_kv", lookup("attention.head_count_kv"))?;
+    let key_length = narrow("attention.key_length", lookup("attention.key_length"))?;
 
     Ok(ParsedHeader {
         facts: GgufFacts {
@@ -361,6 +368,7 @@ fn parse_metadata(data: &[u8], derive_params: bool) -> Result<ParsedHeader, Esti
             param_estimate,
         },
         head_count: head_count.unwrap_or(0),
+        key_length,
     })
 }
 
@@ -426,6 +434,7 @@ fn is_integer_fact(key: &str) -> bool {
         || key.ends_with(".context_length")
         || key.ends_with(".attention.head_count")
         || key.ends_with(".attention.head_count_kv")
+        || key.ends_with(".attention.key_length")
 }
 
 /// Infer the catalog entry named in a GGUF file stem.
@@ -882,6 +891,23 @@ mod tests {
         assert_eq!(probe.catalog.map(|entry| entry.name), Some("smollm2-135m"));
         assert_eq!(probe.params(), Some(135_000_000));
         assert_eq!(probe.warning, None);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn explicit_key_length_beats_embedding_over_heads() {
+        // Qwen3-4B: embedding 2560 / 32 heads = 80, but key_length is 128.
+        let mut file = FakeGguf::new(3, 6);
+        file.string("general.architecture", "qwen3");
+        file.u32("qwen3.block_count", 36);
+        file.u32("qwen3.embedding_length", 2560);
+        file.u32("qwen3.attention.head_count", 32);
+        file.u32("qwen3.attention.head_count_kv", 8);
+        file.u32("qwen3.attention.key_length", 128);
+        file.u64("general.parameter_count", 4_022_468_096);
+        let path = write_temp("keylen", "keylen.gguf", file.bytes());
+        let probe = probe_gguf_file(&path).expect("probe");
+        assert_eq!(probe.arch.map(|arch| arch.head_dim), Some(128));
         cleanup(&path);
     }
 
