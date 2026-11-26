@@ -1,8 +1,8 @@
-# GPU Plan (M6 — proposed)
+# GPU Plan (M7 — proposed)
 
 > Status: **proposal, not started.** M5 (serve) closes first, then the open
 > estimate bugs (#69–#75), then this. Nothing here is promised until the
-> M6 slices are planned as issues.
+> M7 slices are planned as issues.
 
 ## Why
 
@@ -41,7 +41,7 @@ market (vLLM/TGI own it).
 5. Serve a GPU profile with a GPU-enabled `llama-server` build, and report
    VRAM in `/v1/metrics`.
 
-## Non-goals (M6)
+## Non-goals (M7)
 
 - Multi-GPU / tensor-parallel split.
 - Apple Metal and Apple Silicon unified memory (stays in "Later").
@@ -121,7 +121,7 @@ bytes_gpu = weights × g/L (+ KV on GPU),  bytes_cpu = the rest
   build is found.
 - `/v1/metrics` adds VRAM used/free when `nvidia-smi` is available.
 
-## Slices (planned as issues when M6 starts)
+## Slices (planned as issues when M7 starts)
 
 1. `detect`: GPU devices via `nvidia-smi` / Vulkan list, JSON additive.
 2. `bench`: full-offload e2e → `eta_gpu`; document a GPU llama.cpp build in
@@ -129,7 +129,7 @@ bytes_gpu = weights × g/L (+ KV on GPU),  bytes_cpu = the rest
 3. `estimate`: partial-offload decode model + VRAM fit check.
 4. `tune` + `profile`: `n_gpu_layers` axis, KV placement, fingerprint +
    migrate.
-5. `serve`: GPU build resolution, VRAM metrics; M6 acceptance.
+5. `serve`: GPU build resolution, VRAM metrics; M7 acceptance.
 
 ## Acceptance (proposed)
 
@@ -150,6 +150,6 @@ Test machine: RTX 4050 Laptop 6 GB + Core 5 210H, llama.cpp CUDA build.
   through Vulkan? This plan picks NVIDIA/CUDA as the measured target and
   Vulkan as best-effort.
 - Does llama.cpp's own auto-offload (`--fit` / default `-ngl` in recent
-  builds) already pick a good split? Measure it first; if it is good, M6
+  builds) already pick a good split? Measure it first; if it is good, M7
   shrinks to "estimate + verify + profile" around it.
 - Which reference models to publish numbers for (fits / does not fit).

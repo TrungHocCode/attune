@@ -77,7 +77,7 @@ will deliver before they commit to it.
   the bandwidth roofline (2026-11-23 re-run on Qwen3 4B: +2.9%, with prefill
   17% slower). It was only ever met on a 135M model whose runs varied by
   35%. Attune's value is the accurate prediction and a profile that never
-  loses to defaults; large speed-ups belong to M6 (GPU layer split).
+  loses to defaults; large speed-ups belong to M7 (GPU layer split).
 - Results 2026-11-25 (llama-bench, 2 alternating rounds x 3 reps, see
   [docs/benchmark-methodology.md](docs/benchmark-methodology.md#acceptance-protocol-m3m4)):
   (1) Qwen3 4B prefill tuned 72.6-72.8 vs defaults 63.6-70.0 tok/s, decode
@@ -122,7 +122,28 @@ bytes), #73, #74 (GGUF facts), #75 (profile metadata), #69 (prefill
 ceiling), #70 (bandwidth probe), then #78 re-validates M3/M4 on 4B+ models.
 The GPU work below builds on this math, so it lands first.
 
-## M6 — GPU (proposed)
+## M6 — Recommend & downloads (next, v0.6.0 planned)
+
+**Goal:** a new user who does not know model names gets a model that suits
+their machine running, with no manual downloads.
+
+- `attune tune` without `--model` lists catalog models that fit this machine
+  (download size, RAM, predicted speed and first reply, fit verdict, one pick
+  per size tier); `--max-ram` keeps a RAM budget.
+- Model catalog regenerated daily by a GitHub Action from trusted Hugging
+  Face publishers (pinned files, sizes, SHA-256), cached locally, with a
+  built-in snapshot for offline use.
+- Profiles record the model `source`; `serve` downloads a missing model
+  after confirmation. `attune setup` installs the pinned llama.cpp build.
+- New leaf crate `attune-fetch` (home dir, resumable verified downloads).
+- Acceptance: zero manual downloads from binary to first reply; uncalibrated
+  predicted decode within 25% on 3 catalog models of different tiers, and
+  every model marked as fitting loads and serves; 7 consecutive days of valid
+  catalogs; works offline; interrupted downloads resume and corrupted files
+  are rejected.
+- Design: [docs/superpowers/specs/2026-11-26-recommend-design.md](docs/superpowers/specs/2026-11-26-recommend-design.md).
+
+## M7 — GPU (proposed)
 
 **Goal:** use the GPU the machine already has, and split the model across
 GPU + CPU when it does not fit in VRAM.
