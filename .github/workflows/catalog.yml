@@ -1,0 +1,55 @@
+name: catalog
+
+# Regenerates the model catalog daily from the Hugging Face API and commits it
+# to the `catalog` branch, which attune reads at
+# https://raw.githubusercontent.com/TrungHocCode/attune/catalog/catalog.json.
+# `attune catalog build` refuses an empty or >30% shrunk result, so a broken
+# run never replaces yesterday's catalog.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: catalog
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p attune-cli
+      - name: Check out the catalog branch
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin catalog >/dev/null; then
+            git fetch --depth=1 origin catalog
+            git worktree add -B catalog out FETCH_HEAD
+          else
+            # First run: start the branch from the built-in snapshot.
+            git worktree add --orphan -b catalog out
+            cp catalog/snapshot.json out/catalog.json
+          fi
+      - name: Regenerate
+        run: >
+          ./target/release/attune catalog build
+          --publishers catalog/publishers.json
+          --previous out/catalog.json
+          --out out/catalog.json
+      - name: Publish
+        working-directory: out
+        run: |
+          git add catalog.json
+          if git diff --cached --quiet; then
+            echo "catalog unchanged"
+            exit 0
+          fi
+          git commit -m "chore(catalog): regenerate $(date -u +%F)"
+          git push origin catalog

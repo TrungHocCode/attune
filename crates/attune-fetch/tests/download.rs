@@ -207,3 +207,25 @@ fn not_enough_disk_space_errors_before_downloading() {
     assert!(matches!(err, FetchError::DiskSpace { .. }), "{err}");
     assert!(server.seen.lock().expect("lock").is_empty());
 }
+
+#[test]
+fn fetch_range_asks_for_a_prefix_and_caps_the_body() {
+    let data = body();
+    let served = data.clone();
+    let server = stub(move |head| {
+        assert!(
+            head.to_ascii_lowercase().contains("range: bytes=0-1023"),
+            "{head}"
+        );
+        // A server that ignores Range still yields only the first `len` bytes.
+        response("200 OK", "", &served)
+    });
+    let got = attune_fetch::fetch_range(
+        &server.url,
+        &HostPolicy::allow_local_for_tests(),
+        1024,
+        std::time::Duration::from_secs(10),
+    )
+    .expect("range");
+    assert_eq!(got, data[..1024]);
+}

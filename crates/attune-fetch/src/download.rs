@@ -151,6 +151,35 @@ pub fn fetch_text(url: &str, policy: &HostPolicy, timeout: Duration) -> Result<S
         })
 }
 
+/// The first `len` bytes of `url` (HTTP Range; a server that ignores Range
+/// is cut off after `len` bytes). Used to read GGUF headers.
+pub fn fetch_range(
+    url: &str,
+    policy: &HostPolicy,
+    len: u64,
+    timeout: Duration,
+) -> Result<Vec<u8>, FetchError> {
+    let response = get_range(url, policy, 0, Some(len), Some(timeout))?;
+    let status = response.status().as_u16();
+    if status != 200 && status != 206 {
+        return Err(FetchError::Http {
+            url: url.to_string(),
+            detail: format!("HTTP {status}"),
+        });
+    }
+    let mut out = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(len)
+        .read_to_end(&mut out)
+        .map_err(|err| FetchError::Http {
+            url: url.to_string(),
+            detail: err.to_string(),
+        })?;
+    Ok(out)
+}
+
 /// Free bytes on the disk holding `path` (longest matching mount point).
 pub fn free_disk_bytes(path: &Path) -> Option<u64> {
     let path = std::path::absolute(path).ok()?;
@@ -170,6 +199,33 @@ fn get(
     from: Option<u64>,
     timeout: Option<Duration>,
 ) -> Result<ureq::http::Response<ureq::Body>, FetchError> {
+    match from {
+        Some(from) => get_range(url, policy, from, None, timeout),
+        None => get_inner(url, policy, None, timeout),
+    }
+}
+
+/// `Range: bytes=from-` (or `from-(from+len-1)`).
+fn get_range(
+    url: &str,
+    policy: &HostPolicy,
+    from: u64,
+    len: Option<u64>,
+    timeout: Option<Duration>,
+) -> Result<ureq::http::Response<ureq::Body>, FetchError> {
+    let range = match len {
+        Some(len) => format!("bytes={from}-{}", from + len.saturating_sub(1)),
+        None => format!("bytes={from}-"),
+    };
+    get_inner(url, policy, Some(range), timeout)
+}
+
+fn get_inner(
+    url: &str,
+    policy: &HostPolicy,
+    range: Option<String>,
+    timeout: Option<Duration>,
+) -> Result<ureq::http::Response<ureq::Body>, FetchError> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .max_redirects(0)
         .http_status_as_error(false)
@@ -181,8 +237,8 @@ fn get(
     for _ in 0..=MAX_REDIRECTS {
         policy.check(&current)?;
         let mut request = agent.get(&current);
-        if let Some(from) = from {
-            request = request.header("Range", &format!("bytes={from}-"));
+        if let Some(range) = &range {
+            request = request.header("Range", range);
         }
         let response = request.call().map_err(|err| FetchError::Http {
             url: current.clone(),

@@ -248,6 +248,17 @@ fn parse_header(path: &Path) -> Result<ParsedHeader, EstimateError> {
 }
 
 /// Parse the GGUF prefix held in `data`.
+/// Params, KV shape and context from the first bytes of a GGUF file (a
+/// range download; the catalog generator never fetches whole models).
+pub fn probe_gguf_bytes(data: &[u8]) -> Result<(u64, Option<Arch>, Option<u32>), EstimateError> {
+    let parsed = parse_metadata(data, true).or_else(|_| parse_metadata(data, false))?;
+    Ok((
+        parsed.facts.param_estimate,
+        parsed.arch(),
+        parsed.facts.context_length,
+    ))
+}
+
 fn parse_metadata(data: &[u8], derive_params: bool) -> Result<ParsedHeader, EstimateError> {
     let mut reader = ByteReader::new(data);
 
@@ -892,6 +903,26 @@ mod tests {
         assert_eq!(probe.params(), Some(135_000_000));
         assert_eq!(probe.warning, None);
         cleanup(&path);
+    }
+
+    #[test]
+    fn probe_bytes_reads_a_header_prefix() {
+        let mut file = FakeGguf::new(3, 7);
+        file.string("general.architecture", "qwen3");
+        file.u32("qwen3.block_count", 36);
+        file.u32("qwen3.attention.head_count", 32);
+        file.u32("qwen3.attention.head_count_kv", 8);
+        file.u32("qwen3.attention.key_length", 128);
+        file.u32("qwen3.context_length", 40_960);
+        file.u64("general.parameter_count", 8_190_735_360);
+        let (params, arch, ctx) = probe_gguf_bytes(file.bytes()).expect("probe");
+        assert_eq!(params, 8_190_735_360);
+        assert_eq!(
+            arch.map(|a| (a.n_layer, a.n_kv_heads, a.head_dim)),
+            Some((36, 8, 128))
+        );
+        assert_eq!(ctx, Some(40_960));
+        assert!(probe_gguf_bytes(b"not gguf").is_err());
     }
 
     #[test]

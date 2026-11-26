@@ -2,6 +2,7 @@
 //! (AGENTS.md §1: no logic in `main.rs`, all of it in the crates).
 
 mod bench;
+mod catalog;
 mod detect;
 mod download;
 mod estimate;
@@ -16,6 +17,9 @@ use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Maintainer tooling for the model catalog (used by CI)
+    #[command(hide = true, subcommand)]
+    Catalog(CatalogCommand),
     /// Download and install the llama.cpp build attune is tested with
     /// (pinned by the model catalog) into the attune home dir
     Setup {
@@ -295,6 +299,11 @@ pub enum Command {
 pub fn dispatch(command: Command) -> Result<()> {
     match command {
         Command::Detect { json } => detect::run(json),
+        Command::Catalog(CatalogCommand::Build {
+            publishers,
+            previous,
+            out,
+        }) => catalog::build(&publishers, previous.as_deref(), &out),
         Command::Setup {
             yes,
             refresh_catalog,
@@ -432,4 +441,20 @@ pub fn dispatch(command: Command) -> Result<()> {
             json,
         ),
     }
+}
+
+#[derive(Subcommand)]
+pub enum CatalogCommand {
+    /// Regenerate catalog.json from the Hugging Face API
+    Build {
+        /// Generator config (allow-lists, quants, llama.cpp pin)
+        #[arg(long, default_value = "catalog/publishers.json")]
+        publishers: PathBuf,
+        /// Yesterday's catalog: reused header facts and the shrink guard
+        #[arg(long)]
+        previous: Option<PathBuf>,
+        /// Where to write the new catalog
+        #[arg(long)]
+        out: PathBuf,
+    },
 }

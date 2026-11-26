@@ -10,7 +10,7 @@ mod home;
 mod install;
 mod policy;
 
-pub use download::{download, download_with, fetch_text, free_disk_bytes, Download};
+pub use download::{download, download_with, fetch_range, fetch_text, free_disk_bytes, Download};
 pub use error::FetchError;
 pub use home::{home_dir, ENV_HOME};
 pub use install::{find_installed, install_archive, install_dir, installed_binary};
