@@ -114,6 +114,7 @@ pub fn measure_int8(
     inner_iters: usize,
     reps: usize,
 ) -> Result<Int8Result, BenchError> {
+    crate::power::full_speed();
     if threads == 0 || inner_iters == 0 || reps == 0 {
         return Err(BenchError::InvalidConfig(
             "threads, inner_iters and reps must be >= 1".to_string(),

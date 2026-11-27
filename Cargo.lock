@@ -100,6 +100,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "thiserror",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

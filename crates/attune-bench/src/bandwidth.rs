@@ -200,6 +200,7 @@ pub fn quick_full() -> Result<FullBandwidthResult, BenchError> {
 
 /// Run the read kernel and return the best of `reps` passes.
 pub fn read_bandwidth(cfg: &BandwidthConfig) -> Result<ReadResult, BenchError> {
+    crate::power::full_speed();
     if cfg.reps == 0 {
         return Err(BenchError::InvalidConfig("reps must be >= 1".to_string()));
     }
@@ -232,6 +233,7 @@ pub fn read_bandwidth(cfg: &BandwidthConfig) -> Result<ReadResult, BenchError> {
 /// pass plus `reps` timed passes; we return median + best GB/s for every
 /// kernel. Validates config once up front.
 pub fn full_bandwidth(cfg: &BandwidthConfig) -> Result<FullBandwidthResult, BenchError> {
+    crate::power::full_speed();
     if cfg.buffer_bytes == 0 {
         return Err(BenchError::InvalidConfig(
             "buffer_bytes must be > 0".to_string(),

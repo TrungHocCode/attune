@@ -786,18 +786,12 @@ pub fn run(
         }
     }
 
-    // The CPU/RAM probe and the bandwidth kernel are independent, so run
-    // them concurrently: the live path then costs one probe, not their sum,
-    // and still spawns no subprocess. `resolve_hardware` reuses a single HAL
-    // detection for the FP32 peak, available RAM and physical core count.
-    let (hardware, bw_gbps) = std::thread::scope(|scope| -> Result<(HardwareResolution, f64)> {
-        let hardware = scope.spawn(move || resolve_hardware(gflops));
-        let bandwidth = resolve_bandwidth(bandwidth_gbps);
-        let hardware = hardware
-            .join()
-            .map_err(|_| anyhow!("hardware detection worker panicked"))??;
-        Ok((hardware, bandwidth?))
-    })?;
+    // Sequential on purpose: run concurrently, HAL detection competed with
+    // the bandwidth kernel and the probe read 13-36 GB/s on one machine
+    // (34.5 standalone). `resolve_hardware` reuses a single HAL detection for
+    // the FP32 peak, available RAM and physical core count.
+    let hardware = resolve_hardware(gflops)?;
+    let bw_gbps = resolve_bandwidth(bandwidth_gbps)?;
     let HardwareResolution {
         gflops,
         clock_fallback,
