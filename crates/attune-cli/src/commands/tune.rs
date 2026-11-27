@@ -16,6 +16,7 @@
 //! TODO on [`resolve_model`] — promoting it to one shared helper is a
 //! follow-up, not part of M4 slice 1.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
@@ -51,6 +52,14 @@ const ESTIMATE_ONLY_CONFIDENCE: f64 = 0.5;
 const PROMPT_TOKENS: u64 = 512;
 /// Decode length assumed by the prune check.
 const GEN_TOKENS: u64 = 128;
+
+/// Rows shown by the human table when `--verbose` is absent.
+const TOP_CONFIGS: usize = 5;
+
+/// Defaults used by `attune recommend`, which only runs the recommend half.
+const RECOMMEND_QUANT: &str = "q4_k_m";
+const RECOMMEND_OBJECTIVE: &str = "balanced";
+const RECOMMEND_MAX_CONFIGS: usize = 64;
 
 /// Warning attached to every report (pretty + JSON) built on the 1 GHz
 /// baseline fallback. Same text as `attune estimate` so users see one story.
@@ -419,32 +428,46 @@ fn format_params(params: u64) -> String {
 /// `estimates` is the pre-verification ranking, kept only so `--verify` can
 /// show the estimate next to the measured numbers (the report itself carries
 /// the measured values in `decode_tps` / `ttft_ms`).
-fn print_table(
+///
+/// Without `verbose` only the top [`TOP_CONFIGS`] rows are shown and the score
+/// column is omitted, so a newcomer sees the useful part first.
+fn render_table(
     report: &TuneReport,
     resolution: &ModelResolution,
     total_ram_fallback: bool,
     estimates: Option<&[RankedConfig]>,
-) {
+    verbose: bool,
+) -> String {
+    let mut out = String::new();
     let arch = resolution.arch.map_or("unknown", |arch| arch.name);
-    println!(
+    let _ = writeln!(
+        out,
         "Model:  {} ({}) | Arch: {arch}",
         resolution.display,
         format_params(report.params)
     );
-    println!(
+    let _ = writeln!(
+        out,
         "Inputs: {:.1} GB/s, {:.1} GFLOPS | Objective: {}",
         report.bw_gbps, report.gflops, report.objective
     );
     match (report.avail_bytes, total_ram_fallback) {
-        (Some(ram), true) => println!(
-            "RAM:    {:.1} GB total (fallback; available RAM was too low)",
-            ram / 1e9
-        ),
-        (Some(ram), false) => println!("RAM:    {:.1} GB available", ram / 1e9),
-        (None, _) => println!("RAM:    unknown (fit check skipped)"),
+        (Some(ram), true) => {
+            let _ = writeln!(
+                out,
+                "RAM:    {:.1} GB total (fallback; available RAM was too low)",
+                ram / 1e9
+            );
+        }
+        (Some(ram), false) => {
+            let _ = writeln!(out, "RAM:    {:.1} GB available", ram / 1e9);
+        }
+        (None, _) => {
+            let _ = writeln!(out, "RAM:    unknown (fit check skipped)");
+        }
     }
-    // One eta pair was fitted once and applied to every config (slice 5), so
-    // the first calibrated entry describes the whole sweep.
+    // One eta pair was fitted once and applied to every config, so the first
+    // calibrated entry describes the whole sweep.
     if let Some(calibration) = report
         .configs
         .iter()
@@ -453,51 +476,96 @@ fn print_table(
         let ttft = calibration
             .measured_ttft_ms
             .map_or_else(|| "no TTFT".to_string(), |ms| format!("{ms:.1} ms TTFT"));
-        println!(
+        let _ = writeln!(
+            out,
             "Calib:  eta_mem={:.3} (decode), eta_comp={:.3} (prefill) | bench measured {:.1} tok/s, {ttft}",
             calibration.inputs.eta_mem,
             calibration.inputs.eta_comp,
             calibration.measured_decode_tps,
         );
     }
-    // Only widen the table when at least one config was measured, so the
-    // estimate-only output every earlier slice produced stays byte-identical.
+    // Only widen the table when at least one config was measured.
     let show_verify = report.configs.iter().any(|ranked| ranked.verified);
-    println!();
-    if show_verify {
-        println!(
-            "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<14} {:<14} {:<8} {:<5} {:<6} Score",
-            "Rank",
-            "Quant",
-            "Ctx",
-            "Threads",
-            "Batch",
-            "KV",
-            "Est. tok/s",
-            "Est. TTFT ms",
-            "E2E tok/s",
-            "E2E TTFT ms",
-            "Verified",
-            "Fit",
-            "Stars"
-        );
-    } else {
-        println!(
-            "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<5} {:<6} Score",
-            "Rank",
-            "Quant",
-            "Ctx",
-            "Threads",
-            "Batch",
-            "KV",
-            "Decode tok/s",
-            "TTFT ms",
-            "Fit",
-            "Stars"
-        );
-    }
     let total = report.configs.len();
-    for (index, ranked) in report.configs.iter().enumerate() {
+    let shown = if verbose {
+        total
+    } else {
+        total.min(TOP_CONFIGS)
+    };
+    let _ = writeln!(out);
+    match (show_verify, verbose) {
+        (true, true) => {
+            let _ = writeln!(
+                out,
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<14} {:<14} {:<8} {:<5} {:<6} Score",
+                "Rank",
+                "Quant",
+                "Ctx",
+                "Threads",
+                "Batch",
+                "KV",
+                "Est. tok/s",
+                "Est. TTFT ms",
+                "E2E tok/s",
+                "E2E TTFT ms",
+                "Verified",
+                "Fit",
+                "Stars"
+            );
+        }
+        (true, false) => {
+            let _ = writeln!(
+                out,
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<14} {:<14} {:<8} {:<5} {:<6}",
+                "Rank",
+                "Quant",
+                "Ctx",
+                "Threads",
+                "Batch",
+                "KV",
+                "Est. tok/s",
+                "Est. TTFT ms",
+                "E2E tok/s",
+                "E2E TTFT ms",
+                "Verified",
+                "Fit",
+                "Stars"
+            );
+        }
+        (false, true) => {
+            let _ = writeln!(
+                out,
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<5} {:<6} Score",
+                "Rank",
+                "Quant",
+                "Ctx",
+                "Threads",
+                "Batch",
+                "KV",
+                "Decode tok/s",
+                "TTFT ms",
+                "Fit",
+                "Stars"
+            );
+        }
+        (false, false) => {
+            let _ = writeln!(
+                out,
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<5} {:<6}",
+                "Rank",
+                "Quant",
+                "Ctx",
+                "Threads",
+                "Batch",
+                "KV",
+                "Decode tok/s",
+                "TTFT ms",
+                "Fit",
+                "Stars"
+            );
+        }
+    }
+    for (index, ranked) in report.configs.iter().take(shown).enumerate() {
         let score = if ranked.score.is_finite() {
             format!("{:.4}", ranked.score)
         } else {
@@ -516,25 +584,47 @@ fn print_table(
                 ),
                 _ => ("-".to_string(), "-".to_string(), "-".to_string()),
             };
-            println!(
-                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<14} {:<14} {:<8} {:<5} {:<6} {}",
-                index + 1,
-                ranked.config.quant.as_str(),
-                ranked.config.n_ctx,
-                ranked.config.n_threads,
-                ranked.config.n_batch,
-                ranked.config.cache_kv.as_str(),
-                estimate.decode_tps,
-                estimate.ttft_ms,
-                e2e_tps,
-                e2e_ttft,
-                verified,
-                if ranked.fits { "yes" } else { "OOM" },
-                star_marks,
-                score,
-            );
-        } else {
-            println!(
+            if verbose {
+                let _ = writeln!(
+                    out,
+                    "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<14} {:<14} {:<8} {:<5} {:<6} {}",
+                    index + 1,
+                    ranked.config.quant.as_str(),
+                    ranked.config.n_ctx,
+                    ranked.config.n_threads,
+                    ranked.config.n_batch,
+                    ranked.config.cache_kv.as_str(),
+                    estimate.decode_tps,
+                    estimate.ttft_ms,
+                    e2e_tps,
+                    e2e_ttft,
+                    verified,
+                    if ranked.fits { "yes" } else { "OOM" },
+                    star_marks,
+                    score,
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<14} {:<14} {:<8} {:<5} {:<6}",
+                    index + 1,
+                    ranked.config.quant.as_str(),
+                    ranked.config.n_ctx,
+                    ranked.config.n_threads,
+                    ranked.config.n_batch,
+                    ranked.config.cache_kv.as_str(),
+                    estimate.decode_tps,
+                    estimate.ttft_ms,
+                    e2e_tps,
+                    e2e_ttft,
+                    verified,
+                    if ranked.fits { "yes" } else { "OOM" },
+                    star_marks,
+                );
+            }
+        } else if verbose {
+            let _ = writeln!(
+                out,
                 "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<5} {:<6} {}",
                 index + 1,
                 ranked.config.quant.as_str(),
@@ -548,33 +638,57 @@ fn print_table(
                 star_marks,
                 score,
             );
+        } else {
+            let _ = writeln!(
+                out,
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<5} {:<6}",
+                index + 1,
+                ranked.config.quant.as_str(),
+                ranked.config.n_ctx,
+                ranked.config.n_threads,
+                ranked.config.n_batch,
+                ranked.config.cache_kv.as_str(),
+                ranked.decode_tps,
+                ranked.ttft_ms,
+                if ranked.fits { "yes" } else { "OOM" },
+                star_marks,
+            );
         }
     }
-    println!();
+    if shown < total {
+        let _ = writeln!(
+            out,
+            "Showing the top {shown} of {total} configs; pass --verbose to see all ranked configs and scores."
+        );
+    }
+    let _ = writeln!(out);
     if show_verify {
         let measured = report
             .configs
             .iter()
             .filter(|ranked| ranked.verified)
             .count();
-        println!(
+        let _ = writeln!(
+            out,
             "Note: {measured} config(s) re-scored from a measured llama.cpp e2e run; the rest are estimate-only."
         );
     } else {
-        println!(
+        let _ = writeln!(
+            out,
             "Note: estimate-only ranking (decode = weights + filled KV, prompt-length prefill TTFT); no llama.cpp run."
         );
     }
     for warning in &report.warnings {
-        println!("Warning:     {warning}");
+        let _ = writeln!(out, "Warning:     {warning}");
     }
+    out
 }
 
-/// Print the one-line prune summary shown before the table.
+/// The one-line prune summary shown before the table (verbose only).
 ///
 /// `cap_from_expand` counts points already dropped by the 64-point full-grid
 /// guard; the rest come from [`prune`] and are counted by reason.
-fn print_pruned(pruned: &[(TuneConfig, PruneReason)], cap_from_expand: usize) {
+fn render_pruned_line(pruned: &[(TuneConfig, PruneReason)], cap_from_expand: usize) -> String {
     let mut oom = 0;
     let mut ctx = 0;
     let mut threads = 0;
@@ -587,14 +701,39 @@ fn print_pruned(pruned: &[(TuneConfig, PruneReason)], cap_from_expand: usize) {
             PruneReason::OverCap => cap += 1,
         }
     }
-    println!(
-        "pruned {} ({} OOM, {} ctx-overflow, {} threads, {} cap)",
+    format!(
+        "pruned {} ({} OOM, {} ctx-overflow, {} threads, {} cap)\n",
         oom + ctx + threads + cap,
         oom,
         ctx,
         threads,
         cap
-    );
+    )
+}
+
+/// Everything the human `tune` output prints, built in one place so tests can
+/// assert what a newcomer sees. The prune line is verbose-only.
+fn render_human(
+    report: &TuneReport,
+    resolution: &ModelResolution,
+    total_ram_fallback: bool,
+    estimates: Option<&[RankedConfig]>,
+    pruned: &[(TuneConfig, PruneReason)],
+    cap_from_expand: usize,
+    verbose: bool,
+) -> String {
+    let mut out = String::new();
+    if verbose {
+        out.push_str(&render_pruned_line(pruned, cap_from_expand));
+    }
+    out.push_str(&render_table(
+        report,
+        resolution,
+        total_ram_fallback,
+        estimates,
+        verbose,
+    ));
+    out
 }
 
 /// Default profile name: `<model>-<objective>`, where a GGUF source contributes
@@ -681,6 +820,48 @@ fn llama_explicit(path: Option<&Path>) -> Result<Option<&str>> {
     }
 }
 
+/// `attune recommend`: the recommend half of [`run`] with no model source.
+///
+/// The defaults below only satisfy argument parsing; recommend mode ignores
+/// the tuning knobs before they are used.
+pub fn run_recommend(
+    max_ram: Option<&str>,
+    all: bool,
+    refresh_catalog: bool,
+    json: bool,
+) -> Result<()> {
+    run(
+        None,
+        None,
+        None,
+        RECOMMEND_QUANT,
+        RECOMMEND_OBJECTIVE,
+        None,
+        None,
+        RECOMMEND_MAX_CONFIGS,
+        None,
+        None,
+        VerifyArgs {
+            enabled: false,
+            top_k: 2,
+            llama_cli: None,
+            prompt_tokens: None,
+            gen_tokens: None,
+            ctx: None,
+        },
+        None,
+        None,
+        false,
+        RecommendArgs {
+            max_ram,
+            all,
+            refresh_catalog,
+        },
+        json,
+        false,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     model: Option<&str>,
@@ -699,6 +880,7 @@ pub fn run(
     calibrate: bool,
     recommend_args: RecommendArgs<'_>,
     json: bool,
+    verbose: bool,
 ) -> Result<()> {
     let recommend_mode = model.is_none() && params.is_none();
     let max_ram = recommend_args
@@ -988,12 +1170,17 @@ pub fn run(
         return Ok(());
     }
 
-    print_pruned(&pruned, cap_from_expand);
-    print_table(
-        &report,
-        &resolution,
-        total_ram_fallback,
-        estimate_snapshot.as_deref(),
+    print!(
+        "{}",
+        render_human(
+            &report,
+            &resolution,
+            total_ram_fallback,
+            estimate_snapshot.as_deref(),
+            &pruned,
+            cap_from_expand,
+            verbose,
+        )
     );
     if let (Some(path), Some(_)) = (save, profile.as_ref()) {
         print_best(&report);
@@ -1115,5 +1302,63 @@ mod tests {
             .expect("no q4_k_m file")
             .to_string();
         assert!(err.contains("q8_0"), "{err}");
+    }
+
+    fn report_with(n: usize) -> TuneReport {
+        let hw = HwInputs {
+            bw_gbps: 20.0,
+            flops_gflops: 100.0,
+            int8_gops: None,
+        };
+        let configs = (0..n)
+            .map(|index| RankedConfig {
+                config: TuneConfig::new(Quant::Q4_K_M, 2048 + index as u32, 4, 512, Quant::Fp16),
+                decode_tps: 100.0 - index as f64,
+                ttft_ms: 50.0 + index as f64,
+                fits: true,
+                score: 1.0 - index as f64 * 0.01,
+                verified: false,
+                measured: None,
+                calibration: None,
+                grid_index: index,
+            })
+            .collect();
+        TuneReport::new("m", 135_000_000, Objective::Throughput, hw, None, configs)
+    }
+
+    fn row_count(text: &str) -> usize {
+        text.lines()
+            .filter(|line| {
+                line.split_whitespace()
+                    .next()
+                    .is_some_and(|token| token.parse::<usize>().is_ok())
+            })
+            .count()
+    }
+
+    #[test]
+    fn default_table_hides_score_and_prune_line_and_caps_rows() {
+        let report = report_with(7);
+        let res = resolution("m", None);
+        let text = render_human(&report, &res, false, None, &[], 0, false);
+        assert!(!text.contains(" Score"), "{text}");
+        assert!(!text.contains("pruned"), "{text}");
+        assert_eq!(row_count(&text), TOP_CONFIGS, "{text}");
+        assert!(text.contains("pass --verbose"), "{text}");
+    }
+
+    #[test]
+    fn verbose_table_shows_scores_all_rows_and_prune_summary() {
+        let report = report_with(7);
+        let res = resolution("m", None);
+        let pruned = vec![(
+            TuneConfig::new(Quant::Q4_K_M, 2048, 4, 512, Quant::Fp16),
+            PruneReason::Oom,
+        )];
+        let text = render_human(&report, &res, false, None, &pruned, 2, true);
+        assert!(text.contains(" Score"), "{text}");
+        assert!(text.contains("pruned 3 (1 OOM"), "{text}");
+        assert_eq!(row_count(&text), 7, "{text}");
+        assert!(!text.contains("pass --verbose"), "{text}");
     }
 }

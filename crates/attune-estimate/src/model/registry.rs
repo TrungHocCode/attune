@@ -218,6 +218,10 @@ pub const CACHE_META_FILE: &str = "catalog.meta.json";
 /// A cached catalog younger than this is used without a network call.
 pub const FRESH_SECS: u64 = 24 * 60 * 60;
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Plain fallback notice: the built-in snapshot is in use.
+pub const BUILT_IN_FALLBACK: &str = "Using the built-in model list (online catalog unavailable)";
+/// Plain fallback notice: a stale cache is in use.
+pub const CACHED_FALLBACK: &str = "Using the cached model list (online catalog unavailable)";
 
 /// Built-in catalog: the floor when there is no network and no usable cache.
 pub const SNAPSHOT: &str = include_str!("../../../../catalog/snapshot.json");
@@ -266,11 +270,9 @@ pub fn load_catalog(refresh: bool) -> LoadedCatalog {
     };
     match attune_fetch::home_dir() {
         Ok(home) => load_catalog_at(&home, refresh, unix_now(), &fetch),
-        Err(err) => {
+        Err(_) => {
             let mut loaded = snapshot();
-            loaded
-                .warnings
-                .push(format!("{err}; using the built-in catalog"));
+            loaded.warnings.push(BUILT_IN_FALLBACK.to_string());
             loaded
         }
     }
@@ -305,27 +307,30 @@ pub fn load_catalog_at(
             return loaded(catalog.clone(), CatalogOrigin::FreshCache, warnings);
         }
     }
-    match fetch().and_then(|text| {
+    // The network error is intentionally dropped: the plain fallback notice
+    // below tells a newcomer what happened without a URL/HTTP dump.
+    if let Ok((catalog, text)) = fetch().and_then(|text| {
         parse_catalog(&text)
             .map(|c| (c, text))
             .map_err(|e| e.to_string())
     }) {
-        Ok((catalog, text)) => {
-            let meta = format!(r#"{{"fetched_at": {now_unix}}}"#);
-            if let Err(err) = std::fs::write(&cache_path, text)
-                .and_then(|()| std::fs::write(home.join(CACHE_META_FILE), meta))
-            {
-                warnings.push(format!("could not cache the catalog: {err}"));
-            }
-            return loaded(catalog, CatalogOrigin::Fetched, warnings);
+        let meta = format!(r#"{{"fetched_at": {now_unix}}}"#);
+        if let Err(err) = std::fs::write(&cache_path, text)
+            .and_then(|()| std::fs::write(home.join(CACHE_META_FILE), meta))
+        {
+            warnings.push(format!("could not cache the catalog: {err}"));
         }
-        Err(err) => warnings.push(format!("catalog update failed ({err})")),
+        return loaded(catalog, CatalogOrigin::Fetched, warnings);
     }
     match cached {
-        Some(catalog) => loaded(catalog, CatalogOrigin::StaleCache, warnings),
+        Some(catalog) => {
+            warnings.push(CACHED_FALLBACK.to_string());
+            loaded(catalog, CatalogOrigin::StaleCache, warnings)
+        }
         None => {
             let mut loaded = snapshot();
             loaded.warnings.splice(0..0, warnings);
+            loaded.warnings.push(BUILT_IN_FALLBACK.to_string());
             loaded
         }
     }
@@ -557,11 +562,20 @@ mod tests {
         seed_cache(&home, &remote(), NOW - 30 * HOUR);
         let loaded = load_catalog_at(&home, false, NOW, &|| Err("offline".to_string()));
         assert_eq!(loaded.origin, CatalogOrigin::StaleCache);
-        assert!(!loaded.warnings.is_empty());
+        assert!(
+            loaded.warnings.iter().any(|w| w == CACHED_FALLBACK),
+            "{:?}",
+            loaded.warnings
+        );
 
         let empty = temp_home("offline-empty");
         let loaded = load_catalog_at(&empty, false, NOW, &|| Err("offline".to_string()));
         assert_eq!(loaded.origin, CatalogOrigin::Snapshot);
+        assert!(
+            loaded.warnings.iter().any(|w| w == BUILT_IN_FALLBACK),
+            "{:?}",
+            loaded.warnings
+        );
     }
 
     #[test]
