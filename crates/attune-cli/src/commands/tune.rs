@@ -392,10 +392,10 @@ fn detect_physical_cores() -> u32 {
 
 /// Readable fingerprint for the machine this profile is being saved on.
 ///
-/// Only called when `--save` is used, so the normal estimate path never pays
-/// for a second HAL detection. Detection failures degrade to the same
-/// `unknown|0|unknown|0` marker rather than blocking the save.
-fn current_hardware_fingerprint() -> String {
+/// Only called when `--save` (or `attune run`) needs it, so the normal estimate
+/// path never pays for a second HAL detection. Detection failures degrade to
+/// the same `unknown|0|unknown|0` marker rather than blocking the save.
+pub fn current_hardware_fingerprint() -> String {
     let cpu = attune_hal::cpu::detect();
     let memory = attune_hal::memory::detect();
     let brand = cpu
@@ -859,6 +859,7 @@ pub fn run_recommend(
         },
         json,
         false,
+        false,
     )
 }
 
@@ -881,6 +882,7 @@ pub fn run(
     recommend_args: RecommendArgs<'_>,
     json: bool,
     verbose: bool,
+    quiet: bool,
 ) -> Result<()> {
     let recommend_mode = model.is_none() && params.is_none();
     let max_ram = recommend_args
@@ -1152,6 +1154,25 @@ pub fn run(
         }
         None => None,
     };
+
+    if quiet {
+        if let Some(best) = report.configs.first() {
+            println!(
+                "Tuned: {} ctx={} threads={} batch={} kv={} - about {:.1} tok/s, first reply ~{:.1} s",
+                best.config.quant.as_str(),
+                best.config.n_ctx,
+                best.config.n_threads,
+                best.config.n_batch,
+                best.config.cache_kv.as_str(),
+                best.decode_tps,
+                best.ttft_ms / 1000.0,
+            );
+        }
+        if let (Some(_), Some(profile)) = (save, profile.as_ref()) {
+            println!("Saved profile {}", profile.name);
+        }
+        return Ok(());
+    }
 
     if json {
         let mut value = serde_json::to_value(&report)?;

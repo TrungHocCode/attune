@@ -36,6 +36,8 @@ pub struct ChatStats {
 pub enum SseEvent {
     /// A content delta to print.
     Delta(String),
+    /// A `reasoning_content` delta (the model's thinking, not the reply).
+    Reasoning(String),
     /// `data: [DONE]`; the reply is complete.
     Done,
     /// llama-server's final `timings` block.
@@ -77,6 +79,14 @@ pub fn parse_sse_line(line: &str) -> SseEvent {
             };
         }
     }
+    if let Some(reasoning) = value
+        .pointer("/choices/0/delta/reasoning_content")
+        .and_then(serde_json::Value::as_str)
+    {
+        if !reasoning.is_empty() {
+            return SseEvent::Reasoning(reasoning.to_string());
+        }
+    }
     if let Some(delta) = value
         .pointer("/choices/0/delta/content")
         .and_then(serde_json::Value::as_str)
@@ -86,6 +96,19 @@ pub fn parse_sse_line(line: &str) -> SseEvent {
         }
     }
     SseEvent::Ignore
+}
+
+/// One streamed piece handed to [`ChatClient::send`]'s callback.
+///
+/// Reasoning text arrives before the visible reply for models that separate
+/// their thinking from the answer. The client reports both; the caller decides
+/// what to show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatDelta<'a> {
+    /// A reasoning/thinking delta.
+    Thinking(&'a str),
+    /// A visible reply delta to print.
+    Text(&'a str),
 }
 
 /// A streaming chat conversation with an OpenAI-compatible server.
@@ -136,15 +159,17 @@ impl ChatClient {
         }
     }
 
-    /// Send one user message, streaming reply deltas through `on_token`.
+    /// Send one user message, streaming reply deltas through `on_delta`.
     ///
     /// A successful call appends the user and assistant messages to the
-    /// history. Tokens and speed come from llama-server's `timings` when it
-    /// sends them, otherwise from the delta count over the elapsed time.
+    /// history. Reasoning deltas are reported as [`ChatDelta::Thinking`] but
+    /// are not stored in the history. Tokens and speed come from
+    /// llama-server's `timings` when it sends them, otherwise from the text
+    /// delta count over the elapsed time.
     pub fn send(
         &mut self,
         user: &str,
-        on_token: &mut dyn FnMut(&str),
+        on_delta: &mut dyn FnMut(ChatDelta<'_>),
     ) -> Result<ChatStats, ServeError> {
         let mut messages = self.history.clone();
         messages.push(Message {
@@ -209,7 +234,10 @@ impl ChatClient {
                 SseEvent::Delta(delta) => {
                     assistant.push_str(&delta);
                     chunks += 1;
-                    on_token(&delta);
+                    on_delta(ChatDelta::Text(&delta));
+                }
+                SseEvent::Reasoning(reasoning) => {
+                    on_delta(ChatDelta::Thinking(&reasoning));
                 }
                 SseEvent::Done => break,
                 SseEvent::Timings {
@@ -303,6 +331,18 @@ mod tests {
         );
         assert_eq!(
             parse_sse_line(r#"data: {"choices":[{"delta":{"content":""}}]}"#),
+            SseEvent::Ignore
+        );
+    }
+
+    #[test]
+    fn parses_reasoning_deltas() {
+        assert_eq!(
+            parse_sse_line(r#"data: {"choices":[{"delta":{"reasoning_content":"let me think"}}]}"#),
+            SseEvent::Reasoning("let me think".to_string())
+        );
+        assert_eq!(
+            parse_sse_line(r#"data: {"choices":[{"delta":{"reasoning_content":""}}]}"#),
             SseEvent::Ignore
         );
     }

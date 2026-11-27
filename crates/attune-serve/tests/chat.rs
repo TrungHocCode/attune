@@ -5,9 +5,11 @@ use std::net::{TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use attune_serve::ChatClient;
+use attune_serve::{ChatClient, ChatDelta};
 
 const SSE_BODY: &str = concat!(
+    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"th\"}}]}\n\n",
+    "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ink\"}}]}\n\n",
     "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
     ": keep-alive\n\n",
     "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
@@ -78,12 +80,23 @@ fn streams_deltas_and_reports_timings() {
     let (url, handle) = start_stub(SSE_BODY);
     let mut client = ChatClient::new(url, Some("secret".to_string()), Some("be nice".to_string()));
 
-    let mut pieces = Vec::new();
+    let mut deltas = Vec::new();
     let stats = client
-        .send("hi", &mut |piece| pieces.push(piece.to_string()))
+        .send("hi", &mut |delta: ChatDelta<'_>| match delta {
+            ChatDelta::Thinking(text) => deltas.push(("think", text.to_string())),
+            ChatDelta::Text(text) => deltas.push(("text", text.to_string())),
+        })
         .expect("send");
 
-    assert_eq!(pieces, vec!["Hel".to_string(), "lo".to_string()]);
+    assert_eq!(
+        deltas,
+        vec![
+            ("think", "th".to_string()),
+            ("think", "ink".to_string()),
+            ("text", "Hel".to_string()),
+            ("text", "lo".to_string()),
+        ]
+    );
     assert_eq!(stats.tokens, 2);
     assert!((stats.tokens_per_s - 42.5).abs() < 1e-9);
 
@@ -114,7 +127,7 @@ fn a_refused_connection_points_at_attune_serve() {
     let url = format!("http://127.0.0.1:{port}");
     let mut client = ChatClient::new(url, None, None);
     let error = client
-        .send("hi", &mut |_| {})
+        .send("hi", &mut |_delta| {})
         .expect_err("no server should be listening");
     assert!(error.to_string().contains("No attune server"), "{error}");
 }

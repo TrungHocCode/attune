@@ -34,7 +34,7 @@ pub mod proxy;
 pub mod server;
 pub mod shutdown;
 
-pub use chat::{parse_sse_line, ChatClient, ChatStats, Message, SseEvent};
+pub use chat::{parse_sse_line, ChatClient, ChatDelta, ChatStats, Message, SseEvent};
 pub use launcher::{
     fingerprint_of, launch, prepare_profile, resolve_model_file, DownloadConsent, PreparedProfile,
     ReadyReport, ServeOptions, Serving,
@@ -42,6 +42,9 @@ pub use launcher::{
 pub use profiles::{profiles_dir, resolve_profile};
 pub use server::{check_listen, Proxy, ProxyConfig};
 pub use shutdown::{install_shutdown, ShutdownSignal};
+
+/// Re-exported so the CLI can check for `llama-server` before installing it.
+pub use attune_backend::resolve_llama_server;
 
 use thiserror::Error;
 

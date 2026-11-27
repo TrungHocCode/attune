@@ -58,6 +58,12 @@ pub fn plan_setup(home: &Path, pin: &LlamaPin, os: &str, arch: &str) -> Result<S
 
 /// `attune setup [--yes] [--refresh-catalog]`.
 pub fn run(yes: bool, refresh_catalog: bool) -> Result<()> {
+    install(yes, refresh_catalog).map(|_| ())
+}
+
+/// Install the pinned llama.cpp build (or report the existing one) and return
+/// the `llama-server` path. Shares its output and consent rules with `setup`.
+pub fn install(yes: bool, refresh_catalog: bool) -> Result<PathBuf> {
     let loaded = load_catalog(refresh_catalog);
     for warning in &loaded.warnings {
         eprintln!("warning: {warning}");
@@ -72,7 +78,7 @@ pub fn run(yes: bool, refresh_catalog: bool) -> Result<()> {
                     pin.tag,
                     path.display()
                 );
-                return Ok(());
+                return Ok(path);
             }
             SetupPlan::Download {
                 asset,
@@ -112,7 +118,20 @@ pub fn run(yes: bool, refresh_catalog: bool) -> Result<()> {
         )
     })?;
     println!("Installed llama.cpp {}: {}", pin.tag, server.display());
-    Ok(())
+    Ok(server)
+}
+
+/// Make sure a usable `llama-server` exists, installing the pinned build with
+/// the same consent rules as `setup` when it does not. An explicit
+/// `--llama-server` path is returned untouched.
+pub fn ensure_llama_server(explicit: Option<&Path>, yes: bool) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(path.to_path_buf());
+    }
+    if let Ok(path) = attune_serve::resolve_llama_server(None) {
+        return Ok(path);
+    }
+    install(yes, false)
 }
 
 /// The explicit `--llama-cli` path, else the `attune setup` install when

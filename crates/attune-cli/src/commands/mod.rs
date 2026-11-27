@@ -8,6 +8,7 @@ mod detect;
 mod download;
 mod estimate;
 mod recommend;
+mod run;
 mod serve;
 mod setup;
 mod tune;
@@ -145,6 +146,49 @@ pub enum Command {
         /// Output machine-readable JSON instead of the human lines
         #[arg(long)]
         json: bool,
+    },
+    /// Download, tune and chat with a model in one command
+    Run {
+        /// Catalog model id (same ids as `tune --model`) or a local `.gguf`
+        /// path
+        #[arg(value_name = "MODEL")]
+        model: String,
+        /// Weight format to download and tune
+        #[arg(long, value_name = "QUANT", default_value = "q4_k_m")]
+        quant: String,
+        /// Download the model and install llama.cpp without asking
+        #[arg(long)]
+        yes: bool,
+        /// Tune again even when a matching saved profile exists
+        #[arg(long)]
+        retune: bool,
+        /// Start the server and print the URL instead of chatting here
+        #[arg(long)]
+        no_chat: bool,
+        /// System prompt sent before the conversation
+        #[arg(long, value_name = "TEXT")]
+        system: Option<String>,
+        /// Path to the llama.cpp `llama-server` binary (default:
+        /// $ATTUNE_LLAMA_SERVER, then a PATH search for `llama-server`)
+        #[arg(long, value_name = "PATH")]
+        llama_server: Option<PathBuf>,
+        /// Port llama-server (the upstream) listens on
+        #[arg(long, value_name = "PORT", default_value_t = 8081)]
+        port: u16,
+        /// Interface the OpenAI-compatible proxy binds to. A non-loopback
+        /// host is refused unless `--api-key` (or `ATTUNE_API_KEY`) is set.
+        #[arg(long, value_name = "HOST", default_value = "127.0.0.1")]
+        listen: String,
+        /// Port for the OpenAI-compatible proxy
+        #[arg(long, value_name = "PORT", default_value_t = 8080)]
+        listen_port: u16,
+        /// Bearer key clients must send on every route except `/health`.
+        /// Also read from `ATTUNE_API_KEY`.
+        #[arg(long, value_name = "KEY")]
+        api_key: Option<String>,
+        /// Seconds to wait for `/health` before giving up
+        #[arg(long, value_name = "N", default_value_t = 60)]
+        timeout_s: u64,
     },
     /// Run a model from a profile behind an OpenAI-compatible API
     Serve {
@@ -414,6 +458,33 @@ pub fn dispatch(command: Command) -> Result<()> {
             api_key,
             system,
         } => chat::run(&url, api_key.as_deref(), system.as_deref()),
+        Command::Run {
+            model,
+            quant,
+            yes,
+            retune,
+            no_chat,
+            system,
+            llama_server,
+            port,
+            listen,
+            listen_port,
+            api_key,
+            timeout_s,
+        } => run::run(
+            &model,
+            &quant,
+            yes,
+            retune,
+            no_chat,
+            system.as_deref(),
+            llama_server.as_deref(),
+            port,
+            &listen,
+            listen_port,
+            api_key.as_deref(),
+            timeout_s,
+        ),
         Command::Recommend {
             max_ram,
             all,
@@ -474,6 +545,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             },
             json,
             verbose,
+            false,
         ),
     }
 }
@@ -530,6 +602,37 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected the recommend subcommand"),
+        }
+    }
+
+    #[test]
+    fn run_parses_model_quant_yes_and_no_chat() {
+        let cli = crate::Cli::try_parse_from([
+            "attune",
+            "run",
+            "qwen3-4b",
+            "--quant",
+            "q8_0",
+            "--yes",
+            "--no-chat",
+        ])
+        .expect("run should parse");
+        match cli.command {
+            Command::Run {
+                model,
+                quant,
+                yes,
+                no_chat,
+                retune,
+                ..
+            } => {
+                assert_eq!(model, "qwen3-4b");
+                assert_eq!(quant, "q8_0");
+                assert!(yes);
+                assert!(no_chat);
+                assert!(!retune);
+            }
+            _ => panic!("expected the run subcommand"),
         }
     }
 
