@@ -679,6 +679,8 @@ pub fn health_wait(url: &str, deadline: Duration) -> Result<Duration, BackendErr
     let started = Instant::now();
     let deadline_at = started + deadline;
     let agent: ureq::Agent = ureq::Agent::config_builder()
+        // Localhost only: a user's HTTP(S)_PROXY must not route it.
+        .proxy(None)
         .timeout_global(Some(HEALTH_REQUEST_TIMEOUT))
         .build()
         .into();
