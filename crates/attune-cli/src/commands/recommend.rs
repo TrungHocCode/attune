@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use anyhow::{anyhow, Result};
 use attune_estimate::model::registry::{load_catalog, Catalog};
-use attune_estimate::HwInputs;
+use attune_estimate::{HwInputs, Quant};
 use attune_tune::recommend::{recommend, RecommendOptions, RecommendRow, Verdict};
 
 /// Context the KV cache is sized at for recommendations.
@@ -115,13 +115,12 @@ pub fn render_recommend(
     let _ = writeln!(out);
     match rows.iter().find(|r| r.star) {
         Some(star) => {
-            let _ = writeln!(
-                out,
-                "Next: attune tune --model {} --quant {} --save {}.json",
-                star.model_id,
-                star.quant.as_str(),
-                star.model_id
-            );
+            let mut hint = format!("Next: attune run {}", star.model_id);
+            if star.quant != Quant::Q4_K_M {
+                hint.push_str(" --quant ");
+                hint.push_str(star.quant.as_str());
+            }
+            let _ = writeln!(out, "{hint}");
         }
         None => {
             let smallest = rows.iter().map(|r| r.ram_bytes).min().unwrap_or(0) as f64;
@@ -212,7 +211,7 @@ mod tests {
         assert!(text.contains("Model"), "{text}");
         assert!(text.contains("Fit"), "{text}");
         assert!(text.lines().any(|line| line.starts_with('★')), "{text}");
-        assert!(text.contains("Next: attune tune --model"), "{text}");
+        assert!(text.contains("Next: attune run"), "{text}");
         assert!(text.contains("uncalibrated"), "{text}");
         assert!(
             text.contains("catalog 2026-11-26 (built-in, offline)"),
@@ -261,6 +260,51 @@ mod tests {
             .sum();
         assert_eq!(body(false), expected);
         assert!(body(false) < body(true));
+    }
+
+    #[test]
+    fn next_hint_uses_run_and_names_a_non_default_quant() {
+        fn row(quant: Quant) -> RecommendRow {
+            RecommendRow {
+                model_id: "qwen3-4b-instruct-2507".to_string(),
+                display: "Qwen/Qwen3 4B".to_string(),
+                quant,
+                download_bytes: 2_500_000_000,
+                ram_bytes: 3_000_000_000,
+                decode_tps: 20.0,
+                ttft_ms: 500.0,
+                verdict: Verdict::Fits,
+                tier: Tier::Small,
+                pick: true,
+                star: true,
+            }
+        }
+
+        let default = render_recommend(
+            &[row(Quant::Q4_K_M)],
+            hw(),
+            9e9,
+            "cached",
+            "2026-11-26",
+            false,
+        );
+        assert!(
+            default.contains("Next: attune run qwen3-4b-instruct-2507\n"),
+            "{default}"
+        );
+
+        let q8 = render_recommend(
+            &[row(Quant::Q8_0)],
+            hw(),
+            9e9,
+            "cached",
+            "2026-11-26",
+            false,
+        );
+        assert!(
+            q8.contains("Next: attune run qwen3-4b-instruct-2507 --quant q8_0"),
+            "{q8}"
+        );
     }
 
     #[test]
