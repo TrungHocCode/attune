@@ -31,6 +31,7 @@ cargo test --workspace
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 cargo run -p attune-cli -- detect
+cargo audit   # when Cargo.lock changes; CI runs it on every PR
 ```
 
 - Phase 0 acceptance: `cargo test` must be green on Linux + Windows.
@@ -104,6 +105,19 @@ Current phase: **PHASE 6 — RECOMMEND & DOWNLOADS (M6)**.
 ## 8. Open-Source Contribution (see CONTRIBUTING.md)
 
 - External contributors: fork → branch → PR. Same 4 verify gates + English-only rule.
-- `main` protection enforced via API: PR required, `check (ubuntu-latest)` + `check (windows-latest)` must pass, linear history (squash), no force push/deletion, applies to admins too.
+- `main` protection is enforced via the API:
+  - A PR is required.
+  - `check (ubuntu-latest)`, `check (windows-latest)` and `conventional-title` must pass.
+  - The branch must be up to date with `main`, and review conversations must be resolved.
+  - History stays linear (squash merges); force-push and deletion are blocked.
+  - The rules apply to admins too.
+
+  The `catalog` branch has a ruleset that blocks force-push and deletion.
+- Supply chain:
+  - CI has an `audit` job (`cargo audit`); keep it at 0 vulnerabilities.
+  - Actions are pinned to commit SHAs with a version comment.
+  - Workflows get `permissions: contents: read` unless they need more.
+  - Dependabot opens weekly cargo and Actions PRs. Merge them one at a time (the branch must be up to date first). A major bump that breaks the build needs a code-fix PR, not a merge.
+- Security reports go through `SECURITY.md` (private GitHub advisories), never public issues. A new download host or catalog publisher must be added to `HostPolicy` / `TRUSTED_PUBLISHERS` deliberately, with a test.
 - Issue/PR templates live in `.github/`. Link issues (`Fixes #N`) in every PR.
 - Writing bar: imitate issues/PRs #10–#14 (problem with evidence first, concrete proposal, verification output, reviewer-focus note). See CONTRIBUTING.md “Writing Quality Issues and PRs”. Never tick the CI checkbox without green checks.
