@@ -14,6 +14,19 @@ Harassment, spam, or low-effort PRs will be closed. See
 Do not report vulnerabilities in public issues. Use GitHub's private
 reporting as described in [SECURITY.md](SECURITY.md).
 
+## Build from source
+
+Requires Rust stable ([install](https://www.rust-lang.org/tools/install)).
+
+```powershell
+git clone https://github.com/TrungHocCode/attune.git
+cd attune
+cargo build --release -p attune-cli
+.\target\release\attune.exe --version     # Linux: ./target/release/attune --version
+```
+
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed. It publishes Windows and Linux x64 archives plus `SHA256SUMS`, which `install.ps1` and `install.sh` verify.
+
 ## How to Contribute
 
 1. **Find or open an issue** describing the bug or feature. For large changes,

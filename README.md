@@ -25,44 +25,80 @@ Attune closes that gap in three steps:
 
 ## Quick start
 
-Requires Rust stable ([install](https://www.rust-lang.org/tools/install)).
+**1. Install** (one line, no Rust needed):
 
 ```powershell
-git clone https://github.com/TrungHocCode/attune.git
-cd attune
-cargo build --release -p attune-cli
-$env:PATH += ";$PWD	argetelease"
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/TrungHocCode/attune/main/install.ps1 | iex
 ```
 
-Then three commands, with no model name to know and nothing to download by
-hand:
+```bash
+# Linux x86-64
+curl -fsSL https://raw.githubusercontent.com/TrungHocCode/attune/main/install.sh | sh
+```
+
+The installer downloads the latest release, checks its SHA-256, puts `attune` in
+`~/.attune/bin` and adds that folder to your PATH. Open a new terminal afterwards.
+Windows SmartScreen may warn the first time, because the binary is not code-signed yet.
+Run the same line again to upgrade.
+
+**2. See which models suit this machine:**
 
 ```powershell
-attune setup --yes        # once: installs the tested llama.cpp build into ~/.attune
-attune tune               # no --model: lists models that suit this machine
+attune recommend
 ```
 
 ```
-Machine: RAM 33.6 GB/s, 4.7 GB for models · catalog 2026-11-26 (built-in, offline)
+Machine: RAM 33.5 GB/s, 3.2 GB for models · catalog 2026-11-27 (cached)
 
   Model                      Quant    Download      RAM      Speed  First reply  Fit
 ★ Qwen3 4B Instruct 2507     q4_k_m     2.5 GB   3.1 GB   13.0 tok/s        6.5 s  ✅
 • Qwen3 0.6B                 q8_0       0.6 GB   1.1 GB   47.6 tok/s        1.0 s  ✅
-  Qwen2.5 14B Instruct       q4_k_m     9.0 GB   9.8 GB    3.7 tok/s       23.9 s  ❌ needs 5.1 GB more
   Mistral 7B Instruct v0.3   q4_k_m     4.4 GB   4.9 GB    7.5 tok/s       11.7 s  ❌ needs 0.2 GB more
   ...
-Next: attune tune --model qwen3-4b-instruct-2507 --quant q4_k_m --save qwen3-4b-instruct-2507.json
+Next: attune run qwen3-4b-instruct-2507
 ```
+
+**3. Run it and chat:**
 
 ```powershell
-attune tune --model qwen3-4b-instruct-2507 --save qwen4b.json   # best settings, no file needed yet
-attune serve --profile qwen4b.json --yes                        # downloads + verifies the model, then serves
+attune run qwen3-4b-instruct-2507
 ```
 
-Any OpenAI-compatible client can now use `http://127.0.0.1:8080/v1`.
-Predictions are uncalibrated (about ±25%; within ±10% decode on the
-reference machine). `--max-ram 4G` plans against a RAM budget instead of
-what is free right now, and `--all` lists every model and quant.
+`attune run` handles everything else:
+- installs llama.cpp the first time;
+- tunes the settings for your hardware and saves them;
+- downloads and verifies the model, asking first;
+- opens a chat in the terminal. `/bye` quits.
+
+The next `attune run` of the same model reuses the saved settings.
+
+The same server works with any OpenAI-compatible app:
+- `attune run <model> --no-chat` serves at `http://127.0.0.1:8080/v1`;
+- `attune chat` talks to a running server from another terminal.
+
+Predictions are uncalibrated (about ±25%; within ±10% decode on the reference machine).
+`attune recommend --max-ram 4G` plans against a RAM budget instead of the RAM free right now,
+and `--all` lists every model and quant.
+
+### Where files go
+
+Everything lives in `~/.attune` (`%USERPROFILE%\.attune` on Windows):
+
+| Folder | What | Size |
+|---|---|---|
+| `bin/` | the `attune` binary | ~10 MB |
+| `llama.cpp/` | the pinned llama.cpp build | ~50 MB |
+| `models/` | downloaded GGUF models | 0.5–10 GB each |
+| `profiles/` | tuned settings, one file per model | a few KB |
+
+To keep models on another drive, set `ATTUNE_HOME` before installing:
+- PowerShell: `$env:ATTUNE_HOME = "D:\attune"`
+- Linux: `export ATTUNE_HOME=/data/attune`
+
+To use it permanently, set it as a user environment variable. To uninstall, delete the folder and remove its `bin` from your PATH.
+
+To build from source instead, see [CONTRIBUTING.md](CONTRIBUTING.md#build-from-source).
 
 ## Usage
 
@@ -75,9 +111,11 @@ attune bench --json        # machine-readable report
 attune estimate --model smollm2-135m --quant q4_k_m   # predict before running
 attune tune --model smollm2-135m --objective throughput  # rank configs
 attune tune --model smollm2-135m --save profile.json     # export best profile
-attune tune --max-ram 4G --all                          # recommend: every model under a 4 GB budget
+attune recommend --max-ram 4G --all                    # every model under a 4 GB budget
 attune setup --yes                                      # install the pinned llama.cpp build
-attune serve --profile profile.json                     # run it behind an OpenAI-compatible API
+attune serve --profile profile.json                     # serve a profile (file path or saved name)
+attune run qwen3-4b-instruct-2507                       # setup + tune + download + serve + chat
+attune chat --url http://127.0.0.1:8080                 # chat with a running server
 ```
 
 While serving, the proxy answers `GET /v1/metrics` (JSON) and `GET /metrics`

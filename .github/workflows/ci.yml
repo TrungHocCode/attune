@@ -36,3 +36,66 @@ jobs:
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
       - run: cargo install cargo-audit --locked
       - run: cargo audit
+
+  # Exercise the release packagers and the install scripts without a release.
+  installer:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      ATTUNE_NO_MODIFY_PATH: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - run: cargo build --release -p attune-cli
+
+      - name: Package and install (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/attune-dist"
+          rm -rf "$out"
+          scripts/package.sh v0.0.0-ci target/release/attune "$out"
+          ( cd "$out" && sha256sum attune-* > SHA256SUMS )
+
+          export ATTUNE_HOME="$RUNNER_TEMP/attune-home"
+          rm -rf "$ATTUNE_HOME"
+          ATTUNE_VERSION=v0.0.0-ci ATTUNE_DOWNLOAD_BASE="file://$out" sh install.sh
+          "$ATTUNE_HOME/bin/attune" --version
+
+          archive=$(ls "$out"/attune-*.tar.gz)
+          printf 'x' >> "$archive"
+          if ATTUNE_VERSION=v0.0.0-ci ATTUNE_DOWNLOAD_BASE="file://$out" sh install.sh; then
+            echo "error: installer accepted a corrupted archive" >&2
+            exit 1
+          fi
+          echo "ok: installer rejected the corrupted archive"
+
+      - name: Package and install (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'attune-dist'
+          if (Test-Path -LiteralPath $out) { Remove-Item -LiteralPath $out -Recurse -Force }
+          ./scripts/package.ps1 -Tag 'v0.0.0-ci' -Binary 'target/release/attune.exe' -OutDir $out
+          $archive = Get-ChildItem -LiteralPath $out -Filter 'attune-*.zip' | Select-Object -First 1
+          $hash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($archive.Name)" | Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS') -Encoding ascii
+
+          $env:ATTUNE_HOME = Join-Path $env:RUNNER_TEMP 'attune-home'
+          if (Test-Path -LiteralPath $env:ATTUNE_HOME) { Remove-Item -LiteralPath $env:ATTUNE_HOME -Recurse -Force }
+          $env:ATTUNE_VERSION = 'v0.0.0-ci'
+          $env:ATTUNE_DOWNLOAD_BASE = $out
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'installer failed' }
+          & (Join-Path $env:ATTUNE_HOME 'bin\attune.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw 'installed attune did not run' }
+
+          [System.IO.File]::AppendAllText($archive.FullName, 'x')
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+          if ($LASTEXITCODE -eq 0) { throw 'installer accepted a corrupted archive' }
+          Write-Host 'ok: installer rejected the corrupted archive'
+          exit 0  # the expected failure above leaves $LASTEXITCODE=1
