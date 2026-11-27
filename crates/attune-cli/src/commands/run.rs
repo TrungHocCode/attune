@@ -161,7 +161,9 @@ pub fn profile_name(model: &str, quant: &str) -> String {
     let name = if is_gguf {
         // Split on both separators so a Windows path behaves the same on Linux.
         let file = text.rsplit(['/', '\\']).next().unwrap_or(text);
-        file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_string()
+        file.rsplit_once('.')
+            .map_or(file, |(stem, _)| stem)
+            .to_string()
     } else {
         format!("{text}-{quant}")
     };
