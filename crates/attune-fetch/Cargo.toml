@@ -11,7 +11,7 @@ thiserror = "1"
 # and llama.cpp downloads, no async runtime.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 # SHA-256 of downloaded files (models, llama.cpp archives) is the integrity check.
-sha2 = "0.10"
+sha2 = "0.11"
 # Already used by attune-hal; free disk space before a multi-GB download.
 sysinfo = "0.36"
 # Unpack the pinned llama.cpp release: Windows ships .zip, Linux .tar.gz.
@@ -21,4 +21,4 @@ tar = "0.4"
 flate2 = "1"
 
 [dev-dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
