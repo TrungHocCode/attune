@@ -17,6 +17,24 @@ All notable changes to this project will be documented in this file.
 - GGUF head dimension now comes from `attention.key_length` when present (Qwen3 was sized 80/64 instead of 128).
 - `attune-backend` declares the `Win32_Security` windows-sys feature it needs.
 
+### Security
+- `zip` 2.6.1 -> 9.8.2, fixing 6 RustSec advisories (RUSTSEC-2026-0367/0368/0369/0429/0545/0548) in the llama.cpp archive unpacker. Unpacked zip and tar.gz files keep only `0o777` permission bits, so an archive can never set setuid, setgid or sticky bits (#112).
+- The catalog loader rejects model files from repo owners outside `TRUSTED_PUBLISHERS` and llama.cpp assets that are not from `github.com/ggml-org/llama.cpp/releases/download/`. A test keeps the list in sync with `catalog/publishers.json` (#112).
+- `SECURITY.md` adds private vulnerability reporting through GitHub Security Advisories and defines what is in scope (#112).
+
+### Changed
+- Contributor and CI hygiene (#112):
+  - Added `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) and `.github/CODEOWNERS`.
+  - GitHub Actions are pinned to commit SHAs, and workflows run with a read-only token.
+  - A new `audit` CI job runs `cargo audit`.
+  - Dependabot checks cargo and GitHub Actions weekly.
+- Dependencies (Dependabot, #113-#117):
+  - `thiserror` 1 -> 2
+  - `sha2` 0.10 -> 0.11
+  - `clap` 4.6.9
+  - `ctrlc` 3.5.3
+  - `action-semantic-pull-request` 6.1.3
+
 ## [0.5.0] - 2026-11-26
 
 M5 (serve) MVP, the estimate accuracy fixes found while re-testing M1-M5 on real models, and the revised M4 target. Acceptance: profile apply 20/20, install to first inference 3 min 38 s (see ROADMAP).
