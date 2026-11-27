@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/attune-hal",
+    "crates/attune-fetch",
     "crates/attune-bench",
     "crates/attune-estimate",
     "crates/attune-tune",

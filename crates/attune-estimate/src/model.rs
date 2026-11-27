@@ -11,7 +11,9 @@ use crate::EstimateError;
 
 pub mod catalog;
 pub mod fetch;
+pub mod generate;
 pub mod gguf;
+pub mod registry;
 
 pub use catalog::{parse_model, ModelEntry, MODEL_CATALOG};
 pub use fetch::{

@@ -26,6 +26,9 @@ pub enum EstimateError {
     #[error("invalid model config: {0}")]
     InvalidConfig(String),
     /// The on-disk catalog cache could not be written.
+    /// A downloadable model catalog failed to parse or validate.
+    #[error("invalid model catalog: {0}")]
+    InvalidCatalog(String),
     #[error("catalog cache error: {0}")]
     Cache(String),
     /// A hardware input is missing, non-finite or non-positive.

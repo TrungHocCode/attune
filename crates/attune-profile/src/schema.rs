@@ -132,6 +132,49 @@ pub struct ModelConfig {
     pub quant: String,
     /// Weight file size in bytes (weights only; no KV cache).
     pub size_bytes: u64,
+    /// Where the file can be downloaded (v2). `serve` fetches a missing
+    /// model from here; hand-written and v1 profiles have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ModelSource>,
+}
+
+/// A pinned Hugging Face file: enough to download and verify it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSource {
+    pub repo: String,
+    pub file: String,
+    /// Repo commit the file is pinned to.
+    pub revision: String,
+    /// Lowercase hex SHA-256 of the file.
+    pub sha256: String,
+    pub size: u64,
+}
+
+impl ModelSource {
+    /// Download URL pinned to the revision.
+    pub fn url(&self) -> String {
+        format!(
+            "https://huggingface.co/{}/resolve/{}/{}",
+            self.repo, self.revision, self.file
+        )
+    }
+
+    /// Portable `model.path` for this file inside the attune home dir.
+    pub fn home_path(&self) -> String {
+        format!("{HOME_PREFIX}models/{}/{}", self.repo, self.file)
+    }
+}
+
+/// Prefix `model.path` uses for files inside the attune home dir, so one
+/// profile works on machines with different home dirs.
+pub const HOME_PREFIX: &str = "~/.attune/";
+
+/// Expand a leading [`HOME_PREFIX`] against `home`; any other path is kept.
+pub fn expand_home(path: &str, home: &std::path::Path) -> std::path::PathBuf {
+    match path.strip_prefix(HOME_PREFIX) {
+        Some(rest) => home.join(rest),
+        None => std::path::PathBuf::from(path),
+    }
 }
 
 impl Default for ModelConfig {
@@ -140,6 +183,7 @@ impl Default for ModelConfig {
             path: String::new(),
             quant: "q4_k_m".to_string(),
             size_bytes: 0,
+            source: None,
         }
     }
 }
@@ -324,6 +368,7 @@ mod tests {
                 path: "models/tiny.gguf".to_string(),
                 quant: "q4_k_m".to_string(),
                 size_bytes: 82_600_000,
+                source: None,
             },
             load_config: LoadConfig {
                 n_ctx: 2_048,
@@ -476,5 +521,35 @@ mod error_display_tests {
         let err = Profile::from_json_str("{oops").unwrap_err();
         assert_eq!(err.to_string(), "invalid profile JSON");
         assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn v2_roundtrips_source() {
+        let mut profile = Profile::default();
+        profile.model.source = Some(ModelSource {
+            repo: "Qwen/Qwen3-8B-GGUF".to_string(),
+            file: "Qwen3-8B-Q4_K_M.gguf".to_string(),
+            revision: "7c41481f".to_string(),
+            sha256: "d".repeat(64),
+            size: 5_027_783_488,
+        });
+        let back = Profile::from_json_str(&profile.to_json_string().expect("ser")).expect("de");
+        assert_eq!(back.model.source, profile.model.source);
+        // Profiles without a source keep omitting the key.
+        let plain = Profile::default().to_json_string().expect("ser");
+        assert!(!plain.contains("\"source\""));
+    }
+
+    #[test]
+    fn expand_home_only_touches_the_attune_prefix() {
+        let home = std::path::Path::new("/home/u/.attune");
+        assert_eq!(
+            expand_home("~/.attune/models/a/b.gguf", home),
+            home.join("models/a/b.gguf")
+        );
+        assert_eq!(
+            expand_home("F:/x.gguf", home),
+            std::path::PathBuf::from("F:/x.gguf")
+        );
     }
 }

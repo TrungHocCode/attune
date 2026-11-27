@@ -34,6 +34,7 @@ fn test_profile(model: &str) -> Profile {
             path: model.to_string(),
             quant: "q4_k_m".to_string(),
             size_bytes: 0,
+            source: None,
         },
         load_config: LoadConfig {
             n_ctx: 256,

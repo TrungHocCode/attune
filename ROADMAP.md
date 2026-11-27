@@ -122,7 +122,7 @@ bytes), #73, #74 (GGUF facts), #75 (profile metadata), #69 (prefill
 ceiling), #70 (bandwidth probe), then #78 re-validates M3/M4 on 4B+ models.
 The GPU work below builds on this math, so it lands first.
 
-## M6 — Recommend & downloads (next, v0.6.0 planned)
+## M6 — Recommend & downloads 🚧 (built; catalog freshness pending, v0.6.0 planned)
 
 **Goal:** a new user who does not know model names gets a model that suits
 their machine running, with no manual downloads.
@@ -142,6 +142,18 @@ their machine running, with no manual downloads.
   catalogs; works offline; interrupted downloads resume and corrupted files
   are rejected.
 - Design: [docs/superpowers/specs/2026-11-26-recommend-design.md](docs/superpowers/specs/2026-11-26-recommend-design.md).
+- Results 2026-11-27 (Windows 11, Core 5 210H, llama.cpp b11804 CPU, see
+  [docs/benchmark-methodology.md](docs/benchmark-methodology.md#m6-recommend-acceptance-2026-11-27)):
+  zero manual downloads, empty home to first reply in 67.9 s including 0.66 GB
+  of downloads (**met**); uncalibrated decode +5.1% (Qwen3 0.6B Q8_0), +9.5%
+  (4B Q4_K_M), -2.4% (8B Q4_K_M) vs llama-bench (**met**), and the fitting
+  pick served; offline recommend + serve (**met**); a download killed at 76 MB
+  resumed, a tampered SHA-256 was rejected (**met**). **Pending:** 7
+  consecutive daily catalog runs, which start once `catalog.yml` is on `main`.
+- Found on the way: Windows power throttling slowed every in-process probe
+  after the first (34.7 -> 12-17 GB/s), and `HTTP(S)_PROXY` broke `serve`'s
+  localhost health check; both fixed. llama.cpp prefill reaches 0.40 of the
+  unthrottled int8 peak (was assumed 0.9-0.95).
 
 ## M7 — GPU (proposed)
 

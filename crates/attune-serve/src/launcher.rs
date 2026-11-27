@@ -9,7 +9,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use attune_backend::{resolve_llama_server, Backend, LlamaServerBackend, Paths, ServerGuard};
+use attune_backend::{
+    ensure_model, resolve_llama_server, Backend, LlamaServerBackend, Paths, ServerGuard,
+};
 use attune_hal::HardwareInfo;
 use attune_profile::{validate, Profile, WarningKind};
 use serde::Serialize;
@@ -32,6 +34,67 @@ pub struct ServeOptions {
     pub timeout: Duration,
     /// Skip profile validation (fingerprint/RAM warnings) and launch as-is.
     pub force: bool,
+    /// Whether a missing model may be downloaded from `model.source`.
+    pub download: DownloadConsent,
+    /// Download progress `(bytes_done, bytes_total)`.
+    pub progress: fn(u64, u64),
+}
+
+/// May `serve` download a profile's missing model?
+#[derive(Debug, Clone, Copy)]
+pub enum DownloadConsent {
+    /// `--yes`: download without asking.
+    Yes,
+    /// Non-interactive without `--yes`: never download, explain how.
+    No,
+    /// Interactive: ask with `(size_bytes, description)`.
+    Ask(fn(u64, &str) -> bool),
+}
+
+/// True when `path` is relative to the attune home dir.
+fn needs_home(path: &str) -> bool {
+    path.starts_with(attune_profile::HOME_PREFIX)
+}
+
+/// Point `profile.model.path` at a real file: expand a `~/.attune/` path
+/// against `home` and, when the file is missing and the profile has a
+/// `source`, download it under `consent`.
+pub fn resolve_model_file(
+    profile: &mut Profile,
+    home: &std::path::Path,
+    consent: DownloadConsent,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<(), ServeError> {
+    let path = attune_profile::expand_home(&profile.model.path, home);
+    match profile.model.source.clone() {
+        Some(source) => {
+            let present = std::fs::metadata(&path).is_ok_and(|m| m.len() == source.size);
+            let size_gb = source.size as f64 / 1e9;
+            if !present && matches!(consent, DownloadConsent::No) {
+                return Err(ServeError::InvalidConfig(format!(
+                    "model file `{}` is missing; pass --yes to download {size_gb:.1} GB from {}",
+                    path.display(),
+                    source.repo
+                )));
+            }
+            let what = format!("{} ({size_gb:.1} GB) from {}", source.file, source.repo);
+            let mut confirm = |size: u64| match consent {
+                DownloadConsent::Yes => true,
+                DownloadConsent::No => false,
+                DownloadConsent::Ask(ask) => ask(size, &what),
+            };
+            ensure_model(&path, &source, &mut confirm, progress)?;
+        }
+        None if !path.exists() => {
+            return Err(ServeError::InvalidConfig(format!(
+                "model file `{}` not found",
+                path.display()
+            )));
+        }
+        None => {}
+    }
+    profile.model.path = path.display().to_string();
+    Ok(())
 }
 
 /// A launched server plus the metadata the CLI needs to print.
@@ -193,12 +256,23 @@ pub fn launch(options: &ServeOptions) -> Result<Serving, ServeError> {
             path: options.profile.display().to_string(),
             source,
         })?;
-    let profile = Profile::from_json_str(&raw)?;
+    let mut profile = Profile::from_json_str(&raw)?;
     if profile.model.path.trim().is_empty() {
         return Err(ServeError::InvalidConfig(
             "profile has an empty model.path; run `attune tune --save` first".to_string(),
         ));
     }
+    // Only a `~/.attune/` path needs the home dir; an absolute path must keep
+    // working where HOME/USERPROFILE is unset (services).
+    let home = if needs_home(&profile.model.path) {
+        attune_fetch::home_dir().map_err(|err| ServeError::InvalidConfig(err.to_string()))?
+    } else {
+        PathBuf::new()
+    };
+    let progress = options.progress;
+    resolve_model_file(&mut profile, &home, options.download, &mut |done, total| {
+        progress(done, total)
+    })?;
 
     // `--force` means "do not validate against this machine", so skip the
     // (not free) hardware probe entirely: no fingerprint is needed and a HAL
@@ -366,5 +440,70 @@ mod tests {
             health_url_for("127.0.0.1", 8081),
             "http://127.0.0.1:8081/health"
         );
+    }
+
+    fn download_profile(path: &str, size: Option<u64>) -> Profile {
+        let mut profile = Profile::default();
+        profile.model.path = path.to_string();
+        profile.model.source = size.map(|size| attune_profile::ModelSource {
+            repo: "org/repo-GGUF".to_string(),
+            file: "m.gguf".to_string(),
+            revision: "rev".to_string(),
+            sha256: "a".repeat(64),
+            size,
+        });
+        profile
+    }
+
+    fn temp_home(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("attune-serve-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    #[test]
+    fn non_tty_without_yes_errors_clearly() {
+        let home = temp_home("notty");
+        let mut profile =
+            download_profile("~/.attune/models/org/repo-GGUF/m.gguf", Some(2_500_000_000));
+        let err = resolve_model_file(&mut profile, &home, DownloadConsent::No, &mut |_, _| {})
+            .expect_err("must not download");
+        assert!(
+            err.to_string().contains("pass --yes to download 2.5 GB"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn profile_without_source_and_missing_file_errors_without_download() {
+        let home = temp_home("nosource");
+        let mut profile = download_profile("F:/nowhere/missing.gguf", None);
+        let err = resolve_model_file(&mut profile, &home, DownloadConsent::Yes, &mut |_, _| {})
+            .expect_err("missing");
+        let text = err.to_string();
+        assert!(text.contains("not found"), "{text}");
+        assert!(!text.contains("--yes"), "{text}");
+    }
+
+    #[test]
+    fn home_relative_path_is_expanded_for_llama_server() {
+        let home = temp_home("expand");
+        let file = home.join("models/org/repo-GGUF/m.gguf");
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&file, b"12345").expect("write");
+        let mut profile = download_profile("~/.attune/models/org/repo-GGUF/m.gguf", Some(5));
+        resolve_model_file(&mut profile, &home, DownloadConsent::No, &mut |_, _| {})
+            .expect("present");
+        assert_eq!(PathBuf::from(&profile.model.path), file);
+    }
+
+    #[test]
+    fn absolute_model_path_needs_no_home_dir() {
+        let home = temp_home("abs");
+        let file = home.join("m.gguf");
+        std::fs::write(&file, b"x").expect("write");
+        assert!(!needs_home(&file.display().to_string()));
+        assert!(needs_home("~/.attune/models/a/b.gguf"));
     }
 }

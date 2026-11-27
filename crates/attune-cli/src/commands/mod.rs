@@ -2,9 +2,13 @@
 //! (AGENTS.md §1: no logic in `main.rs`, all of it in the crates).
 
 mod bench;
+mod catalog;
 mod detect;
+mod download;
 mod estimate;
+mod recommend;
 mod serve;
+mod setup;
 mod tune;
 
 use anyhow::Result;
@@ -13,6 +17,19 @@ use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Maintainer tooling for the model catalog (used by CI)
+    #[command(hide = true, subcommand)]
+    Catalog(CatalogCommand),
+    /// Download and install the llama.cpp build attune is tested with
+    /// (pinned by the model catalog) into the attune home dir
+    Setup {
+        /// Download without asking
+        #[arg(long)]
+        yes: bool,
+        /// Re-download the model catalog even if the cached copy is fresh
+        #[arg(long)]
+        refresh_catalog: bool,
+    },
     /// Detect hardware (M1: CPU/SIMD/cache/RAM via raw-cpuid + sysinfo)
     Detect {
         /// Output machine-readable JSON instead of pretty table
@@ -169,16 +186,20 @@ pub enum Command {
         /// Launch without validating the profile against this machine
         #[arg(long)]
         force: bool,
+        /// Download the profile's model without asking when it is missing
+        #[arg(long)]
+        yes: bool,
         /// Print one machine-readable JSON line once the upstream is healthy
         /// (the proxy address is printed on stderr)
         #[arg(long)]
         json: bool,
     },
-    /// Rank candidate inference configs from roofline estimates (M4 slice 1).
-    /// Estimate-only: no llama.cpp run, no file output.
+    /// Without --model/--params: recommend catalog models that suit this
+    /// machine. With them: rank inference configs for that model and
+    /// optionally save the winner as a profile.
     #[command(group(
         ArgGroup::new("model_source")
-            .required(true)
+            .required(false)
             .args(["model", "params"])
     ))]
     Tune {
@@ -258,6 +279,16 @@ pub enum Command {
         /// cross-quant warning can be produced. Used only with `--calibrate`.
         #[arg(long, value_name = "QUANT", requires = "bench_json")]
         bench_quant: Option<String>,
+        /// Recommend mode: RAM budget to plan against instead of the RAM
+        /// available right now, e.g. `4G` (keeps room for other apps)
+        #[arg(long, value_name = "SIZE")]
+        max_ram: Option<String>,
+        /// Recommend mode: show every catalog model and quant
+        #[arg(long)]
+        all: bool,
+        /// Re-download the model catalog even if the cached copy is fresh
+        #[arg(long)]
+        refresh_catalog: bool,
         /// Output machine-readable JSON instead of the human table
         #[arg(long)]
         json: bool,
@@ -268,6 +299,15 @@ pub enum Command {
 pub fn dispatch(command: Command) -> Result<()> {
     match command {
         Command::Detect { json } => detect::run(json),
+        Command::Catalog(CatalogCommand::Build {
+            publishers,
+            previous,
+            out,
+        }) => catalog::build(&publishers, previous.as_deref(), &out),
+        Command::Setup {
+            yes,
+            refresh_catalog,
+        } => setup::run(yes, refresh_catalog),
         Command::Bench {
             quick,
             json,
@@ -332,6 +372,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             api_key,
             timeout_s,
             force,
+            yes,
             json,
         } => serve::run(
             &profile,
@@ -343,6 +384,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             api_key.as_deref(),
             timeout_s,
             force,
+            yes,
             json,
         ),
         Command::Tune {
@@ -365,6 +407,9 @@ pub fn dispatch(command: Command) -> Result<()> {
             bench_json,
             calibrate,
             bench_quant,
+            max_ram,
+            all,
+            refresh_catalog,
             json,
         } => tune::run(
             model.as_deref(),
@@ -388,7 +433,28 @@ pub fn dispatch(command: Command) -> Result<()> {
             bench_json.as_deref(),
             bench_quant.as_deref(),
             calibrate,
+            tune::RecommendArgs {
+                max_ram: max_ram.as_deref(),
+                all,
+                refresh_catalog,
+            },
             json,
         ),
     }
+}
+
+#[derive(Subcommand)]
+pub enum CatalogCommand {
+    /// Regenerate catalog.json from the Hugging Face API
+    Build {
+        /// Generator config (allow-lists, quants, llama.cpp pin)
+        #[arg(long, default_value = "catalog/publishers.json")]
+        publishers: PathBuf,
+        /// Yesterday's catalog: reused header facts and the shrink guard
+        #[arg(long)]
+        previous: Option<PathBuf>,
+        /// Where to write the new catalog
+        #[arg(long)]
+        out: PathBuf,
+    },
 }

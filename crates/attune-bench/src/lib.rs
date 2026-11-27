@@ -20,6 +20,7 @@ pub mod flops;
 pub mod int8;
 pub mod llama;
 pub mod monitor;
+pub mod power;
 
 use thiserror::Error;
 

@@ -25,6 +25,7 @@ pub mod config;
 pub mod error;
 pub mod export;
 pub mod objective;
+pub mod recommend;
 pub mod report;
 pub mod sweep;
 pub mod verify;

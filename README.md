@@ -1,9 +1,9 @@
 # attune — Tune LLM inference to your hardware
 
 > [!NOTE]
-> Beta (v0.5.x, MVP). `detect`, `bench`, `estimate`, `tune` and `serve`
-> work on CPU (Linux/Windows x86-64). GPU support is planned. Not
-> production-ready yet.
+> Beta (v0.5.x, MVP; M6 recommend & downloads on `main`). `detect`, `bench`,
+> `estimate`, `tune` and `serve` work on CPU (Linux/Windows x86-64). GPU
+> support is planned. Not production-ready yet.
 
 [![CI](https://github.com/TrungHocCode/attune/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TrungHocCode/attune/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -30,28 +30,39 @@ Requires Rust stable ([install](https://www.rust-lang.org/tools/install)).
 ```powershell
 git clone https://github.com/TrungHocCode/attune.git
 cd attune
-cargo build -p attune-cli
-.\target\debug\attune.exe detect
+cargo build --release -p attune-cli
+$env:PATH += ";$PWD	argetelease"
+```
+
+Then three commands, with no model name to know and nothing to download by
+hand:
+
+```powershell
+attune setup --yes        # once: installs the tested llama.cpp build into ~/.attune
+attune tune               # no --model: lists models that suit this machine
 ```
 
 ```
-CPU:        Intel(R) Core(TM) 5 210H (GenuineIntel, 8C/12T)
-SIMD:       SSE4.2, AVX, AVX2, AVX-VNNI
-Clock:      unknown (best-effort)
-Cache:      L1d 32 KB | L1i 64 KB | L2 2.0 MB | L3 12.0 MB | line 64 B
-NUMA:       1 node (not detected; single node assumed)
-GPU:        none detected (GPU detection not implemented)
-RAM:        15.6 GB total / 1.8 GB available
-OS:         windows
+Machine: RAM 33.6 GB/s, 4.7 GB for models · catalog 2026-11-26 (built-in, offline)
+
+  Model                      Quant    Download      RAM      Speed  First reply  Fit
+★ Qwen3 4B Instruct 2507     q4_k_m     2.5 GB   3.1 GB   13.0 tok/s        6.5 s  ✅
+• Qwen3 0.6B                 q8_0       0.6 GB   1.1 GB   47.6 tok/s        1.0 s  ✅
+  Qwen2.5 14B Instruct       q4_k_m     9.0 GB   9.8 GB    3.7 tok/s       23.9 s  ❌ needs 5.1 GB more
+  Mistral 7B Instruct v0.3   q4_k_m     4.4 GB   4.9 GB    7.5 tok/s       11.7 s  ❌ needs 0.2 GB more
+  ...
+Next: attune tune --model qwen3-4b-instruct-2507 --quant q4_k_m --save qwen3-4b-instruct-2507.json
 ```
 
 ```powershell
-.\target\debug\attune.exe bench --quick
+attune tune --model qwen3-4b-instruct-2507 --save qwen4b.json   # best settings, no file needed yet
+attune serve --profile qwen4b.json --yes                        # downloads + verifies the model, then serves
 ```
 
-```
-Memory bandwidth (read): 32.2 GB/s (buffer 256 MiB, 8 threads, 20 reps)
-```
+Any OpenAI-compatible client can now use `http://127.0.0.1:8080/v1`.
+Predictions are uncalibrated (about ±25%; within ±10% decode on the
+reference machine). `--max-ram 4G` plans against a RAM budget instead of
+what is free right now, and `--all` lists every model and quant.
 
 ## Usage
 
@@ -64,6 +75,8 @@ attune bench --json        # machine-readable report
 attune estimate --model smollm2-135m --quant q4_k_m   # predict before running
 attune tune --model smollm2-135m --objective throughput  # rank configs
 attune tune --model smollm2-135m --save profile.json     # export best profile
+attune tune --max-ram 4G --all                          # recommend: every model under a 4 GB budget
+attune setup --yes                                      # install the pinned llama.cpp build
 attune serve --profile profile.json                     # run it behind an OpenAI-compatible API
 ```
 
