@@ -187,7 +187,7 @@ mod tests {
         HwInputs {
             bw_gbps: 32.0,
             flops_gflops: 563.0,
-            int8_gops: Some(600.0),
+            int8_gops: Some(1700.0),
         }
     }
 

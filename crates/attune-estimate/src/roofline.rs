@@ -23,9 +23,15 @@ pub struct HwInputs {
     pub int8_gops: Option<f64>,
 }
 
+/// Share of the measured int8 peak llama.cpp prefill reaches. Measured
+/// 2026-11-27 on Qwen3 4B/8B Q4_K_M (llama-bench pp512 vs the unthrottled
+/// int8 probe): 649 / 1700 and 727 / 1700 GOPS, i.e. 0.38-0.43. The earlier
+/// "90-95%" was an artefact of a probe slowed by Windows power throttling.
+pub const INT8_PREFILL_EFFICIENCY: f64 = 0.40;
+
 impl HwInputs {
     /// Prefill latency for `quant`. A measured int8 ceiling already contains
-    /// the quantized-matmul cost (llama.cpp reaches 90-95% of it on Q4_K_M), so
+    /// the quantized-matmul cost; llama.cpp reaches [`INT8_PREFILL_EFFICIENCY`] of it, so
     /// it is used with no extra dequant penalty; the FP32 ceiling keeps the
     /// heuristic [`crate::Quant::dequant_penalty`].
     pub fn predict_prefill_ms(
@@ -35,7 +41,9 @@ impl HwInputs {
         quant: crate::Quant,
     ) -> Result<f64, EstimateError> {
         match self.int8_ceiling(quant) {
-            Some(gops) => crate::predict_prefill_ms(params, n_tokens, gops),
+            Some(gops) => {
+                crate::predict_prefill_ms(params, n_tokens, gops * INT8_PREFILL_EFFICIENCY)
+            }
             None => crate::predict_prefill_ms_quant(params, n_tokens, self.flops_gflops, quant),
         }
     }
@@ -176,11 +184,12 @@ mod tests {
             flops_gflops: 500.0,
             int8_gops: Some(1000.0),
         };
-        // 2 x 1e9 x 512 / 1000e9 x 1000 = 1024 ms, no dequant penalty.
+        // 2 x 1e9 x 512 / (1000e9 x 0.40 efficiency) x 1000 = 2560 ms,
+        // no dequant penalty on top.
         let q4 = hw
             .predict_prefill_ms(1_000_000_000, 512, Quant::Q4_K_M)
             .expect("q4");
-        assert!((q4 - 1024.0).abs() < 1e-6, "got {q4}");
+        assert!((q4 - 2560.0).abs() < 1e-6, "got {q4}");
         // fp16 stays on the 500 GFLOPS FP32 path: 2048 ms.
         let fp16 = hw
             .predict_prefill_ms(1_000_000_000, 512, Quant::Fp16)
