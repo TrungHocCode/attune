@@ -159,10 +159,9 @@ pub fn profile_name(model: &str, quant: &str) -> String {
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"));
     let name = if is_gguf {
-        path.file_stem().map_or_else(
-            || text.to_string(),
-            |stem| stem.to_string_lossy().into_owned(),
-        )
+        // Split on both separators so a Windows path behaves the same on Linux.
+        let file = text.rsplit(['/', '\\']).next().unwrap_or(text);
+        file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_string()
     } else {
         format!("{text}-{quant}")
     };
