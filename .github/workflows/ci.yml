@@ -98,3 +98,4 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
           if ($LASTEXITCODE -eq 0) { throw 'installer accepted a corrupted archive' }
           Write-Host 'ok: installer rejected the corrupted archive'
+          exit 0  # the expected failure above leaves $LASTEXITCODE=1
