@@ -15,7 +15,8 @@ sha2 = "0.10"
 # Already used by attune-hal; free disk space before a multi-GB download.
 sysinfo = "0.36"
 # Unpack the pinned llama.cpp release: Windows ships .zip, Linux .tar.gz.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+# deflate pulls flate2's pure-Rust zlib-rs backend (no C toolchain needed).
+zip = { version = "9", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1"
 
