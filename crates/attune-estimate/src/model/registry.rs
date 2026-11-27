@@ -13,6 +13,22 @@ use crate::{Arch, EstimateError, Quant};
 /// The only schema this build understands.
 pub const SCHEMA: &str = "attune-catalog/1";
 
+/// Repo owners the catalog generator is allowed to pull files from. Kept in
+/// sync with `catalog/publishers.json` (pinned by a test).
+pub const TRUSTED_PUBLISHERS: &[&str] = &[
+    "Qwen",
+    "microsoft",
+    "mistralai",
+    "HuggingFaceTB",
+    "ibm-granite",
+    "ggml-org",
+    "bartowski",
+    "unsloth",
+];
+
+/// Only llama.cpp builds from the official release feed may be installed.
+const LLAMA_ASSET_PREFIX: &str = "https://github.com/ggml-org/llama.cpp/releases/download/";
+
 /// The whole catalog document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
@@ -166,9 +182,22 @@ pub fn parse_catalog(text: &str) -> Result<Catalog, EstimateError> {
             if !is_sha256(&file.sha256) {
                 return bad(format!("`{}` has an invalid sha256", file.file));
             }
+            let owner = file.repo.split('/').next().unwrap_or("");
+            if !TRUSTED_PUBLISHERS.contains(&owner) {
+                return bad(format!(
+                    "`{}` comes from untrusted owner `{owner}`",
+                    file.file
+                ));
+            }
         }
     }
     for asset in &catalog.llama_cpp.assets {
+        if !asset.url.starts_with(LLAMA_ASSET_PREFIX) {
+            return bad(format!(
+                "llama.cpp asset `{}` is not from the official release feed",
+                asset.url
+            ));
+        }
         if !is_sha256(&asset.sha256) {
             return bad(format!(
                 "llama.cpp asset `{}` has an invalid sha256",
@@ -413,6 +442,44 @@ mod tests {
         let empty_files = catalog(SCHEMA, &[model("a", SHA_A)])
             .replace(r#""files": ["#, r#""files": [], "unused": ["#);
         assert!(parse_catalog(&empty_files).is_err(), "{empty_files}");
+    }
+
+    #[test]
+    fn rejects_untrusted_repo_owner() {
+        let text = catalog(SCHEMA, &[model("a", SHA_A)]).replace(
+            "Qwen/Qwen3-4B-Instruct-2507-GGUF",
+            "evilcorp/Qwen3-4B-Instruct-2507-GGUF",
+        );
+        let err = parse_catalog(&text).expect_err("untrusted owner must be rejected");
+        assert!(err.to_string().contains("evilcorp"), "{err}");
+    }
+
+    #[test]
+    fn rejects_foreign_llama_asset_url() {
+        let text = catalog(SCHEMA, &[model("a", SHA_A)]).replace(
+            "https://github.com/ggml-org/llama.cpp/releases/download/",
+            "https://evil.example/llama.cpp/",
+        );
+        let err = parse_catalog(&text).expect_err("foreign asset must be rejected");
+        assert!(err.to_string().contains("official release feed"), "{err}");
+    }
+
+    #[test]
+    fn trusted_list_covers_the_generator_publishers() {
+        let json: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../catalog/publishers.json"))
+                .expect("publishers.json parses");
+        let publishers = json["publishers"]
+            .as_array()
+            .expect("publishers is an array");
+        assert!(!publishers.is_empty());
+        for publisher in publishers {
+            let name = publisher.as_str().expect("publisher is a string");
+            assert!(
+                TRUSTED_PUBLISHERS.contains(&name),
+                "TRUSTED_PUBLISHERS is missing `{name}`"
+            );
+        }
     }
 
     fn temp_home(tag: &str) -> std::path::PathBuf {
