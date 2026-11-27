@@ -14,7 +14,7 @@ attune-hal = { path = "../attune-hal" }
 # new transitive dependency, only a second workspace consumer of it.
 sysinfo = "0.36"
 serde = { version = "1", features = ["derive"] }
-thiserror = "1"
+thiserror = "2"
 
 # serde_json is only needed by the tests that assert the JSON contract of
 # `ReadResult`; the CLI already owns serialization for the end user.

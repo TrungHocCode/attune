@@ -11,7 +11,7 @@ attune-bench = { path = "../attune-bench" }
 # Home dir + allow-listed HTTPS fetch for the model catalog (M6).
 attune-fetch = { path = "../attune-fetch" }
 serde = { version = "1", features = ["derive"] }
-thiserror = "1"
+thiserror = "2"
 # config.json parsing + the on-disk catalog cache (the CLI still owns
 # serializing the estimate report for the end user).
 serde_json = "1"
