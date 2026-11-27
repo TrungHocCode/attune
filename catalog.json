@@ -1,0 +1,2165 @@
+{
+  "schema": "attune-catalog/1",
+  "generated_at": "2026-11-27T08:25:03Z",
+  "llama_cpp": {
+    "tag": "b11804",
+    "assets": [
+      {
+        "os": "windows",
+        "arch": "x86_64",
+        "variant": "cpu",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-cpu-x64.zip",
+        "size": 24067910,
+        "sha256": "3a3e417a0816329829081bdd443e3045ff3b2dbe866fcef89a1d919e941ce23f"
+      },
+      {
+        "os": "linux",
+        "arch": "x86_64",
+        "variant": "cpu",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-ubuntu-x64.tar.gz",
+        "size": 22331121,
+        "sha256": "bb800fbd5e905fb8b9887c9a6cb0ab4f14c7267c5f99302874521e7558b0613f"
+      }
+    ]
+  },
+  "models": [
+    {
+      "id": "smollm-135m-instruct",
+      "display": "SmolLM 135M Instruct",
+      "publisher": "HuggingFaceTB",
+      "license": "apache-2.0",
+      "released": "2024-07-15",
+      "gated": false,
+      "params": 134515008,
+      "arch": {
+        "n_layer": 30,
+        "n_kv_heads": 3,
+        "head_dim": 64
+      },
+      "ctx_default": 2048,
+      "files": [
+        {
+          "quant": "q8_0",
+          "repo": "HuggingFaceTB/smollm-135M-instruct-v0.2-Q8_0-GGUF",
+          "file": "smollm-135m-instruct-add-basics-q8_0.gguf",
+          "revision": "53066c72a815622e28d006aefbe32df6dd4b1835",
+          "size": 144811552,
+          "sha256": "a98d3857b95b96c156d954780d28f39dcb35b642e72892ee08ddff70719e6220"
+        }
+      ]
+    },
+    {
+      "id": "smollm2-135m-instruct",
+      "display": "SmolLM2 135M Instruct",
+      "publisher": "HuggingFaceTB",
+      "license": "apache-2.0",
+      "released": "2024-10-31",
+      "gated": false,
+      "params": 134515008,
+      "arch": {
+        "n_layer": 30,
+        "n_kv_heads": 3,
+        "head_dim": 64
+      },
+      "ctx_default": 8192,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/SmolLM2-135M-Instruct-GGUF",
+          "file": "SmolLM2-135M-Instruct-Q4_K_M.gguf",
+          "revision": "09816acd5d99df7be770d85ea30822623dab342c",
+          "size": 105454432,
+          "sha256": "2e8040ceae7815abe0dcb3540b9995eaa1fa0d2ca9e797d0a635ae4433c68c2d"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "bartowski/SmolLM2-135M-Instruct-GGUF",
+          "file": "SmolLM2-135M-Instruct-Q8_0.gguf",
+          "revision": "09816acd5d99df7be770d85ea30822623dab342c",
+          "size": 144811360,
+          "sha256": "5a1395716f7913741cc51d98581b9b1228d80987a9f7d3664106742eb06bba83"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.0-h-350m",
+      "display": "granite 4.0 h 350m",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2025-10-07",
+      "gated": false,
+      "params": 340332224,
+      "arch": {
+        "n_layer": 32,
+        "n_kv_heads": 12,
+        "head_dim": 64
+      },
+      "ctx_default": 1048576,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.0-h-350m-GGUF",
+          "file": "granite-4.0-h-350m-Q4_K_M.gguf",
+          "revision": "ddc201ef6faff3b04a26f28055fe61cba9a8f9e7",
+          "size": 222662560,
+          "sha256": "0a8d6a7373602fadfba274a640ba784b86cc6847f1c67f1b0a90fa2ec266b7fb"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.0-h-350m-GGUF",
+          "file": "granite-4.0-h-350m-Q8_0.gguf",
+          "revision": "ddc201ef6faff3b04a26f28055fe61cba9a8f9e7",
+          "size": 366195616,
+          "sha256": "c7d9873640dc303b6773dcc44e72e5bdf533e1c95ca8421e6191fbff5c94c942"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.0-350m",
+      "display": "granite 4.0 350m",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2025-10-07",
+      "gated": false,
+      "params": 352379904,
+      "arch": {
+        "n_layer": 28,
+        "n_kv_heads": 16,
+        "head_dim": 64
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.0-350m-GGUF",
+          "file": "granite-4.0-350m-Q4_K_M.gguf",
+          "revision": "e9eb7109c8415b16669bb0a2207c151babc4d18a",
+          "size": 236985760,
+          "sha256": "771c588a49607f274a2bba3185733607ebe6f74b996ab90e2d6bee0d98bcec52"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.0-350m-GGUF",
+          "file": "granite-4.0-350m-Q8_0.gguf",
+          "revision": "e9eb7109c8415b16669bb0a2207c151babc4d18a",
+          "size": 378138016,
+          "sha256": "9595dafb4ed15aa02512c8ea26188744192a6f09530eae0a2747bd3ada96cd36"
+        }
+      ]
+    },
+    {
+      "id": "smollm-360m-instruct-add-basics",
+      "display": "smollm 360M instruct add basics",
+      "publisher": "HuggingFaceTB",
+      "license": "apache-2.0",
+      "released": "2024-08-13",
+      "gated": false,
+      "params": 361821120,
+      "arch": {
+        "n_layer": 32,
+        "n_kv_heads": 5,
+        "head_dim": 64
+      },
+      "ctx_default": 2048,
+      "files": [
+        {
+          "quant": "q8_0",
+          "repo": "HuggingFaceTB/smollm-360M-instruct-v0.2-Q8_0-GGUF",
+          "file": "smollm-360m-instruct-add-basics-q8_0.gguf",
+          "revision": "ac681f051bd393dc26c5bdacd277c03a7ca5d5d2",
+          "size": 386405440,
+          "sha256": "b5a2e94a0be8c047bccc3f52bc2f27b79b0dbc688ef3102de54fa6a33b20198c"
+        }
+      ]
+    },
+    {
+      "id": "smollm2-360m-instruct",
+      "display": "SmolLM2 360M Instruct",
+      "publisher": "HuggingFaceTB",
+      "license": "apache-2.0",
+      "released": "2024-10-31",
+      "gated": false,
+      "params": 361821120,
+      "arch": {
+        "n_layer": 32,
+        "n_kv_heads": 5,
+        "head_dim": 64
+      },
+      "ctx_default": 8192,
+      "files": [
+        {
+          "quant": "q8_0",
+          "repo": "HuggingFaceTB/SmolLM2-360M-Instruct-GGUF",
+          "file": "smollm2-360m-instruct-q8_0.gguf",
+          "revision": "593b5a2e04c8f3e4ee880263f93e0bd2901ad47f",
+          "size": 386404992,
+          "sha256": "48ab3034d0dd401fbc721eb1df3217902fee7dab9078992d66431f09b7750201"
+        }
+      ]
+    },
+    {
+      "id": "qwen2-0.5b-instruct",
+      "display": "Qwen2 0.5B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-06-03",
+      "gated": false,
+      "params": 494032768,
+      "arch": {
+        "n_layer": 24,
+        "n_kv_heads": 2,
+        "head_dim": 64
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen2-0.5B-Instruct-GGUF",
+          "file": "qwen2-0_5b-instruct-q4_k_m.gguf",
+          "revision": "198f08841147e5196a6a69bd0053690fb1fd3857",
+          "size": 397805248,
+          "sha256": "f0a42bb979ca62b5e61f3bf924ab4b6a40aa091825ee7dcb4039949980ab81a8"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen2-0.5B-Instruct-GGUF",
+          "file": "qwen2-0_5b-instruct-q8_0.gguf",
+          "revision": "198f08841147e5196a6a69bd0053690fb1fd3857",
+          "size": 531065536,
+          "sha256": "834f4115ad5a836c9f17716b1577290fda96de3deb881ba45a4d5476fd202e96"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-0.5b-instruct",
+      "display": "Qwen2.5 0.5B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-09-16",
+      "gated": false,
+      "params": 630167424,
+      "arch": {
+        "n_layer": 24,
+        "n_kv_heads": 2,
+        "head_dim": 64
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+          "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+          "size": 491400032,
+          "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "file": "qwen2.5-0.5b-instruct-q8_0.gguf",
+          "revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+          "size": 675710816,
+          "sha256": "ca59ca7f13d0e15a8cfa77bd17e65d24f6844b554a7b6c12e07a5f89ff76844e"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-coder-0.5b-instruct",
+      "display": "Qwen2.5 Coder 0.5B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-11-06",
+      "gated": false,
+      "params": 630167424,
+      "arch": {
+        "n_layer": 24,
+        "n_kv_heads": 2,
+        "head_dim": 64
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF",
+          "file": "qwen2.5-coder-0.5b-instruct-q4_k_m.gguf",
+          "revision": "ebb2015119c907b064c512bf053e945850b5875f",
+          "size": 491400064,
+          "sha256": "1d9614638d18024d0fbb36575a15f1302a3adf044df10345688ec4f6e1c4ff32"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF",
+          "file": "qwen2.5-coder-0.5b-instruct-q8_0.gguf",
+          "revision": "ebb2015119c907b064c512bf053e945850b5875f",
+          "size": 675710848,
+          "sha256": "e1a77721fa97d412f121878223eec81fb4ae6f271e18f922d746711f67b344d1"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-0.6b",
+      "display": "Qwen3 0.6B",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-04-27",
+      "gated": false,
+      "params": 751632384,
+      "arch": {
+        "n_layer": 28,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/Qwen_Qwen3-0.6B-GGUF",
+          "file": "Qwen_Qwen3-0.6B-Q4_K_M.gguf",
+          "revision": "60b85c0e3d8fe0f6474f406922a26d12aca4550d",
+          "size": 484220320,
+          "sha256": "9acfc1e001311f34b4252001b626f2e466d592a42065f66571bff3790d4e1b14"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen3-0.6B-GGUF",
+          "file": "Qwen3-0.6B-Q8_0.gguf",
+          "revision": "23749fefcc72300e3a2ad315e1317431b06b590a",
+          "size": 639446688,
+          "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.0-h-1b",
+      "display": "granite 4.0 h 1b",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2025-10-07",
+      "gated": false,
+      "params": 1461538368,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 12,
+        "head_dim": 128
+      },
+      "ctx_default": 1048576,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.0-h-1b-GGUF",
+          "file": "granite-4.0-h-1b-Q4_K_M.gguf",
+          "revision": "408580999f394d67b425c1e99ae9fe4a540c9672",
+          "size": 901162208,
+          "sha256": "da3d737121a96f3c9a316685212376257a7f167b74380855666dd488d6af3bcb"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.0-h-1b-GGUF",
+          "file": "granite-4.0-h-1b-Q8_0.gguf",
+          "revision": "408580999f394d67b425c1e99ae9fe4a540c9672",
+          "size": 1558926560,
+          "sha256": "f29248184ca766350e56e6d161c2a637ad302a6d595e15d4a62cd58327a0ac0e"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.0-1b",
+      "display": "granite 4.0 1b",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2025-10-07",
+      "gated": false,
+      "params": 1631750144,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 16,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.0-1b-GGUF",
+          "file": "granite-4.0-1b-Q4_K_M.gguf",
+          "revision": "638f3dd95f5183fadecdc7b57064b5f7eb6f8b87",
+          "size": 1023645440,
+          "sha256": "22ec0f9cc99a90185312de3c882c84e7bd6789bdd050389844380a01a831d7f1"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.0-1b-GGUF",
+          "file": "granite-4.0-1b-Q8_0.gguf",
+          "revision": "638f3dd95f5183fadecdc7b57064b5f7eb6f8b87",
+          "size": 1737791232,
+          "sha256": "0660c20c3d3d3672b90f0468f62dc128a82a6e3ee2ec05d310d242969be06140"
+        }
+      ]
+    },
+    {
+      "id": "smollm2-1.7b-instruct",
+      "display": "SmolLM2 1.7B Instruct",
+      "publisher": "HuggingFaceTB",
+      "license": "apache-2.0",
+      "released": "2024-10-31",
+      "gated": false,
+      "params": 1711376384,
+      "arch": {
+        "n_layer": 24,
+        "n_kv_heads": 32,
+        "head_dim": 64
+      },
+      "ctx_default": 8192,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "HuggingFaceTB/SmolLM2-1.7B-Instruct-GGUF",
+          "file": "smollm2-1.7b-instruct-q4_k_m.gguf",
+          "revision": "2d4a76a30b4af41ecd395c35725ac11688d4cfe4",
+          "size": 1055609536,
+          "sha256": "decd2598bc2c8ed08c19adc3c8fdd461ee19ed5708679d1c54ef54a5a30d4f33"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-1.5b-instruct",
+      "display": "Qwen2.5 1.5B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-09-17",
+      "gated": false,
+      "params": 1777088000,
+      "arch": {
+        "n_layer": 28,
+        "n_kv_heads": 2,
+        "head_dim": 128
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+          "file": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+          "revision": "91cad51170dc346986eccefdc2dd33a9da36ead9",
+          "size": 1117320736,
+          "sha256": "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+          "file": "qwen2.5-1.5b-instruct-q8_0.gguf",
+          "revision": "91cad51170dc346986eccefdc2dd33a9da36ead9",
+          "size": 1894532128,
+          "sha256": "d7efb072e7724d25048a4fda0a3e10b04bdef5d06b1403a1c93bd9f1240a63c8"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-coder-1.5b-instruct",
+      "display": "Qwen2.5 Coder 1.5B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-09-18",
+      "gated": false,
+      "params": 1777088000,
+      "arch": {
+        "n_layer": 28,
+        "n_kv_heads": 2,
+        "head_dim": 128
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
+          "file": "qwen2.5-coder-1.5b-instruct-q4_k_m.gguf",
+          "revision": "f86cb2c1fa58255f8052cc32aeede1b7482d4361",
+          "size": 1117320768,
+          "sha256": "cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
+          "file": "qwen2.5-coder-1.5b-instruct-q8_0.gguf",
+          "revision": "f86cb2c1fa58255f8052cc32aeede1b7482d4361",
+          "size": 1894532160,
+          "sha256": "507de59046601282ba768a9789900e6ccf60ed93ddf346730b7c68eb0715bc47"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-1.7b",
+      "display": "Qwen3 1.7B",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-04-27",
+      "gated": false,
+      "params": 2031739904,
+      "arch": {
+        "n_layer": 28,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 40960,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ggml-org/Qwen3-1.7B-GGUF",
+          "file": "Qwen3-1.7B-Q4_K_M.gguf",
+          "revision": "daeb8e2d528a760970442092f6bf1e55c3b659eb",
+          "size": 1282439264,
+          "sha256": "d2387ca2dbfee2ffabce7120d3770dadca0b293052bc2f0e138fdc940d9bc7b5"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen3-1.7B-GGUF",
+          "file": "Qwen3-1.7B-Q8_0.gguf",
+          "revision": "90862c4b9d2787eaed51d12237eafdfe7c5f6077",
+          "size": 1834426016,
+          "sha256": "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a"
+        }
+      ]
+    },
+    {
+      "id": "granite-3.3-2b-instruct",
+      "display": "granite 3.3 2b instruct",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2025-04-09",
+      "gated": false,
+      "params": 2533539840,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 64
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-3.3-2b-instruct-GGUF",
+          "file": "granite-3.3-2b-instruct-Q4_K_M.gguf",
+          "revision": "7cdf86ccd1f1bb3491c9b7017b033f2e51367397",
+          "size": 1545303328,
+          "sha256": "ac71e9e32c0bea919b409c5918f69ca74339854b0319c5065e4e9fb6d95c4852"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-3.3-2b-instruct-GGUF",
+          "file": "granite-3.3-2b-instruct-Q8_0.gguf",
+          "revision": "7cdf86ccd1f1bb3491c9b7017b033f2e51367397",
+          "size": 2694120096,
+          "sha256": "39068a5bcb15f10487a49426d617b1b0f38a624d7dbdefe5ff6f26de82d97039"
+        }
+      ]
+    },
+    {
+      "id": "smollm3-3b",
+      "display": "SmolLM3 3B",
+      "publisher": "HuggingFaceTB",
+      "license": "apache-2.0",
+      "released": "2025-07-08",
+      "gated": false,
+      "params": 3075098624,
+      "arch": {
+        "n_layer": 36,
+        "n_kv_heads": 4,
+        "head_dim": 128
+      },
+      "ctx_default": 65536,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ggml-org/SmolLM3-3B-GGUF",
+          "file": "SmolLM3-Q4_K_M.gguf",
+          "revision": "4965cb60b150737b68a0408c36aeefb65078f894",
+          "size": 1915305312,
+          "sha256": "8334b850b7bd46238c16b0c550df2138f0889bf433809008cc17a8b05761863e"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ggml-org/SmolLM3-3B-GGUF",
+          "file": "SmolLM3-Q8_0.gguf",
+          "revision": "4965cb60b150737b68a0408c36aeefb65078f894",
+          "size": 3275574624,
+          "sha256": "8aa8cc74656137174a1988d993b00828e65a86fd68773412b632a75aa1373248"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.0-h-micro",
+      "display": "granite 4.0 h micro",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2025-09-16",
+      "gated": false,
+      "params": 3191396096,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 32,
+        "head_dim": 64
+      },
+      "ctx_default": 1048576,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.0-h-micro-GGUF",
+          "file": "granite-4.0-h-micro-Q4_K_M.gguf",
+          "revision": "4a3531463f3d8d2294ee6f629e2f691f15f8f5c3",
+          "size": 1942564512,
+          "sha256": "bcc78b9b25450101d1ad90d4b9a264e1bac892f534dfb76066f4eec792fdf023"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.0-h-micro-GGUF",
+          "file": "granite-4.0-h-micro-Q8_0.gguf",
+          "revision": "4a3531463f3d8d2294ee6f629e2f691f15f8f5c3",
+          "size": 3397676704,
+          "sha256": "a009111abf2865b7aad1e66326a6c772cddc29bccd22898f470292068b27bb59"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-3b-instruct",
+      "display": "Qwen2.5 3B Instruct",
+      "publisher": "Qwen",
+      "license": "other",
+      "released": "2024-09-17",
+      "gated": false,
+      "params": 3397103616,
+      "arch": {
+        "n_layer": 36,
+        "n_kv_heads": 2,
+        "head_dim": 128
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen2.5-3B-Instruct-GGUF",
+          "file": "qwen2.5-3b-instruct-q4_k_m.gguf",
+          "revision": "7dabda4d13d513e3e842b20f0d435c732f172cbe",
+          "size": 2104932768,
+          "sha256": "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen2.5-3B-Instruct-GGUF",
+          "file": "qwen2.5-3b-instruct-q8_0.gguf",
+          "revision": "7dabda4d13d513e3e842b20f0d435c732f172cbe",
+          "size": 3616088480,
+          "sha256": "6dcc22694c8654b045ec40bbe350212b88893fd9010e8474bae5b19a43578ba1"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-coder-3b-instruct",
+      "display": "Qwen2.5 Coder 3B Instruct",
+      "publisher": "Qwen",
+      "license": "other",
+      "released": "2024-11-06",
+      "gated": false,
+      "params": 3397103616,
+      "arch": {
+        "n_layer": 36,
+        "n_kv_heads": 2,
+        "head_dim": 128
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
+          "file": "qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+          "revision": "f74adce6aa16316c625447af059dbebe4983757c",
+          "size": 2104932800,
+          "sha256": "724fb256bec1ff062b2f65e4569e871ad2e95ab2a3989723d1769c54294730b7"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
+          "file": "qwen2.5-coder-3b-instruct-q8_0.gguf",
+          "revision": "f74adce6aa16316c625447af059dbebe4983757c",
+          "size": 3616088512,
+          "sha256": "f648c25dfd5a0870c4ad76724a745124ab5667ff97b664534fcbe46089b75ab8"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.0-micro",
+      "display": "granite 4.0 micro",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2025-09-16",
+      "gated": false,
+      "params": 3402836480,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 40,
+        "head_dim": 64
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.0-micro-GGUF",
+          "file": "granite-4.0-micro-Q4_K_M.gguf",
+          "revision": "55cded3dcb8ab9f0fdd5373f4e960ffb7fda1c61",
+          "size": 2099502528,
+          "sha256": "97c417dcc0534b0737c74016fb2af083cb17c3b51eaac621192d23961b7024eb"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.0-micro-GGUF",
+          "file": "granite-4.0-micro-Q8_0.gguf",
+          "revision": "55cded3dcb8ab9f0fdd5373f4e960ffb7fda1c61",
+          "size": 3619691968,
+          "sha256": "a023da9d89a7f3c5369ac1acfe8fa57277eaec591e1b23dde0cd8b01e0bd3fd6"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.1-3b",
+      "display": "granite 4.1 3b",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2026-04-06",
+      "gated": false,
+      "params": 3402836480,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 64
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.1-3b-GGUF",
+          "file": "granite-4.1-3b-Q4_K_M.gguf",
+          "revision": "ab4701481089b58a082ef63cc1cee738887293ff",
+          "size": 2099501664,
+          "sha256": "662b0626cd58f443baea23559b469df6576a81d349649c59413b36a9fb32eb29"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.1-3b-GGUF",
+          "file": "granite-4.1-3b-Q8_0.gguf",
+          "revision": "ab4701481089b58a082ef63cc1cee738887293ff",
+          "size": 3619691104,
+          "sha256": "c31f09b9fd19bc51440f100f54fe5ac3d5deb26ef79ec93c38e4a14873c42a80"
+        }
+      ]
+    },
+    {
+      "id": "ministral-3-3b-instruct-2512",
+      "display": "Ministral 3 3B Instruct 2512",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2025-10-31",
+      "gated": false,
+      "params": 3429006336,
+      "arch": {
+        "n_layer": 26,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 262144,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "mistralai/Ministral-3-3B-Instruct-2512-GGUF",
+          "file": "Ministral-3-3B-Instruct-2512-Q4_K_M.gguf",
+          "revision": "eb599d408350ea2bb60452cb86be7c7b2fc28227",
+          "size": 2147023008,
+          "sha256": "9ed150d4367e68df0ac8e1540f6ddc65b42d0ee26378329d1ecbca60f93fc5f8"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "mistralai/Ministral-3-3B-Instruct-2512-GGUF",
+          "file": "Ministral-3-3B-Instruct-2512-Q8_0.gguf",
+          "revision": "eb599d408350ea2bb60452cb86be7c7b2fc28227",
+          "size": 3652204704,
+          "sha256": "8c2b72eb5861304fcfd5e82f1eddd6efa4115737f4239fd216a028a8852413ef"
+        }
+      ]
+    },
+    {
+      "id": "ministral-3-3b-reasoning-2512",
+      "display": "Ministral 3 3B Reasoning 2512",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2025-10-31",
+      "gated": false,
+      "params": 3429006336,
+      "arch": {
+        "n_layer": 26,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 262144,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "mistralai/Ministral-3-3B-Reasoning-2512-GGUF",
+          "file": "Ministral-3-3B-Reasoning-2512-Q4_K_M.gguf",
+          "revision": "b432f0a2c144af8a1937b06e2ea7f75ebb4d0b31",
+          "size": 2147021472,
+          "sha256": "7e9516cc01a039bb3e2d41227cdf388849bc1c942c4624c84567b1684cd9c0fc"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "mistralai/Ministral-3-3B-Reasoning-2512-GGUF",
+          "file": "Ministral-3-3B-Reasoning-2512-Q8_0.gguf",
+          "revision": "b432f0a2c144af8a1937b06e2ea7f75ebb4d0b31",
+          "size": 3652203168,
+          "sha256": "3220ac17e246f741f7371e8b0964c399f363a31f9acd2f9a3aacc3bb19fd6466"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.2-3b",
+      "display": "granite 4.2 3b",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2026-08-07",
+      "gated": false,
+      "params": 3659737600,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 64
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.2-3b-GGUF",
+          "file": "granite-4.2-3b-Q4_K_M.gguf",
+          "revision": "c40945d71cd90f249a56985e8155551a9188dc30",
+          "size": 2244011552,
+          "sha256": "e0406663965846ae22a403456eb826ccce5f450840491f71952f18a7cb78e7d5"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.2-3b-GGUF",
+          "file": "granite-4.2-3b-Q8_0.gguf",
+          "revision": "c40945d71cd90f249a56985e8155551a9188dc30",
+          "size": 3892651552,
+          "sha256": "fbe986738041418e26de9e123ba740cb654931f85bf572a71bd01f9e6b85e53d"
+        }
+      ]
+    },
+    {
+      "id": "phi-3.5-mini-instruct",
+      "display": "Phi 3.5 mini instruct",
+      "publisher": "microsoft",
+      "license": "mit",
+      "released": "2024-08-16",
+      "gated": false,
+      "params": 3821079648,
+      "arch": {
+        "n_layer": 32,
+        "n_kv_heads": 32,
+        "head_dim": 96
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/Phi-3.5-mini-instruct-GGUF",
+          "file": "Phi-3.5-mini-instruct-Q4_K_M.gguf",
+          "revision": "6d70da17e749a471ccb62ade694486011a75cda3",
+          "size": 2393232672,
+          "sha256": "e4165e3a71af97f1b4820da61079826d8752a2088e313af0c7d346796c38eff5"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "bartowski/Phi-3.5-mini-instruct-GGUF",
+          "file": "Phi-3.5-mini-instruct-Q8_0.gguf",
+          "revision": "6d70da17e749a471ccb62ade694486011a75cda3",
+          "size": 4061222688,
+          "sha256": "76fbf02f6fe92af57dbd818409bc8a0240026f1f3609bb405c3be94c973fb823"
+        }
+      ]
+    },
+    {
+      "id": "phi-4-mini-instruct",
+      "display": "Phi 4 mini instruct",
+      "publisher": "microsoft",
+      "license": "mit",
+      "released": "2025-02-19",
+      "gated": false,
+      "params": 3836021856,
+      "arch": {
+        "n_layer": 32,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/microsoft_Phi-4-mini-instruct-GGUF",
+          "file": "microsoft_Phi-4-mini-instruct-Q4_K_M.gguf",
+          "revision": "7ff82c2aaa4dde30121698a973765f39be5288c0",
+          "size": 2491874688,
+          "sha256": "01999f17c39cc3074afae5e9c539bc82d45f2dd7faa3917c66cbef76fce8c0c2"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "bartowski/microsoft_Phi-4-mini-instruct-GGUF",
+          "file": "microsoft_Phi-4-mini-instruct-Q8_0.gguf",
+          "revision": "7ff82c2aaa4dde30121698a973765f39be5288c0",
+          "size": 4084611456,
+          "sha256": "a12f242c4ee379b9da91673e5d78b30bfacfe4fd86a0b2259d2ecad5d93cb6c7"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-4b",
+      "display": "Qwen3 4B",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-04-27",
+      "gated": false,
+      "params": 4022468096,
+      "arch": {
+        "n_layer": 36,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 40960,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen3-4B-GGUF",
+          "file": "Qwen3-4B-Q4_K_M.gguf",
+          "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+          "size": 2497280256,
+          "sha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen3-4B-GGUF",
+          "file": "Qwen3-4B-Q8_0.gguf",
+          "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+          "size": 4280404704,
+          "sha256": "8c2f07f26af9747e41988551106f149b03eb9b5cb6df636027b6bf6278473300"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-4b-instruct-2507",
+      "display": "Qwen3 4B Instruct 2507",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-08-05",
+      "gated": false,
+      "params": 4022468096,
+      "arch": {
+        "n_layer": 36,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 262144,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF",
+          "file": "Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+          "revision": "ae44f08e1392f39c0e474af10c3ff8355c8b6688",
+          "size": 2497280736,
+          "sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF",
+          "file": "Qwen_Qwen3-4B-Instruct-2507-Q8_0.gguf",
+          "revision": "ae44f08e1392f39c0e474af10c3ff8355c8b6688",
+          "size": 4280405216,
+          "sha256": "260b5b5b6ad73e44df81a43ea1f5c11c37007b6bac18eb3cd2016e8667c19662"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.0-h-tiny",
+      "display": "granite 4.0 h tiny",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2025-09-16",
+      "gated": false,
+      "params": 6939037248,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 12,
+        "head_dim": 128
+      },
+      "ctx_default": 1048576,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.0-h-tiny-GGUF",
+          "file": "granite-4.0-h-tiny-Q4_K_M.gguf",
+          "revision": "240a43d5efe7bdcfa4205b0019bb95e4cc6e5315",
+          "size": 4230976352,
+          "sha256": "5a38b08c441ae1adbafb1d2b8a7167e0d48734d83af68b268cefea1eec553dcd"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.0-h-tiny-GGUF",
+          "file": "granite-4.0-h-tiny-Q8_0.gguf",
+          "revision": "240a43d5efe7bdcfa4205b0019bb95e4cc6e5315",
+          "size": 7390331744,
+          "sha256": "6d89e0698c7e88ebe26efcf59aa22786bf36b729705edbd76c6b118c8df9b297"
+        }
+      ]
+    },
+    {
+      "id": "qwen2-7b-instruct",
+      "display": "Qwen2 7B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-06-04",
+      "gated": false,
+      "params": 7615616512,
+      "arch": {
+        "n_layer": 28,
+        "n_kv_heads": 4,
+        "head_dim": 128
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen2-7B-Instruct-GGUF",
+          "file": "qwen2-7b-instruct-q4_k_m.gguf",
+          "revision": "c3024c6fff0a02d52119ecee024bbb93d4b4b8e4",
+          "size": 4683071264,
+          "sha256": "ed93dfc426f926451fa3ec7f996a787a31cfd97e55d7769568fbffc2d69861c2"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen2-7B-Instruct-GGUF",
+          "file": "qwen2-7b-instruct-q8_0.gguf",
+          "revision": "c3024c6fff0a02d52119ecee024bbb93d4b4b8e4",
+          "size": 8098522912,
+          "sha256": "945823750c8eb6aa685692753ae90cd9551a56618d03051241268f53cdbd8352"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-7b-instruct",
+      "display": "Qwen2.5 7B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-09-16",
+      "gated": false,
+      "params": 7615616512,
+      "arch": {
+        "n_layer": 28,
+        "n_kv_heads": 4,
+        "head_dim": 128
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+          "file": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+          "revision": "8911e8a47f92bac19d6f5c64a2e2095bd2f7d031",
+          "size": 4683074240,
+          "sha256": "65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "bartowski/Qwen2.5-7B-Instruct-GGUF",
+          "file": "Qwen2.5-7B-Instruct-Q8_0.gguf",
+          "revision": "8911e8a47f92bac19d6f5c64a2e2095bd2f7d031",
+          "size": 8098525888,
+          "sha256": "9c6a6e61664446321d9c0dd7ee28a0d03914277609e21bc0e1fce4abe780ce1b"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-coder-7b-instruct",
+      "display": "Qwen2.5 Coder 7B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-09-17",
+      "gated": false,
+      "params": 7615616512,
+      "arch": {
+        "n_layer": 28,
+        "n_kv_heads": 4,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+          "file": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+          "revision": "13fb94bfda8c8cf22497dc57b78f391a9acb426a",
+          "size": 4683073536,
+          "sha256": "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+          "file": "qwen2.5-coder-7b-instruct-q8_0.gguf",
+          "revision": "13fb94bfda8c8cf22497dc57b78f391a9acb426a",
+          "size": 8098525184,
+          "sha256": "b36a4e1c3ddf2ba6fd5501b926128e5fc6430881caaff07e9629bd18f06f685f"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-math-7b-instruct",
+      "display": "Qwen2.5 Math 7B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-09-19",
+      "gated": false,
+      "params": 7615616512,
+      "arch": {
+        "n_layer": 28,
+        "n_kv_heads": 4,
+        "head_dim": 128
+      },
+      "ctx_default": 4096,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/Qwen2.5-Math-7B-Instruct-GGUF",
+          "file": "Qwen2.5-Math-7B-Instruct-Q4_K_M.gguf",
+          "revision": "22e2c9c42470193b2b643636564765c84bcb06cb",
+          "size": 4683074272,
+          "sha256": "7e03cee8c65b9ebf9ca14ddb010aca27b6b18e6c70f2779e94e7451d9529c091"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "bartowski/Qwen2.5-Math-7B-Instruct-GGUF",
+          "file": "Qwen2.5-Math-7B-Instruct-Q8_0.gguf",
+          "revision": "22e2c9c42470193b2b643636564765c84bcb06cb",
+          "size": 8098525920,
+          "sha256": "dae82a819f3e5adeb728a2d2bb176f201550232ccd9c6c1cda57d01368fc5df3"
+        }
+      ]
+    },
+    {
+      "id": "granite-3.3-8b-instruct",
+      "display": "granite 3.3 8b instruct",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2025-04-09",
+      "gated": false,
+      "params": 8170864640,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-3.3-8b-instruct-GGUF",
+          "file": "granite-3.3-8b-instruct-Q4_K_M.gguf",
+          "revision": "e40e9dd739c7be00fa965c16ce167088190ce114",
+          "size": 4942873344,
+          "sha256": "77bcee066a76dcdd10d0d123c87e32c8ec2c74e31b6ffd87ebee49c9ac215dca"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-3.3-8b-instruct-GGUF",
+          "file": "granite-3.3-8b-instruct-Q8_0.gguf",
+          "revision": "e40e9dd739c7be00fa965c16ce167088190ce114",
+          "size": 8684264992,
+          "sha256": "8ced2b014c6b5d4b1be698fd2cb5b051b08ce0b439d2584eb358e0d3f0a00611"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-8b",
+      "display": "Qwen3 8B",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-04-27",
+      "gated": false,
+      "params": 8190735360,
+      "arch": {
+        "n_layer": 36,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 40960,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen3-8B-GGUF",
+          "file": "Qwen3-8B-Q4_K_M.gguf",
+          "revision": "7c41481f57cb95916b40956ab2f0b139b296d974",
+          "size": 5027783488,
+          "sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen3-8B-GGUF",
+          "file": "Qwen3-8B-Q8_0.gguf",
+          "revision": "7c41481f57cb95916b40956ab2f0b139b296d974",
+          "size": 8709518112,
+          "sha256": "408b955510e196121c1c375201744783b5c9a43c7956d73fc78df54c66e883d6"
+        }
+      ]
+    },
+    {
+      "id": "ministral-3-8b-instruct-2512",
+      "display": "Ministral 3 8B Instruct 2512",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2025-10-31",
+      "gated": false,
+      "params": 8489553920,
+      "arch": {
+        "n_layer": 34,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 262144,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "mistralai/Ministral-3-8B-Instruct-2512-GGUF",
+          "file": "Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
+          "revision": "0102285ad796bd99af90f58de616092e5630e970",
+          "size": 5198911904,
+          "sha256": "33e7a72cf5e6e2cfc2f2847075acc013d68bba023e35310cef86b5cf8fdca761"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "mistralai/Ministral-3-8B-Instruct-2512-GGUF",
+          "file": "Ministral-3-8B-Instruct-2512-Q8_0.gguf",
+          "revision": "0102285ad796bd99af90f58de616092e5630e970",
+          "size": 9029392800,
+          "sha256": "bd0ca58473b64618df4d08c1410cc25c910ca84e647833ebaf099e0fc0523b45"
+        }
+      ]
+    },
+    {
+      "id": "ministral-3-8b-reasoning-2512",
+      "display": "Ministral 3 8B Reasoning 2512",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2025-10-31",
+      "gated": false,
+      "params": 8489553920,
+      "arch": {
+        "n_layer": 34,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 262144,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "mistralai/Ministral-3-8B-Reasoning-2512-GGUF",
+          "file": "Ministral-3-8B-Reasoning-2512-Q4_K_M.gguf",
+          "revision": "4413bc9b7b091ddad28101650d1395f5e045a328",
+          "size": 5198910368,
+          "sha256": "894aa3645ef8708a81dbe201c26105ce37c4c741252c89c5a78f81b49ac438c6"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "mistralai/Ministral-3-8B-Reasoning-2512-GGUF",
+          "file": "Ministral-3-8B-Reasoning-2512-Q8_0.gguf",
+          "revision": "4413bc9b7b091ddad28101650d1395f5e045a328",
+          "size": 9029391264,
+          "sha256": "74f522753b525457b74777811f0d23ca0a29ebc88c5ba54596f2f823be07e561"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.1-8b",
+      "display": "granite 4.1 8b",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2026-04-06",
+      "gated": false,
+      "params": 8791592960,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.1-8b-GGUF",
+          "file": "granite-4.1-8b-Q4_K_M.gguf",
+          "revision": "865b82c2e7970d82e3731278c88c57ae7138359c",
+          "size": 5347914400,
+          "sha256": "ed902ac9eb6adce5a90c6a08c8ea201b50e23fdc5976d1cd0362006afac5309e"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.1-8b-GGUF",
+          "file": "granite-4.1-8b-Q8_0.gguf",
+          "revision": "865b82c2e7970d82e3731278c88c57ae7138359c",
+          "size": 9345610400,
+          "sha256": "4709c90f07b04af4deae8bf0eb06225fb257b5a86072ac09b87d3351242f6ba1"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.2-8b",
+      "display": "granite 4.2 8b",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2026-08-07",
+      "gated": false,
+      "params": 8791592960,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.2-8b-GGUF",
+          "file": "granite-4.2-8b-Q4_K_M.gguf",
+          "revision": "93f3f6a8938ee922b784cf4e5b4203cd3428df8f",
+          "size": 5347917952,
+          "sha256": "16a9369d0805f80b7377d25d87f937a90c05dc04ad79173a52001e42c9aab311"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.2-8b-GGUF",
+          "file": "granite-4.2-8b-Q8_0.gguf",
+          "revision": "93f3f6a8938ee922b784cf4e5b4203cd3428df8f",
+          "size": 9345613952,
+          "sha256": "fb66ad5750680c77c76b9dc095961375f14fc88ba15fd5fc084ef6e6701bad77"
+        }
+      ]
+    },
+    {
+      "id": "granite-switch-4.1-8b",
+      "display": "granite switch 4.1 8b",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2026-10-14",
+      "gated": false,
+      "params": 8974319616,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-switch-4.1-8b-GGUF",
+          "file": "granite-switch-4.1-8b-Q4_K_M.gguf",
+          "revision": "130829b9f34ea491d33c58e436479c27175a2c82",
+          "size": 6412400416,
+          "sha256": "899500ba75a1eaf59733d2261cc843de0878cf0eaf5faee3a7d97061e2f8107c"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-switch-4.1-8b-GGUF",
+          "file": "granite-switch-4.1-8b-Q8_0.gguf",
+          "revision": "130829b9f34ea491d33c58e436479c27175a2c82",
+          "size": 10096444096,
+          "sha256": "87551e7ef3f944800db462d7cad764c363b0e8d8aee3a4a0305a5dfe0c7fb83d"
+        }
+      ]
+    },
+    {
+      "id": "mistral-nemo-instruct-2407",
+      "display": "Mistral Nemo Instruct 2407",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2024-07-17",
+      "gated": false,
+      "params": 12247782400,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 1024000,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/Mistral-Nemo-Instruct-2407-GGUF",
+          "file": "Mistral-Nemo-Instruct-2407-Q4_K_M.gguf",
+          "revision": "a2dd64a0a76ea1bdb2bb6ab6fa5496b003c7c908",
+          "size": 7477208192,
+          "sha256": "7c1a10d202d8788dbe5628dc962254d10654c853cae6aaeca0618f05490d4a46"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "bartowski/Mistral-Nemo-Instruct-2407-GGUF",
+          "file": "Mistral-Nemo-Instruct-2407-Q8_0.gguf",
+          "revision": "a2dd64a0a76ea1bdb2bb6ab6fa5496b003c7c908",
+          "size": 13022372992,
+          "sha256": "7985eab9b84d7d514253a53f372095d51f941f84a62cadaa0ccf6e1b3fbef494"
+        }
+      ]
+    },
+    {
+      "id": "ministral-3-14b-instruct-2512",
+      "display": "Ministral 3 14B Instruct 2512",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2025-10-31",
+      "gated": false,
+      "params": 13506073600,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 262144,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "mistralai/Ministral-3-14B-Instruct-2512-GGUF",
+          "file": "Ministral-3-14B-Instruct-2512-Q4_K_M.gguf",
+          "revision": "74fac473c43357d7fb2671713608183cc72496d0",
+          "size": 8239593024,
+          "sha256": "824e0f3373e69b84f2cae46fdcb9bd1ebc6ab3bfc7acc125d818b7b8178cc613"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "mistralai/Ministral-3-14B-Instruct-2512-GGUF",
+          "file": "Ministral-3-14B-Instruct-2512-Q8_0.gguf",
+          "revision": "74fac473c43357d7fb2671713608183cc72496d0",
+          "size": 14359836224,
+          "sha256": "8122acc8df446039d41dd9650dabb024d3c6b8dae6eff336d28ac2bddd3bbc13"
+        }
+      ]
+    },
+    {
+      "id": "ministral-3-14b-reasoning-2512",
+      "display": "Ministral 3 14B Reasoning 2512",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2025-10-31",
+      "gated": false,
+      "params": 13506073600,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 262144,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "mistralai/Ministral-3-14B-Reasoning-2512-GGUF",
+          "file": "Ministral-3-14B-Reasoning-2512-Q4_K_M.gguf",
+          "revision": "fe3b038f30334729263d860d5dadbaa34e0f2a18",
+          "size": 8239591488,
+          "sha256": "fe08ca2158cd7438211ec6a4e5256d31bc980f016e3f5b635fe91fe6848d461c"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "mistralai/Ministral-3-14B-Reasoning-2512-GGUF",
+          "file": "Ministral-3-14B-Reasoning-2512-Q8_0.gguf",
+          "revision": "fe3b038f30334729263d860d5dadbaa34e0f2a18",
+          "size": 14359834688,
+          "sha256": "54fabf5972dcc410c3ccafa8da3ef4e652048dcaa833b73cf6625217679a606d"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-14b",
+      "display": "Qwen3 14B",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-04-27",
+      "gated": false,
+      "params": 14768307200,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 40960,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen3-14B-GGUF",
+          "file": "Qwen3-14B-Q4_K_M.gguf",
+          "revision": "530227a7d994db8eca5ab5ced2fb692b614357fd",
+          "size": 9001752960,
+          "sha256": "500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen3-14B-GGUF",
+          "file": "Qwen3-14B-Q8_0.gguf",
+          "revision": "530227a7d994db8eca5ab5ced2fb692b614357fd",
+          "size": 15698533728,
+          "sha256": "a0dfe649137410b7d82f06a209240508e218f32f5b6fd81b69d6932160cfcd9d"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-14b-instruct",
+      "display": "Qwen2.5 14B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-09-16",
+      "gated": false,
+      "params": 14770033664,
+      "arch": {
+        "n_layer": 48,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/Qwen2.5-14B-Instruct-GGUF",
+          "file": "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+          "revision": "05244aa5d871c661c80082a15d3bce44714d068d",
+          "size": 8988110976,
+          "sha256": "e47ad95dad6ff848b431053b375adb5d39321290ea2c638682577dafca87c008"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "bartowski/Qwen2.5-14B-Instruct-GGUF",
+          "file": "Qwen2.5-14B-Instruct-Q8_0.gguf",
+          "revision": "05244aa5d871c661c80082a15d3bce44714d068d",
+          "size": 15701598336,
+          "sha256": "23ca481b8226b2492ba8f3eb7af41e0f99d8605c16fb6dec7bc5cf6716b673cf"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-coder-14b-instruct",
+      "display": "Qwen2.5 Coder 14B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-11-06",
+      "gated": false,
+      "params": 14770033664,
+      "arch": {
+        "n_layer": 48,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
+          "file": "qwen2.5-coder-14b-instruct-q4_k_m.gguf",
+          "revision": "d0a692ef765eefbf2fabb130b3cb2e8917e3d225",
+          "size": 8988110272,
+          "sha256": "c1e659736d89ac1065fb495330fb824d94001974a4bfa78e7270e43476a8d940"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
+          "file": "qwen2.5-coder-14b-instruct-q8_0.gguf",
+          "revision": "d0a692ef765eefbf2fabb130b3cb2e8917e3d225",
+          "size": 15701597632,
+          "sha256": "8180f66e3458e298830cebe7c9e8a9bde0ae6511d399fd99d3385b64324ac85d"
+        }
+      ]
+    },
+    {
+      "id": "codestral-22b-v0.1",
+      "display": "Codestral 22B v0.1",
+      "publisher": "mistralai",
+      "license": "other",
+      "released": "2024-05-29",
+      "gated": false,
+      "params": 22247282688,
+      "arch": {
+        "n_layer": 56,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/Codestral-22B-v0.1-GGUF",
+          "file": "Codestral-22B-v0.1-Q4_K_M.gguf",
+          "revision": "0e6abe14d6aeaf2c99d5dc9973205e8e38692d90",
+          "size": 13341237600,
+          "sha256": "003e48ed892850b80994fcddca2bd6b833b092a4ef2db2853c33a3144245e06c"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "bartowski/Codestral-22B-v0.1-GGUF",
+          "file": "Codestral-22B-v0.1-Q8_0.gguf",
+          "revision": "0e6abe14d6aeaf2c99d5dc9973205e8e38692d90",
+          "size": 23640547680,
+          "sha256": "4f9ad7e24043cf3ec19002737019f0798ebe1cecbfecba2e047ea07b92721ac0"
+        }
+      ]
+    },
+    {
+      "id": "devstral-small-2-24b-instruct-2512",
+      "display": "Devstral Small 2 24B Instruct 2512",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2025-11-28",
+      "gated": false,
+      "params": 23572403200,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 393216,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/mistralai_Devstral-Small-2-24B-Instruct-2512-GGUF",
+          "file": "mistralai_Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
+          "revision": "027695770ae1de77c2f6fb19f8e1ba9d65fcd15d",
+          "size": 14334438272,
+          "sha256": "bfd11c8679c6b81eb43763505465d7dcfa72e460ab1c220ecc235a3efadd7f7f"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ggml-org/Devstral-Small-2-24B-Instruct-2512-GGUF",
+          "file": "Devstral-Small-2-24B-Instruct-2512-Q8_0.gguf",
+          "revision": "f7fe27c29bbd52ba0073ccbfe7beefd4de35dd6d",
+          "size": 25055308352,
+          "sha256": "3c191981f6d5f1273f98ed716ae4478c054ac99de3e218a9ad3117cd41f50759"
+        }
+      ]
+    },
+    {
+      "id": "devstral-small-2507",
+      "display": "Devstral Small 2507",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2025-07-04",
+      "gated": false,
+      "params": 23572403200,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "mistralai/Devstral-Small-2507_gguf",
+          "file": "Devstral-Small-2507-Q4_K_M.gguf",
+          "revision": "ee2f0c00c5c86862f471fbf533268cf01b80d4a6",
+          "size": 14333915904,
+          "sha256": "1bcc2b1b7b7ea3168ba2dbe782432c464f2240598bd193930122c41b117c1796"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "mistralai/Devstral-Small-2507_gguf",
+          "file": "Devstral-Small-2507-Q8_0.gguf",
+          "revision": "ee2f0c00c5c86862f471fbf533268cf01b80d4a6",
+          "size": 25054786304,
+          "sha256": "2a7b4659b09eca8989d420ba4266e32cbc427e9477e4a613d07babf2342a9ff4"
+        }
+      ]
+    },
+    {
+      "id": "magistral-small-2506",
+      "display": "Magistral Small 2506",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2025-06-04",
+      "gated": false,
+      "params": 23572403200,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 40960,
+      "files": [
+        {
+          "quant": "q8_0",
+          "repo": "mistralai/Magistral-Small-2506_gguf",
+          "file": "Magistral-Small-2506_Q8_0.gguf",
+          "revision": "cf20f373b612260a5e0f3a703a34594b3a66b438",
+          "size": 25054780480,
+          "sha256": "6c7e8eec28de36f086274875e08a06db6b45ae257f96f35cdcfd8f86f3fae9af"
+        }
+      ]
+    },
+    {
+      "id": "magistral-small-2507",
+      "display": "Magistral Small 2507",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2025-07-18",
+      "gated": false,
+      "params": 23572403200,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 40960,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "mistralai/Magistral-Small-2507-GGUF",
+          "file": "Magistral-Small-2507-Q4_K_M.gguf",
+          "revision": "129d7a005ec2180c7b6a56b8f175032d48ff78d9",
+          "size": 14334432192,
+          "sha256": "23a7a20e664389931dbff1c9d3b34ec59e6a38255cc2c91135a67a18454c8e48"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "mistralai/Magistral-Small-2507-GGUF",
+          "file": "Magistral-Small-2507-Q8_0.gguf",
+          "revision": "129d7a005ec2180c7b6a56b8f175032d48ff78d9",
+          "size": 25055302592,
+          "sha256": "78bfc64c72de6540cbcf7597dc2dac5d37e79764a24aa1172157e7d76b008da3"
+        }
+      ]
+    },
+    {
+      "id": "magistral-small-2509",
+      "display": "Magistral Small 2509",
+      "publisher": "mistralai",
+      "license": "apache-2.0",
+      "released": "2025-09-12",
+      "gated": false,
+      "params": 23572403200,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 40960,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "mistralai/Magistral-Small-2509-GGUF",
+          "file": "Magistral-Small-2509-Q4_K_M.gguf",
+          "revision": "429b90d8a8f0037241db6fab46a20b0f90859b03",
+          "size": 14334432256,
+          "sha256": "d3a024d29e0e8f35d9353f5d4f08fc3715406835c8ae1328ce2f3bd212a43434"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "mistralai/Magistral-Small-2509-GGUF",
+          "file": "Magistral-Small-2509-Q8_0.gguf",
+          "revision": "429b90d8a8f0037241db6fab46a20b0f90859b03",
+          "size": 25055302656,
+          "sha256": "d78f43dc517c744f65183a7f1e3abdc15a52bda352ffd6b07d544f72fb0dd7ef"
+        }
+      ]
+    },
+    {
+      "id": "qwen3.8-27b",
+      "display": "Qwen3.8 27B",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2026-08-05",
+      "gated": false,
+      "params": 27320697856,
+      "arch": {
+        "n_layer": 65,
+        "n_kv_heads": 4,
+        "head_dim": 256
+      },
+      "ctx_default": 262144,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "unsloth/Qwen3.8-27B-GGUF",
+          "file": "Qwen3.8-27B-UD-Q4_K_M.gguf",
+          "revision": "4af51b3542f775b0a8e4b310bfb3f17e01c306c9",
+          "size": 16564259744,
+          "sha256": "1bce504dfecd84153666928a41d8a66706f0158d3a317bc5196b72819d7dc529"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "unsloth/Qwen3.8-27B-GGUF",
+          "file": "Qwen3.8-27B-Q8_0.gguf",
+          "revision": "4af51b3542f775b0a8e4b310bfb3f17e01c306c9",
+          "size": 29047086048,
+          "sha256": "a680f44a06920e5d689774823782006aa3acc8db95750323373b24139b67e348"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.1-30b",
+      "display": "granite 4.1 30b",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2026-04-06",
+      "gated": false,
+      "params": 28865728512,
+      "arch": {
+        "n_layer": 64,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.1-30b-GGUF",
+          "file": "granite-4.1-30b-Q4_K_M.gguf",
+          "revision": "26a44ffe9923eea39af3ad811b56c9b0071e4347",
+          "size": 17490240736,
+          "sha256": "b33e4376e3581d11236ea53ced6b38399f6e91c0a391488486dc0827972f23f6"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.1-30b-GGUF",
+          "file": "granite-4.1-30b-Q8_0.gguf",
+          "revision": "26a44ffe9923eea39af3ad811b56c9b0071e4347",
+          "size": 30674969824,
+          "sha256": "2f772a60949ab40144bca249a5a38f7fa530d6b6649c14b8b6395c4cd64ef396"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.2-30b",
+      "display": "granite 4.2 30b",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2026-08-07",
+      "gated": false,
+      "params": 29276770304,
+      "arch": {
+        "n_layer": 64,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.2-30b-GGUF",
+          "file": "granite-4.2-30b-Q4_K_M.gguf",
+          "revision": "27b350a791e81d9a4d1ddca1c49282e9ec533768",
+          "size": 17721455328,
+          "sha256": "f299dace85d77ee0e24ca0b6720bd211b1f4cd1f65b9c0a2111e79692e29c9be"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.2-30b-GGUF",
+          "file": "granite-4.2-30b-Q8_0.gguf",
+          "revision": "27b350a791e81d9a4d1ddca1c49282e9ec533768",
+          "size": 31111705312,
+          "sha256": "005b0933353e9ba219b26e2667705bdb8dbc74eb50e4a4e6cb70fca108710f81"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-30b-a3b",
+      "display": "Qwen3 30B A3B",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-04-27",
+      "gated": false,
+      "params": 30532122624,
+      "arch": {
+        "n_layer": 48,
+        "n_kv_heads": 4,
+        "head_dim": 128
+      },
+      "ctx_default": 40960,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen3-30B-A3B-GGUF",
+          "file": "Qwen3-30B-A3B-Q4_K_M.gguf",
+          "revision": "e4d4bafdfb96a411a163846265362aceb0b9c63a",
+          "size": 18556685824,
+          "sha256": "0d003f6662faee786ed5da3e31b29c978de5ae5d275c8794c606a7f3c01aa8f5"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen3-30B-A3B-GGUF",
+          "file": "Qwen3-30B-A3B-Q8_0.gguf",
+          "revision": "e4d4bafdfb96a411a163846265362aceb0b9c63a",
+          "size": 32483931648,
+          "sha256": "4ad960d180b16f56024f5b704697e5dd5b0837167c2e515ef0569abfc599743c"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-30b-a3b-instruct-2507",
+      "display": "Qwen3 30B A3B Instruct 2507",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-07-28",
+      "gated": false,
+      "params": 30532122624,
+      "arch": {
+        "n_layer": 48,
+        "n_kv_heads": 4,
+        "head_dim": 128
+      },
+      "ctx_default": 262144,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/Qwen_Qwen3-30B-A3B-Instruct-2507-GGUF",
+          "file": "Qwen_Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf",
+          "revision": "6c6e8692f43e4ca663f7ece8229a1361090d3a4c",
+          "size": 18632183808,
+          "sha256": "382b4f5a164d200f93790ee0e339fae12852896d23485cfb203ce868fea33a95"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "bartowski/Qwen_Qwen3-30B-A3B-Instruct-2507-GGUF",
+          "file": "Qwen_Qwen3-30B-A3B-Instruct-2507-Q8_0.gguf",
+          "revision": "6c6e8692f43e4ca663f7ece8229a1361090d3a4c",
+          "size": 32483932160,
+          "sha256": "c2b7658bc62282083a8296a535400520b612a1044322be77ad7a53fa4d4fb92c"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-coder-30b-a3b-instruct",
+      "display": "Qwen3 Coder 30B A3B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-07-31",
+      "gated": false,
+      "params": 30532122624,
+      "arch": {
+        "n_layer": 48,
+        "n_kv_heads": 4,
+        "head_dim": 128
+      },
+      "ctx_default": 262144,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ggml-org/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+          "file": "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
+          "revision": "ef85c7f175f00be8af4e1de0c14e59ce7e5d0db3",
+          "size": 17988419552,
+          "sha256": "f6050b4da22869aa3fb9d94bb3314e9fc5a027d4741c1f97761c387d6b2b2335"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ggml-org/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+          "file": "Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf",
+          "revision": "ef85c7f175f00be8af4e1de0c14e59ce7e5d0db3",
+          "size": 32483934176,
+          "sha256": "3963e7f49d7ed2b18e3486574582552d6431cf30122e78b14c28fcb593451f42"
+        }
+      ]
+    },
+    {
+      "id": "granite-switch-4.1-30b",
+      "display": "granite switch 4.1 30b",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2026-10-14",
+      "gated": false,
+      "params": 30551851008,
+      "arch": {
+        "n_layer": 64,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-switch-4.1-30b-GGUF",
+          "file": "granite-switch-4.1-30b-Q4_K_M.gguf",
+          "revision": "3ba16c482c2f671663ad034eafa26bcd9a74e1b3",
+          "size": 21035547008,
+          "sha256": "ebb9020a88a04997eaeba993b996ebcba33b443f4d7247ab942a1bf8f7975f23"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-switch-4.1-30b-GGUF",
+          "file": "granite-switch-4.1-30b-Q8_0.gguf",
+          "revision": "3ba16c482c2f671663ad034eafa26bcd9a74e1b3",
+          "size": 34047264032,
+          "sha256": "8397d60e0ce65d94dbc78eb7b89b825c967632163fa2760a627d67cf0dbc4ec8"
+        }
+      ]
+    },
+    {
+      "id": "granite-4.0-h-small",
+      "display": "granite 4.0 h small",
+      "publisher": "ibm-granite",
+      "license": "apache-2.0",
+      "released": "2025-09-16",
+      "gated": false,
+      "params": 32207337984,
+      "arch": {
+        "n_layer": 40,
+        "n_kv_heads": 32,
+        "head_dim": 128
+      },
+      "ctx_default": 1048576,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "ibm-granite/granite-4.0-h-small-GGUF",
+          "file": "granite-4.0-h-small-Q4_K_M.gguf",
+          "revision": "6522095069a86fc3186b8632850e4373dd850cac",
+          "size": 19476621984,
+          "sha256": "23c6019f2e6fa56eb8872ecf8d9d1e4b2ebf3c087fb5275257ea07602d2a38b6"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "ibm-granite/granite-4.0-h-small-GGUF",
+          "file": "granite-4.0-h-small-Q8_0.gguf",
+          "revision": "6522095069a86fc3186b8632850e4373dd850cac",
+          "size": 34264885920,
+          "sha256": "232b8a426a6d6ab153752f3cf52d7ef9db42e2bdc9c854fb7bd4cdd15e292ad7"
+        }
+      ]
+    },
+    {
+      "id": "qwen3-32b",
+      "display": "Qwen3 32B",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-04-27",
+      "gated": false,
+      "params": 32762123264,
+      "arch": {
+        "n_layer": 64,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 40960,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen3-32B-GGUF",
+          "file": "Qwen3-32B-Q4_K_M.gguf",
+          "revision": "938a7432affaec9157f883a87164e2646ae17555",
+          "size": 19762149024,
+          "sha256": "efd971561896866f0e910cce52761ca77b1b138090c7f15fe284676d57d1f689"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen3-32B-GGUF",
+          "file": "Qwen3-32B-Q8_0.gguf",
+          "revision": "938a7432affaec9157f883a87164e2646ae17555",
+          "size": 34817718912,
+          "sha256": "2c50eb8aad05047dbf24fa014eb621adf552e14176cabe0c5db4ef38c91e2169"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-32b-instruct",
+      "display": "Qwen2.5 32B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-09-17",
+      "gated": false,
+      "params": 32763876352,
+      "arch": {
+        "n_layer": 64,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 32768,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+          "file": "Qwen2.5-32B-Instruct-Q4_K_M.gguf",
+          "revision": "2116cbb385b8ce3a4d28cf3bf1cd2039a55821a6",
+          "size": 19851336576,
+          "sha256": "2e5f6daea180dbc59f65a40641e94d3973b5dbaa32b3c0acf54647fa874e519e"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "bartowski/Qwen2.5-32B-Instruct-GGUF",
+          "file": "Qwen2.5-32B-Instruct-Q8_0.gguf",
+          "revision": "2116cbb385b8ce3a4d28cf3bf1cd2039a55821a6",
+          "size": 34820885376,
+          "sha256": "fc5103335689b33d576ebe8bf50b35a5e04ca6f7cf0753c2f2df1079dabbb78f"
+        }
+      ]
+    },
+    {
+      "id": "qwen2.5-coder-32b-instruct",
+      "display": "Qwen2.5 Coder 32B Instruct",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2024-11-06",
+      "gated": false,
+      "params": 32763876352,
+      "arch": {
+        "n_layer": 64,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/Qwen2.5-Coder-32B-Instruct-GGUF",
+          "file": "qwen2.5-coder-32b-instruct-q4_k_m.gguf",
+          "revision": "9d3053fce650fe1cdbdb75998c2a87add9d178ef",
+          "size": 19851335872,
+          "sha256": "4d64b316b5e6319d9613e0d97935d9ebd631fc7e334da400d00085eca749d085"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/Qwen2.5-Coder-32B-Instruct-GGUF",
+          "file": "qwen2.5-coder-32b-instruct-q8_0.gguf",
+          "revision": "9d3053fce650fe1cdbdb75998c2a87add9d178ef",
+          "size": 34820884672,
+          "sha256": "ae6e5cee79233499b41502ea7270e665dc402b2c35c48d43ef2d5a0a10842725"
+        }
+      ]
+    },
+    {
+      "id": "qwq-32b",
+      "display": "QwQ 32B",
+      "publisher": "Qwen",
+      "license": "apache-2.0",
+      "released": "2025-03-05",
+      "gated": false,
+      "params": 32763876352,
+      "arch": {
+        "n_layer": 64,
+        "n_kv_heads": 8,
+        "head_dim": 128
+      },
+      "ctx_default": 131072,
+      "files": [
+        {
+          "quant": "q4_k_m",
+          "repo": "Qwen/QwQ-32B-GGUF",
+          "file": "qwq-32b-q4_k_m.gguf",
+          "revision": "8728e66249190b78dee8404869827328527f6b3b",
+          "size": 19851335840,
+          "sha256": "524a6c9b91ec47b0b1279f6e06884111c74e822c56c919cfd7769227abed93cd"
+        },
+        {
+          "quant": "q8_0",
+          "repo": "Qwen/QwQ-32B-GGUF",
+          "file": "qwq-32b-q8_0.gguf",
+          "revision": "8728e66249190b78dee8404869827328527f6b3b",
+          "size": 34820884640,
+          "sha256": "eb98ac969a968629efbbfe43ca7f1a511cf5c08f71d2e559ce0c1e0e4270e3df"
+        }
+      ]
+    }
+  ]
+}
