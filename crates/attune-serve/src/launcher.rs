@@ -51,6 +51,11 @@ pub enum DownloadConsent {
     Ask(fn(u64, &str) -> bool),
 }
 
+/// True when `path` is relative to the attune home dir.
+fn needs_home(path: &str) -> bool {
+    path.starts_with(attune_profile::HOME_PREFIX)
+}
+
 /// Point `profile.model.path` at a real file: expand a `~/.attune/` path
 /// against `home` and, when the file is missing and the profile has a
 /// `source`, download it under `consent`.
@@ -257,8 +262,13 @@ pub fn launch(options: &ServeOptions) -> Result<Serving, ServeError> {
             "profile has an empty model.path; run `attune tune --save` first".to_string(),
         ));
     }
-    let home =
-        attune_fetch::home_dir().map_err(|err| ServeError::InvalidConfig(err.to_string()))?;
+    // Only a `~/.attune/` path needs the home dir; an absolute path must keep
+    // working where HOME/USERPROFILE is unset (services).
+    let home = if needs_home(&profile.model.path) {
+        attune_fetch::home_dir().map_err(|err| ServeError::InvalidConfig(err.to_string()))?
+    } else {
+        PathBuf::new()
+    };
     let progress = options.progress;
     resolve_model_file(&mut profile, &home, options.download, &mut |done, total| {
         progress(done, total)
@@ -486,5 +496,14 @@ mod tests {
         resolve_model_file(&mut profile, &home, DownloadConsent::No, &mut |_, _| {})
             .expect("present");
         assert_eq!(PathBuf::from(&profile.model.path), file);
+    }
+
+    #[test]
+    fn absolute_model_path_needs_no_home_dir() {
+        let home = temp_home("abs");
+        let file = home.join("m.gguf");
+        std::fs::write(&file, b"x").expect("write");
+        assert!(!needs_home(&file.display().to_string()));
+        assert!(needs_home("~/.attune/models/a/b.gguf"));
     }
 }
