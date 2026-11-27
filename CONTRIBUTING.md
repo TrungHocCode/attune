@@ -6,7 +6,13 @@ open-source flow. Please read this guide before opening an issue or PR.
 ## Code of Conduct
 
 Be respectful and constructive. We welcome beginners and maintainers alike.
-Harassment, spam, or low-effort PRs will be closed.
+Harassment, spam, or low-effort PRs will be closed. See
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+## Security
+
+Do not report vulnerabilities in public issues. Use GitHub's private
+reporting as described in [SECURITY.md](SECURITY.md).
 
 ## How to Contribute
 

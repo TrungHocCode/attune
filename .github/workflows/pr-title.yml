@@ -30,6 +30,7 @@ jobs:
             build
           scopes: |
             hal
+            fetch
             bench
             estimate
             tune
@@ -37,6 +38,7 @@ jobs:
             backend
             serve
             cli
+            catalog
             deps
           subjectPattern: ^(?![A-Z]).+$
           subjectPatternError: >-

@@ -98,9 +98,13 @@ fn unpack_zip(archive: &Path, into: &Path) -> Result<(), FetchError> {
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).map_err(|err| archive_error(archive, err))?;
         let Some(relative) = entry.enclosed_name().filter(|p| is_contained(p)) else {
+            let name = entry
+                .name()
+                .map(|name| name.into_owned())
+                .unwrap_or_default();
             return Err(archive_error(
                 archive,
-                format!("entry `{}` escapes the install dir", entry.name()),
+                format!("entry `{name}` escapes the install dir"),
             ));
         };
         let out = into.join(relative);
@@ -111,12 +115,14 @@ fn unpack_zip(archive: &Path, into: &Path) -> Result<(), FetchError> {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).map_err(|err| FetchError::io(parent, err))?;
         }
+        // Only ever write a regular file: a zip entry never becomes a symlink.
         let mut target = File::create(&out).map_err(|err| FetchError::io(&out, err))?;
         std::io::copy(&mut entry, &mut target).map_err(|err| FetchError::io(&out, err))?;
         #[cfg(unix)]
         if let Some(mode) = entry.unix_mode() {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode));
+            // Mask off setuid/setgid/sticky so an archive can never escalate.
+            let _ = std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode & 0o777));
         }
     }
     Ok(())
@@ -155,9 +161,19 @@ fn unpack_tar_gz(archive: &Path, into: &Path) -> Result<(), FetchError> {
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent).map_err(|err| FetchError::io(parent, err))?;
         }
+        // Never carry setuid/setgid/sticky from the archive's mode bits.
+        entry.set_preserve_permissions(false);
         entry
             .unpack(&out)
             .map_err(|err| archive_error(archive, err))?;
+        #[cfg(unix)]
+        if entry.header().entry_type().is_file() {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(mode) = entry.header().mode() {
+                let _ =
+                    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(mode & 0o777));
+            }
+        }
     }
     Ok(())
 }
@@ -183,6 +199,18 @@ mod tests {
             zip.start_file(*name, options).expect("entry");
             zip.write_all(bytes).expect("write");
         }
+        zip.finish().expect("finish");
+    }
+
+    #[cfg(unix)]
+    fn zip_with_mode(path: &Path, name: &str, bytes: &[u8], mode: u32) {
+        let file = std::fs::File::create(path).expect("create");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .unix_permissions(mode);
+        zip.start_file(name, options).expect("entry");
+        zip.write_all(bytes).expect("write");
         zip.finish().expect("finish");
     }
 
@@ -239,6 +267,24 @@ mod tests {
         assert!(install_archive(&archive, &dest).is_err());
         assert!(!dir.join("llama.cpp").join("evil.txt").exists());
         assert!(!dest.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zip_entry_mode_never_sets_setuid() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp("setuid");
+        let archive = dir.join("llama.zip");
+        zip_with_mode(&archive, "llama-server", b"\x7fELF", 0o4755);
+        let dest = install_dir(&dir, "b1");
+        install_archive(&archive, &dest).expect("install");
+        let mode = std::fs::metadata(dest.join("llama-server"))
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7000, 0, "setuid/setgid/sticky leaked: {mode:o}");
+        assert_ne!(mode & 0o111, 0, "lost execute bits: {mode:o}");
     }
 
     #[test]
