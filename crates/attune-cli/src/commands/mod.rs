@@ -20,8 +20,7 @@ pub enum Command {
     /// Maintainer tooling for the model catalog (used by CI)
     #[command(hide = true, subcommand)]
     Catalog(CatalogCommand),
-    /// Download and install the llama.cpp build attune is tested with
-    /// (pinned by the model catalog) into the attune home dir
+    /// Install the llama.cpp build attune uses
     Setup {
         /// Download without asking
         #[arg(long)]
@@ -30,15 +29,14 @@ pub enum Command {
         #[arg(long)]
         refresh_catalog: bool,
     },
-    /// Detect hardware (M1: CPU/SIMD/cache/RAM via raw-cpuid + sysinfo)
+    /// Show this machine's CPU, memory and GPU
     Detect {
         /// Output machine-readable JSON instead of pretty table
         #[arg(long)]
         json: bool,
     },
-    /// Benchmark this machine (M2). With `--model` (M2 slice 5 + 6) also
-    /// drives `llama-cli` for a llama.cpp load smoke-test and a full
-    /// end-to-end decode run.
+    /// Measure memory bandwidth and compute speed (add `--model` for a real
+    /// llama.cpp run)
     Bench {
         /// Quick memory-bandwidth sweep (just the read kernel)
         #[arg(long)]
@@ -75,10 +73,7 @@ pub enum Command {
         #[arg(long, value_name = "N", requires = "model")]
         threads: Option<u32>,
     },
-    /// Predict decode throughput, prefill/TTFT, the roofline bottleneck and
-    /// confidence intervals (M3 slices 1-4). Without overrides, bandwidth
-    /// comes from a quick bench and the FP32 peak from `attune detect`.
-    /// Comma-separated `--quant` compares several weight formats.
+    /// Predict how fast a model will run on this machine
     #[command(group(
         ArgGroup::new("model_source")
             .required(true)
@@ -118,8 +113,7 @@ pub enum Command {
         /// Prompt/prefill token count used for TTFT (default 512)
         #[arg(long, value_name = "N", default_value_t = 512)]
         prompt_tokens: u64,
-        /// Number of decode tokens to estimate (default 128; reserved for
-        /// slice 3 calibration output)
+        /// Number of decode tokens to estimate (default 128)
         #[arg(long, value_name = "N", default_value_t = 128)]
         gen_tokens: u64,
         /// Context window size used for KV-cache sizing. When omitted, a
@@ -151,10 +145,7 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Serve a tuned profile through llama-server behind an OpenAI-compatible
-    /// proxy (M5 slices 2-3: profile validation + spawn + health check + proxy +
-    /// `/v1/metrics`; slice 4: `--api-key` auth, non-loopback guard, and
-    /// llama-server dies with attune on Windows).
+    /// Run a model from a profile behind an OpenAI-compatible API
     Serve {
         /// Profile JSON written by `attune tune --save`
         #[arg(long, value_name = "PATH")]
@@ -194,9 +185,24 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Without --model/--params: recommend catalog models that suit this
-    /// machine. With them: rank inference configs for that model and
-    /// optionally save the winner as a profile.
+    /// List catalog models that fit this machine
+    Recommend {
+        /// RAM budget to plan against instead of the RAM available right now,
+        /// e.g. `4G` (keeps room for other apps)
+        #[arg(long, value_name = "SIZE")]
+        max_ram: Option<String>,
+        /// Show every catalog model and quant
+        #[arg(long)]
+        all: bool,
+        /// Re-download the model catalog even if the cached copy is fresh
+        #[arg(long)]
+        refresh_catalog: bool,
+        /// Output machine-readable JSON instead of the human table
+        #[arg(long)]
+        json: bool,
+    },
+    /// Find the fastest llama.cpp settings for a model and save them as a
+    /// profile (without `--model`: recommend models)
     #[command(group(
         ArgGroup::new("model_source")
             .required(false)
@@ -241,8 +247,8 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
         /// Verify the best candidates with a real llama.cpp e2e run and
-        /// re-score them from the measured numbers (M4 slice 4). Requires
-        /// `--model` to be a local `.gguf` file.
+        /// re-score them from the measured numbers. Requires `--model` to be
+        /// a local `.gguf` file.
         #[arg(long, requires = "model")]
         verify: bool,
         /// How many of the best estimate configs to verify (default 2)
@@ -289,6 +295,9 @@ pub enum Command {
         /// Re-download the model catalog even if the cached copy is fresh
         #[arg(long)]
         refresh_catalog: bool,
+        /// Show every ranked config, the score column and prune details
+        #[arg(long)]
+        verbose: bool,
         /// Output machine-readable JSON instead of the human table
         #[arg(long)]
         json: bool,
@@ -387,6 +396,12 @@ pub fn dispatch(command: Command) -> Result<()> {
             yes,
             json,
         ),
+        Command::Recommend {
+            max_ram,
+            all,
+            refresh_catalog,
+            json,
+        } => tune::run_recommend(max_ram.as_deref(), all, refresh_catalog, json),
         Command::Tune {
             model,
             params,
@@ -410,6 +425,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             max_ram,
             all,
             refresh_catalog,
+            verbose,
             json,
         } => tune::run(
             model.as_deref(),
@@ -439,6 +455,7 @@ pub fn dispatch(command: Command) -> Result<()> {
                 refresh_catalog,
             },
             json,
+            verbose,
         ),
     }
 }
@@ -457,4 +474,64 @@ pub enum CatalogCommand {
         #[arg(long)]
         out: PathBuf,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Command;
+    use clap::{CommandFactory, Parser};
+
+    fn collect_long_help(command: &clap::Command, out: &mut Vec<String>) {
+        out.push(command.clone().render_long_help().to_string());
+        for sub in command.get_subcommands() {
+            collect_long_help(sub, out);
+        }
+    }
+
+    #[test]
+    fn recommend_parses_its_flags() {
+        let cli = crate::Cli::try_parse_from([
+            "attune",
+            "recommend",
+            "--max-ram",
+            "4G",
+            "--all",
+            "--json",
+        ])
+        .expect("recommend should parse");
+        match cli.command {
+            Command::Recommend {
+                max_ram,
+                all,
+                refresh_catalog,
+                json,
+            } => {
+                assert_eq!(max_ram.as_deref(), Some("4G"));
+                assert!(all);
+                assert!(!refresh_catalog);
+                assert!(json);
+            }
+            _ => panic!("expected the recommend subcommand"),
+        }
+    }
+
+    #[test]
+    fn help_text_has_no_milestone_notes() {
+        let root = crate::Cli::command();
+        let mut help = Vec::new();
+        collect_long_help(&root, &mut help);
+        assert!(help.len() > 1, "expected the root and its subcommands");
+        for text in help {
+            assert!(
+                !text.to_ascii_lowercase().contains("slice"),
+                "milestone note left in help:\n{text}"
+            );
+            let bytes = text.as_bytes();
+            for window in bytes.windows(3) {
+                if window[0] == b'(' && window[1] == b'M' && window[2].is_ascii_digit() {
+                    panic!("milestone note left in help:\n{text}");
+                }
+            }
+        }
+    }
 }
