@@ -6,7 +6,7 @@ description = "Home dir and verified, resumable downloads for Attune (M6)"
 
 # Leaf crate: depends on no other attune crate (AGENTS.md §1).
 [dependencies]
-thiserror = "1"
+thiserror = "2"
 # Already used by attune-estimate; sync HTTP client with rustls for HTTPS model
 # and llama.cpp downloads, no async runtime.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
