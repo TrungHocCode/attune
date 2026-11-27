@@ -12,11 +12,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
-use attune_serve::{check_listen, install_shutdown, launch, Proxy, ProxyConfig, ServeOptions};
+use attune_serve::{
+    check_listen, install_shutdown, launch, resolve_profile, Proxy, ProxyConfig, ServeOptions,
+};
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
-    profile: &Path,
+    profile: &str,
     llama_server: Option<&Path>,
     host: &str,
     port: u16,
@@ -34,8 +36,9 @@ pub fn run(
         .filter(|key| !key.is_empty());
     let api_key = api_key.filter(|key| !key.is_empty()).or(env_key.as_deref());
     check_listen(listen, api_key)?;
+    let profile = resolve_profile(profile)?;
     let options = ServeOptions {
-        profile: profile.to_path_buf(),
+        profile,
         llama_server: llama_server.map(Path::to_path_buf),
         host: host.to_string(),
         port,
