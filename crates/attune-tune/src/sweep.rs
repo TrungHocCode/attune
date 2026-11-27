@@ -127,6 +127,39 @@ pub struct RankedConfig {
     /// uncalibrated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calibration: Option<CalibrationReport>,
+    /// Position in the swept grid, so near-ties can go to the earliest
+    /// (llama.cpp-default) config. Not part of the JSON contract.
+    #[serde(skip)]
+    pub grid_index: usize,
+}
+
+/// Predicted gains within this fraction of the top config are treated as ties.
+/// It is the estimate's own error band (M3 uncalibrated decode error is about
+/// +-6%), so smaller differences are not real and the defaults win.
+const NEAR_TIE: f64 = 0.05;
+
+/// Move the earliest-in-grid fitting config that is within [`NEAR_TIE`] of the
+/// top (same quant, so a genuinely faster format still wins) to rank 1.
+fn promote_near_tie(ranked: &mut Vec<RankedConfig>) {
+    let Some(top) = ranked.first() else { return };
+    if !top.fits {
+        return;
+    }
+    let pick = ranked
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            r.fits
+                && r.config.quant == top.config.quant
+                && r.decode_tps >= (1.0 - NEAR_TIE) * top.decode_tps
+                && r.ttft_ms <= (1.0 + NEAR_TIE) * top.ttft_ms
+        })
+        .min_by_key(|(_, r)| r.grid_index)
+        .map(|(i, _)| i);
+    if let Some(i) = pick.filter(|&i| i > 0) {
+        let chosen = ranked.remove(i);
+        ranked.insert(0, chosen);
+    }
 }
 
 /// Expand a cartesian product into configs.
@@ -224,7 +257,8 @@ pub fn prune(
 /// - RAM fit and the near-ceiling score penalty count weights plus the KV
 ///   cache for the full `n_ctx` window.
 ///
-/// Ties keep the input (grid) order because [`slice::sort_by`] is stable.
+/// Ties keep the input (grid) order because [`slice::sort_by`] is stable, and a
+/// near-tie with the top goes to the earliest grid point ([`NEAR_TIE`]).
 /// The `Result` exists because the roofline math rejects invalid inputs
 /// (zero params, bad bandwidth/FLOPS); swallowing those would silently rank
 /// nonsense.
@@ -242,7 +276,7 @@ pub fn rank_by_estimate(
     }
 
     let mut ranked = Vec::with_capacity(configs.len());
-    for config in configs {
+    for (grid_index, config) in configs.iter().enumerate() {
         config.validate()?;
 
         let weight_bytes = model.weight_bytes_for(config.quant);
@@ -277,6 +311,7 @@ pub fn rank_by_estimate(
             verified: false,
             measured: None,
             calibration: None,
+            grid_index,
         });
     }
 
@@ -285,6 +320,7 @@ pub fn rank_by_estimate(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    promote_near_tie(&mut ranked);
     Ok(ranked)
 }
 
@@ -337,6 +373,7 @@ pub fn calibrate_ranked(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    promote_near_tie(&mut calibrated);
     calibrated
 }
 
@@ -902,5 +939,56 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].n_ctx, 2_048);
         assert_eq!(pruned[0].1, PruneReason::Oom);
+    }
+
+    #[test]
+    fn near_tie_goes_to_llama_cpp_defaults() {
+        let (grid, _) = crate::expand_full_grid_with_quants(8, &[Quant::Q4_K_M]);
+        let ranked = rank_by_estimate(
+            &grid,
+            &TuneModel::nominal(4_000_000_000),
+            hw(),
+            16e9,
+            Objective::Throughput,
+            512,
+            128,
+        )
+        .expect("rank");
+        let top = &ranked[0].config;
+        assert_eq!((top.n_threads, top.n_batch, top.n_ubatch), (8, 512, 512));
+        assert_eq!(top.cache_kv, Quant::Fp16);
+    }
+
+    #[test]
+    fn real_gains_still_beat_the_defaults() {
+        // A smaller weight format is far faster than 5%.
+        let (grid, _) = crate::expand_full_grid_with_quants(8, &[Quant::Q8_0, Quant::Q4_K_M]);
+        let ranked = rank_by_estimate(
+            &grid,
+            &TuneModel::nominal(4_000_000_000),
+            hw(),
+            16e9,
+            Objective::Throughput,
+            512,
+            128,
+        )
+        .expect("rank");
+        assert_eq!(ranked[0].config.quant, Quant::Q4_K_M);
+
+        // f16 KV does not fit in 250 MB, q8_0 KV does.
+        let (grid, _) = crate::expand_full_grid_with_quants(8, &[Quant::Q4_K_M]);
+        let ranked = rank_by_estimate(
+            &grid,
+            &kv_model(),
+            hw(),
+            250e6,
+            Objective::Throughput,
+            512,
+            128,
+        )
+        .expect("rank");
+        assert!(ranked[0].fits);
+        assert_eq!(ranked[0].config.cache_kv, Quant::Q8_0);
+        assert_eq!(ranked[0].config.n_batch, 512);
     }
 }

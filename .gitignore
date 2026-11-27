@@ -21,3 +21,6 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# local plan-execution scratch (superpowers)
+.superpowers/

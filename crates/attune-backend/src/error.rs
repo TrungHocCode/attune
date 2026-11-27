@@ -17,6 +17,9 @@ pub enum BackendError {
         /// What was looked for, e.g. "`llama-server` on PATH".
         detail: String,
     },
+    /// A model file could not be downloaded or verified.
+    #[error("model download failed: {detail}")]
+    Download { detail: String },
     /// The child could not be started, or polling it failed.
     #[error("failed to run `{binary}`")]
     Spawn {

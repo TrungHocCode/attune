@@ -1,0 +1,46 @@
+{
+  "llama_cpp": {
+    "tag": "b11804",
+    "assets": [
+      {
+        "os": "windows",
+        "arch": "x86_64",
+        "variant": "cpu",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-cpu-x64.zip",
+        "size": 24067910,
+        "sha256": "3a3e417a0816329829081bdd443e3045ff3b2dbe866fcef89a1d919e941ce23f"
+      },
+      {
+        "os": "linux",
+        "arch": "x86_64",
+        "variant": "cpu",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-ubuntu-x64.tar.gz",
+        "size": 22331121,
+        "sha256": "bb800fbd5e905fb8b9887c9a6cb0ab4f14c7267c5f99302874521e7558b0613f"
+      }
+    ]
+  },
+  "max_params": 70000000000,
+  "quants": [
+    "q4_k_m",
+    "q8_0"
+  ],
+  "publishers": [
+    "Qwen",
+    "microsoft",
+    "mistralai",
+    "HuggingFaceTB",
+    "ibm-granite",
+    "ggml-org",
+    "bartowski",
+    "unsloth"
+  ],
+  "base_orgs": [
+    "Qwen",
+    "microsoft",
+    "mistralai",
+    "HuggingFaceTB",
+    "ibm-granite"
+  ],
+  "per_publisher_limit": 100
+}

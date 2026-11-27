@@ -71,6 +71,8 @@ impl ProxyState {
             // Upstream 4xx/5xx responses are forwarded verbatim, so ureq must
             // hand them back as responses instead of `Error::StatusCode`.
             .http_status_as_error(false)
+            // The upstream is local llama-server: never via HTTP(S)_PROXY.
+            .proxy(None)
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .build()
             .into();

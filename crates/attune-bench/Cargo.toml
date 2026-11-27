@@ -20,3 +20,8 @@ thiserror = "1"
 # `ReadResult`; the CLI already owns serialization for the end user.
 [dev-dependencies]
 serde_json = "1"
+[target.'cfg(windows)'.dependencies]
+# Justification (AGENTS 3.4): opt the process out of Windows power throttling
+# (EcoQoS), which otherwise slows every probe after the first (34.7 -> 14 GB/s).
+# Already in the lockfile via attune-backend/ctrlc.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

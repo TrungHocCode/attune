@@ -222,7 +222,8 @@ fn print_pretty_e2e(e2e: &E2eResult) {
 /// Resolve `llama-cli` and load `model` through it (the slice-5 smoke
 /// test). Quick mode only: full mode lets the e2e run prove the load.
 fn probe_llama(llama_cli: Option<&Path>, model: &Path) -> Result<LlamaProbeReport> {
-    let cli = resolve_llama_cli(llama_explicit(llama_cli)?)?;
+    let installed = super::setup::llama_cli_or_installed(llama_cli);
+    let cli = resolve_llama_cli(llama_explicit(installed.as_deref())?)?;
     // `?` keeps `BenchError`'s Display message as the top-level error and its
     // OS error as the `Caused by:` chain.
     Ok(probe_model(&cli, model, LOAD_TIMEOUT, None)?)
@@ -232,7 +233,8 @@ fn probe_llama(llama_cli: Option<&Path>, model: &Path) -> Result<LlamaProbeRepor
 /// the e2e runner needs to spawn the child). Helper so the resolution
 /// detail lives in exactly one place.
 fn resolve_e2e_cli(llama_cli: Option<&Path>) -> Result<PathBuf> {
-    let cli = resolve_llama_cli(llama_explicit(llama_cli)?)?;
+    let installed = super::setup::llama_cli_or_installed(llama_cli);
+    let cli = resolve_llama_cli(llama_explicit(installed.as_deref())?)?;
     Ok(cli)
 }
 

@@ -59,6 +59,7 @@ mod tests {
                 path: "models/tiny.gguf".to_string(),
                 quant: "q4_k_m".to_string(),
                 size_bytes: 82_600_000,
+                source: None,
             },
             load_config: LoadConfig {
                 n_ctx: 4_096,

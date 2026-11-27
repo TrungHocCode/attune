@@ -153,4 +153,17 @@ mod tests {
         let migrated = migrate_value(json!("not a profile"));
         assert_eq!(migrated, Profile::default());
     }
+
+    #[test]
+    fn v1_profile_migrates_to_v2_without_source() {
+        let v1 = json!({
+            "profile_version": 1,
+            "name": "old",
+            "model": { "path": "F:/m.gguf", "quant": "q4_k_m", "size_bytes": 10 }
+        });
+        let profile = migrate_value(v1);
+        assert_eq!(profile.profile_version, 2);
+        assert_eq!(profile.model.path, "F:/m.gguf");
+        assert!(profile.model.source.is_none());
+    }
 }

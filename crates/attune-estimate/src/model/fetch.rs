@@ -122,9 +122,12 @@ pub struct ResolvedHfModel {
     pub warnings: Vec<String>,
 }
 
-/// The cache path for the current working directory.
+/// The HF config cache path, inside the attune home dir.
 pub fn cache_path() -> PathBuf {
-    Path::new(CACHE_DIR).join(CACHE_FILE)
+    // The attune home dir; a working-directory `.attune/` only if that fails.
+    attune_fetch::home_dir()
+        .unwrap_or_else(|_| Path::new(CACHE_DIR).to_path_buf())
+        .join(CACHE_FILE)
 }
 
 /// True when `input` looks like a Hugging Face repository id (`org/name`).
@@ -503,6 +506,16 @@ mod tests {
         "tie_word_embeddings": true,
         "vocab_size": 151936
     }"#;
+
+    #[test]
+    fn hf_config_cache_lives_in_home() {
+        let home = std::env::temp_dir().join(format!("attune-hfhome-{}", std::process::id()));
+        std::env::set_var("ATTUNE_HOME", &home);
+        let path = cache_path();
+        std::env::remove_var("ATTUNE_HOME");
+        assert_eq!(path, home.join(CACHE_FILE));
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     fn temp_cache(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("attune-fetch-{}-{tag}", std::process::id()));

@@ -8,6 +8,8 @@ description = "Roofline performance estimates for Attune (M3)"
 # Plan §7: attune-estimate builds predictions on top of measured hardware
 # inputs from attune-bench. No clap/anyhow here — the CLI owns arg parsing.
 attune-bench = { path = "../attune-bench" }
+# Home dir + allow-listed HTTPS fetch for the model catalog (M6).
+attune-fetch = { path = "../attune-fetch" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 # config.json parsing + the on-disk catalog cache (the CLI still owns

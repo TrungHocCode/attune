@@ -82,6 +82,8 @@ pub enum LlamaServerSource {
         /// The name that matched, i.e. an entry of [`PATH_CANDIDATES`].
         name: String,
     },
+    /// Installed by `attune setup` under the attune home dir.
+    Installed,
 }
 
 impl LlamaServerSource {
@@ -91,6 +93,7 @@ impl LlamaServerSource {
             LlamaServerSource::Flag => "`--llama-server` path".to_string(),
             LlamaServerSource::Env => format!("`{ENV_LLAMA_SERVER}` path"),
             LlamaServerSource::Path { name } => format!("`{name}` on PATH"),
+            LlamaServerSource::Installed => "`attune setup` install".to_string(),
         }
     }
 }
@@ -117,6 +120,7 @@ pub fn select_llama_server(
     explicit: Option<&Path>,
     env_value: Option<&Path>,
     path_hits: &[(String, PathBuf)],
+    installed: Option<&Path>,
 ) -> Result<(LlamaServerSource, PathBuf), BackendError> {
     if let Some(path) = usable_path(explicit) {
         return Ok((LlamaServerSource::Flag, path.to_path_buf()));
@@ -127,9 +131,12 @@ pub fn select_llama_server(
     if let Some((name, path)) = path_hits.first() {
         return Ok((LlamaServerSource::Path { name: name.clone() }, path.clone()));
     }
+    if let Some(path) = installed {
+        return Ok((LlamaServerSource::Installed, path.to_path_buf()));
+    }
     Err(BackendError::NotFound {
         detail: format!(
-            "searched PATH for {}",
+            "searched PATH for {} and the attune home dir; run `attune setup`",
             quoted_list(PATH_CANDIDATES.iter().copied())
         ),
     })
@@ -140,7 +147,15 @@ pub fn select_llama_server(
 pub fn resolve_llama_server(explicit: Option<&Path>) -> Result<PathBuf, BackendError> {
     let env_value = std::env::var_os(ENV_LLAMA_SERVER).map(PathBuf::from);
     let path_hits = search_path();
-    let (source, chosen) = select_llama_server(explicit, env_value.as_deref(), &path_hits)?;
+    let installed = attune_fetch::home_dir()
+        .ok()
+        .and_then(|home| attune_fetch::find_installed(&home, "llama-server"));
+    let (source, chosen) = select_llama_server(
+        explicit,
+        env_value.as_deref(),
+        &path_hits,
+        installed.as_deref(),
+    )?;
     if !is_runnable_file(&chosen) {
         return Err(BackendError::NotFound {
             detail: format!(
@@ -518,6 +533,17 @@ impl ServerGuard {
         if let Some(dir) = working_dir {
             command.current_dir(dir);
         }
+        // Linux llama.cpp builds keep their shared libs next to the binary.
+        #[cfg(target_os = "linux")]
+        if let Some(dir) = binary.parent() {
+            let mut paths = vec![dir.to_path_buf()];
+            if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+                paths.extend(std::env::split_paths(&existing));
+            }
+            if let Ok(joined) = std::env::join_paths(paths) {
+                command.env("LD_LIBRARY_PATH", joined);
+            }
+        }
 
         let mut child = command.spawn().map_err(|source| BackendError::Spawn {
             binary: binary.display().to_string(),
@@ -653,6 +679,8 @@ pub fn health_wait(url: &str, deadline: Duration) -> Result<Duration, BackendErr
     let started = Instant::now();
     let deadline_at = started + deadline;
     let agent: ureq::Agent = ureq::Agent::config_builder()
+        // Localhost only: a user's HTTP(S)_PROXY must not route it.
+        .proxy(None)
         .timeout_global(Some(HEALTH_REQUEST_TIMEOUT))
         .build()
         .into();
@@ -754,6 +782,7 @@ mod tests {
             Some(Path::new("/flag/llama-server")),
             Some(Path::new("/env/llama-server")),
             &hits,
+            None,
         )
         .expect("explicit flag should resolve");
         assert_eq!(source, LlamaServerSource::Flag);
@@ -763,16 +792,17 @@ mod tests {
     #[test]
     fn env_beats_path_when_no_flag_is_given() {
         let hits = vec![hit("llama-server")];
-        let (source, path) = select_llama_server(None, Some(Path::new("/env/llama-server")), &hits)
-            .expect("env should resolve");
+        let (source, path) =
+            select_llama_server(None, Some(Path::new("/env/llama-server")), &hits, None)
+                .expect("env should resolve");
         assert_eq!(source, LlamaServerSource::Env);
         assert_eq!(path, PathBuf::from("/env/llama-server"));
     }
 
     #[test]
     fn path_is_the_last_resort() {
-        let (source, path) =
-            select_llama_server(None, None, &[hit("llama-server")]).expect("PATH should resolve");
+        let (source, path) = select_llama_server(None, None, &[hit("llama-server")], None)
+            .expect("PATH should resolve");
         assert_eq!(
             source,
             LlamaServerSource::Path {
@@ -785,8 +815,9 @@ mod tests {
     #[test]
     fn blank_values_are_treated_as_unset() {
         let hits = vec![hit("llama-server")];
-        let (source, _) = select_llama_server(Some(Path::new("   ")), Some(Path::new("")), &hits)
-            .expect("PATH should win");
+        let (source, _) =
+            select_llama_server(Some(Path::new("   ")), Some(Path::new("")), &hits, None)
+                .expect("PATH should win");
         assert_eq!(
             source,
             LlamaServerSource::Path {
@@ -796,8 +827,25 @@ mod tests {
     }
 
     #[test]
+    fn select_prefers_flag_env_path_then_installed() {
+        let installed = PathBuf::from("/home/u/.attune/llama.cpp/b1/llama-server");
+        let hits = [hit("llama-server")];
+        let (source, path) =
+            select_llama_server(None, None, &hits, Some(&installed)).expect("PATH first");
+        assert!(matches!(source, LlamaServerSource::Path { .. }));
+        assert_ne!(path, installed);
+        let (source, path) =
+            select_llama_server(None, None, &[], Some(&installed)).expect("installed");
+        assert_eq!(source, LlamaServerSource::Installed);
+        assert_eq!(path, installed);
+        let error = select_llama_server(None, None, &[], None).expect_err("none");
+        assert!(error.to_string().contains("attune setup"), "{error}");
+    }
+
+    #[test]
     fn nothing_found_is_a_clean_not_found_error() {
-        let error = select_llama_server(None, None, &[]).expect_err("nothing should be found");
+        let error =
+            select_llama_server(None, None, &[], None).expect_err("nothing should be found");
         let message = error.to_string();
         assert!(matches!(error, BackendError::NotFound { .. }));
         assert!(
@@ -810,7 +858,7 @@ mod tests {
     fn a_missing_explicit_path_is_reported_with_its_origin() {
         let chosen = PathBuf::from("definitely-not-a-real-llama-server-path");
         let (source, selected) =
-            select_llama_server(Some(&chosen), None, &[]).expect("precedence picks the flag");
+            select_llama_server(Some(&chosen), None, &[], None).expect("precedence picks the flag");
         assert_eq!(source, LlamaServerSource::Flag);
         assert!(!is_runnable_file(&selected));
         assert!(!is_runnable_file(Path::new("/no/such/dir/llama-server")));

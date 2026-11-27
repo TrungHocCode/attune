@@ -23,9 +23,9 @@ use thiserror::Error;
 pub use args::to_llama_args;
 pub use migrate::migrate_value;
 pub use schema::{
-    now_unix, ComputeConfig, DraftConfig, Engine, ExpectedPerformance, Fallbacks, LoadConfig,
-    ModelConfig, Profile, RamFallback, SamplingDefaults, DEFAULT_FALLBACK_N_CTX, DEFAULT_N_BATCH,
-    DEFAULT_N_CTX, DEFAULT_N_UBATCH,
+    expand_home, now_unix, ComputeConfig, DraftConfig, Engine, ExpectedPerformance, Fallbacks,
+    LoadConfig, ModelConfig, ModelSource, Profile, RamFallback, SamplingDefaults,
+    DEFAULT_FALLBACK_N_CTX, DEFAULT_N_BATCH, DEFAULT_N_CTX, DEFAULT_N_UBATCH, HOME_PREFIX,
 };
 pub use validate::{validate, ProfileWarning, WarningKind, WarningSeverity};
 
@@ -34,7 +34,8 @@ pub use validate::{validate, ProfileWarning, WarningKind, WarningSeverity};
 /// Bump it only together with a `migrate` step that upgrades the old shape;
 /// `serde(default)` on every field keeps older documents parseable in the
 /// meantime.
-pub const PROFILE_VERSION: u32 = 1;
+/// v2 adds the optional `model.source` (M6).
+pub const PROFILE_VERSION: u32 = 2;
 
 /// Errors from parsing or serializing a profile.
 #[derive(Debug, Error)]

@@ -211,6 +211,7 @@ pub fn quick_flops() -> Result<FlopsResult, BenchError> {
 /// Run the FMA sweep: warm-up pass + `reps` timed passes, summarise into
 /// the FMA-block struct.
 pub fn measure_flops(cfg: &FlopsConfig) -> Result<FlopsResult, BenchError> {
+    crate::power::full_speed();
     if cfg.threads == 0 {
         return Err(BenchError::InvalidConfig(
             "threads must be >= 1".to_string(),

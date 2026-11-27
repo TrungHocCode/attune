@@ -2,6 +2,8 @@ name: ci
 
 on:
   push:
+    # The catalog branch only holds catalog.json (see catalog.yml).
+    branches-ignore: [catalog]
   pull_request:
 
 jobs:

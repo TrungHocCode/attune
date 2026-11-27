@@ -4,7 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- M6 recommend & downloads: `attune tune` without `--model` lists catalog models that suit this machine (fit verdict, predicted speed and first reply, one pick per size tier, `--max-ram`, `--all`, `--refresh-catalog`, `--json`); `tune --model <catalog id> --save` needs no file and writes a v2 profile with `model.source`; `serve` downloads a missing model after confirmation (`--yes` for scripts); `attune setup` installs the pinned llama.cpp build into `~/.attune`.
+- New crate `attune-fetch`: home dir (`ATTUNE_HOME`), HTTPS host allow-list checked on every redirect, resumable SHA-256-verified downloads, zip/tar.gz installs that reject path escapes.
+- Model catalog (`attune-catalog/1`): `catalog/snapshot.json` built in, daily `catalog.yml` Action regenerating `catalog.json` on the `catalog` branch via the hidden `attune catalog build`.
+- Profile schema v2: optional `model.source` (v1 migrates unchanged).
+
+### Fixed
+- Windows power throttling slowed every probe after the first in a process (34.7 -> 12-17 GB/s); probes now opt the process out. `tune` runs HAL detection and the bandwidth probe sequentially.
+- Quantized prefill uses 0.40 of the measured int8 peak (llama.cpp's measured share), not the full peak: TTFT error -1.4% / +10.3% on Qwen3 4B/8B.
+- `HTTP(S)_PROXY` no longer routes `serve`'s localhost health check and upstream calls through a proxy.
+- GGUF head dimension now comes from `attention.key_length` when present (Qwen3 was sized 80/64 instead of 128).
+- `attune-backend` declares the `Win32_Security` windows-sys feature it needs.
+
+## [0.5.0] - 2026-11-26
+
+M5 (serve) MVP, the estimate accuracy fixes found while re-testing M1-M5 on real models, and the revised M4 target. Acceptance: profile apply 20/20, install to first inference 3 min 38 s (see ROADMAP).
+
 ### Changed
+- M4 acceptance target revised (#103): instead of "> 20% faster than llama.cpp defaults" (not reachable on a memory-bound CPU), tune must not regress versus defaults (decode -3%, prefill -5% at most) and its calibrated prediction must land within 15% of measured. Met on Qwen3 4B/8B Q4_K_M (2026-11-25: 4B prefill +9%, decode within noise; 8B no regression), so ROADMAP M4 is ✅ again.
 - docs: M3/M4 acceptance re-validated on Qwen3 4B/8B Q4_K_M with a held-out protocol (new "Acceptance protocol (M3/M4)" section in `docs/benchmark-methodology.md`, #78). M3 holds: uncalibrated decode -4%..+6%, calibrated held-out median error 0.8-2.8% (max 5.8%). M4 does not: tuned vs defaults on the 4B is **+2.9%** median (target > 20% not met), so the ROADMAP M4 check is now "re-validation pending". The v0.4.0 numbers below (M3 "0%" in-sample, M4 "+25.7%" on SmolLM2-135M) are superseded.
 
 ### Added
@@ -13,6 +31,7 @@ All notable changes to this project will be documented in this file.
 - `attune-bench`: int8 dot-product throughput kernel (AVX-VNNI `vpdpbusd`, AVX2 `vpmaddubsw` fallback, scalar) reported as the optional `int8` block of the bench JSON (`int8_gops`). `attune-hal`: `AVX-VNNI` (CPUID 7.1 EAX bit 4) and `AVX512-VNNI` appear in `simd_flags`.
 
 ### Fixed
+- #103: `tune` breaks near-ties toward llama.cpp defaults. The grid now lists `-t cores`, `-b 512` and f16 KV first, `n_ubatch` follows `n_batch` (512 for the 512 batch), and the earliest-in-grid config of the same weight format within 5% of the top predicted decode and TTFT is promoted to rank 1. Previously the half-thread, batch-128, q8_0-KV config won on a 3% (sub-error) predicted decode gain and cost about 10-40% real prefill.
 - #102: `tune` predicts TTFT from the prompt length (clamped to `n_ctx`) like `estimate`, instead of prefilling the whole context window.
 - #70: the read-bandwidth probe uses AVX2 256-bit loads (scalar fallback) and `--quick` takes best-of 20 passes instead of 3 (~0.2 s), cutting run-to-run spread (6 runs: 29.5-33.6 GB/s before, 32.4-34.7 after; llama.cpp implies 30-33 GB/s on the reference machine). `detect` now reports the DIMM's configured speed (`ConfiguredClockSpeed`, 5200 MT/s) instead of the rated one (5600) for the theoretical bandwidth on Windows.
 - #69: uncalibrated quantized prefill/TTFT now uses the measured int8 throughput (live quick probe, or `int8` from `--bench-json`) as the compute ceiling instead of the FP32 base-clock peak, with no extra dequant penalty on top of it; fp16 and an explicit `--gflops` keep the FP32 path. `estimate` JSON gains optional `inputs.int8_gops`. The `clock_ghz` docs now say best-effort (Windows reports the base clock). Qwen3 4B/8B TTFT error on the reference machine drops from +45%/+54% to -13%/-3%.
