@@ -11,7 +11,7 @@ description = "Inference backend adapters for Attune (llama.cpp subprocess)"
 # instead of pulling the whole benchmarking stack (see lib.rs).
 attune-profile = { path = "../attune-profile" }
 serde = { version = "1", features = ["derive"] }
-thiserror = "1"
+thiserror = "2"
 # Justification (AGENTS §3.4): sync HTTP health polling without an async
 # runtime. `ureq` is already in the workspace (attune-estimate), but this is a
 # separate dependency entry: the health endpoint is plain localhost HTTP, so no

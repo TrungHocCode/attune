@@ -17,7 +17,7 @@ serde = { version = "1", features = ["derive"] }
 # Justification (AGENTS §3.4): OpenAI-shaped error envelopes + `"stream": true`
 # detection; already used across the workspace, no extra transitive weight.
 serde_json = "1"
-thiserror = "1"
+thiserror = "2"
 # Justification (AGENTS §3.4): smallest synchronous HTTP server that supports
 # chunked/SSE responses, matching this all-sync codebase (no async runtime).
 tiny_http = "0.12"
