@@ -32,6 +32,8 @@ reporting as described in [SECURITY.md](SECURITY.md).
    cargo fmt --check
    cargo run -p attune-cli -- detect
    ```
+   If you changed dependencies, also run `cargo audit` (`cargo install cargo-audit --locked`).
+   CI runs it on every PR.
 6. **Commit** with [Conventional Commits](https://www.conventionalcommits.org/):
    `type(scope): subject` (e.g. `feat(hal): detect SIMD via raw-cpuid`).
    Allowed types: `feat|fix|chore|docs|refactor|test|perf|ci|build`.
