@@ -26,16 +26,20 @@
 //! `llama-server`. [`Proxy::bind`] refuses a non-loopback `listen` without a
 //! key.
 
+pub mod chat;
 pub mod launcher;
 pub mod metrics;
+pub mod profiles;
 pub mod proxy;
 pub mod server;
 pub mod shutdown;
 
+pub use chat::{parse_sse_line, ChatClient, ChatStats, Message, SseEvent};
 pub use launcher::{
     fingerprint_of, launch, prepare_profile, resolve_model_file, DownloadConsent, PreparedProfile,
     ReadyReport, ServeOptions, Serving,
 };
+pub use profiles::{profiles_dir, resolve_profile};
 pub use server::{check_listen, Proxy, ProxyConfig};
 pub use shutdown::{install_shutdown, ShutdownSignal};
 
@@ -71,4 +75,43 @@ pub enum ServeError {
     /// The process shutdown handler could not be installed.
     #[error("shutdown handler: {0}")]
     Shutdown(String),
+    /// The attune home dir could not be resolved.
+    #[error("attune home: {0}")]
+    Home(#[from] attune_fetch::FetchError),
+    /// The `profiles` directory could not be created.
+    #[error("cannot create the profiles dir `{path}`: {source}")]
+    ProfilesDir {
+        /// Directory that could not be created.
+        path: String,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// `--profile` named a file that does not exist.
+    #[error(
+        "no profile `{arg}`: looked for {candidates}; save one with \
+         `attune tune --model <id> --save <path>`"
+    )]
+    ProfileNotFound {
+        /// The argument the user passed.
+        arg: String,
+        /// The file paths that were checked.
+        candidates: String,
+    },
+    /// Chat request, streaming or response handling failed.
+    #[error("chat: {0}")]
+    Chat(String),
+    /// No attune server is accepting connections at `url`.
+    #[error("No attune server at {url}. Start one with `attune serve --profile <name>`")]
+    NoServer {
+        /// The URL the client tried.
+        url: String,
+    },
+}
+
+impl ServeError {
+    /// Whether this error means no server was listening at the chat URL.
+    pub fn is_no_server(&self) -> bool {
+        matches!(self, Self::NoServer { .. })
+    }
 }

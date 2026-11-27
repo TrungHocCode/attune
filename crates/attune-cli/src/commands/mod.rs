@@ -3,6 +3,7 @@
 
 mod bench;
 mod catalog;
+mod chat;
 mod detect;
 mod download;
 mod estimate;
@@ -147,9 +148,9 @@ pub enum Command {
     },
     /// Run a model from a profile behind an OpenAI-compatible API
     Serve {
-        /// Profile JSON written by `attune tune --save`
-        #[arg(long, value_name = "PATH")]
-        profile: PathBuf,
+        /// Profile file, or the name of a profile saved in ~/.attune/profiles
+        #[arg(long, value_name = "PATH_OR_NAME")]
+        profile: String,
         /// Path to the llama.cpp `llama-server` binary (default:
         /// $ATTUNE_LLAMA_SERVER, then a PATH search for `llama-server`)
         #[arg(long, value_name = "PATH")]
@@ -184,6 +185,18 @@ pub enum Command {
         /// (the proxy address is printed on stderr)
         #[arg(long)]
         json: bool,
+    },
+    /// Chat with a running attune server
+    Chat {
+        /// Base URL of the attune proxy
+        #[arg(long, value_name = "URL", default_value = "http://127.0.0.1:8080")]
+        url: String,
+        /// Bearer key the proxy requires (also read from `ATTUNE_API_KEY`)
+        #[arg(long, value_name = "KEY")]
+        api_key: Option<String>,
+        /// System prompt sent before the conversation
+        #[arg(long, value_name = "TEXT")]
+        system: Option<String>,
     },
     /// List catalog models that fit this machine
     Recommend {
@@ -396,6 +409,11 @@ pub fn dispatch(command: Command) -> Result<()> {
             yes,
             json,
         ),
+        Command::Chat {
+            url,
+            api_key,
+            system,
+        } => chat::run(&url, api_key.as_deref(), system.as_deref()),
         Command::Recommend {
             max_ram,
             all,
