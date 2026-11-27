@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- M6 recommend & downloads: `attune tune` without `--model` lists catalog models that suit this machine (fit verdict, predicted speed and first reply, one pick per size tier, `--max-ram`, `--all`, `--refresh-catalog`, `--json`); `tune --model <catalog id> --save` needs no file and writes a v2 profile with `model.source`; `serve` downloads a missing model after confirmation (`--yes` for scripts); `attune setup` installs the pinned llama.cpp build into `~/.attune`.
+- New crate `attune-fetch`: home dir (`ATTUNE_HOME`), HTTPS host allow-list checked on every redirect, resumable SHA-256-verified downloads, zip/tar.gz installs that reject path escapes.
+- Model catalog (`attune-catalog/1`): `catalog/snapshot.json` built in, daily `catalog.yml` Action regenerating `catalog.json` on the `catalog` branch via the hidden `attune catalog build`.
+- Profile schema v2: optional `model.source` (v1 migrates unchanged).
+
+### Fixed
+- Windows power throttling slowed every probe after the first in a process (34.7 -> 12-17 GB/s); probes now opt the process out. `tune` runs HAL detection and the bandwidth probe sequentially.
+- Quantized prefill uses 0.40 of the measured int8 peak (llama.cpp's measured share), not the full peak: TTFT error -1.4% / +10.3% on Qwen3 4B/8B.
+- `HTTP(S)_PROXY` no longer routes `serve`'s localhost health check and upstream calls through a proxy.
+- GGUF head dimension now comes from `attention.key_length` when present (Qwen3 was sized 80/64 instead of 128).
+- `attune-backend` declares the `Win32_Security` windows-sys feature it needs.
+
 ## [0.5.0] - 2026-11-26
 
 M5 (serve) MVP, the estimate accuracy fixes found while re-testing M1-M5 on real models, and the revised M4 target. Acceptance: profile apply 20/20, install to first inference 3 min 38 s (see ROADMAP).

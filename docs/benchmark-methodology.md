@@ -321,6 +321,48 @@ under 6%.
 
 Raw per-run JSON/logs are kept outside the repo.
 
+### M6 recommend acceptance (2026-11-27)
+
+Conditions: Windows 11, Core 5 210H, 15.6 GB RAM (2.4-5.4 GB free), AC,
+Balanced plan, Discord/Edge/Claude open; llama.cpp b11804 CPU; branch
+`feat/m6-recommend`.
+
+**Probe fixes found here.** Windows 11 power throttling (EcoQoS) slowed every
+probe after the first in one process: 34.7, then 12-17 GB/s (and the int8
+probe likewise), while llama.cpp (which opts out) sustained ~30 GB/s. Every
+probe now opts the process out first; `tune` reads 34.7-36.4 GB/s on 5 runs
+(was 13.3-36.2). With an unthrottled int8 probe (~1700 GOPS), llama.cpp
+prefill reaches 649 (4B) and 727 (8B) GOPS, so quantized prefill now uses
+`INT8_PREFILL_EFFICIENCY = 0.40`. The earlier M3 TTFT numbers above were taken
+with the throttled probe.
+
+**Recommend accuracy** (uncalibrated `attune tune --all --json`, prompt 512,
+ctx 4096, vs `llama-bench -p 512 -n 128 -r 3`, default threads):
+
+| Model (catalog file) | Decode pred. | Decode meas. | Error | TTFT pred. | TTFT meas. | Error |
+|---|---|---|---|---|---|---|
+| Qwen3 0.6B Q8_0 | 47.60 | 45.31 | +5.1% | 926 ms | 1978 ms | -53.2% |
+| Qwen3 4B Instruct 2507 Q4_K_M | 13.01 | 11.88 | +9.5% | 6252 ms | 6341 ms | -1.4% |
+| Qwen3 8B Q4_K_M | 6.57 | 6.73 | -2.4% | 12730 ms | 11539 ms | +10.3% |
+
+Decode target (< 25%) met. Tiny models' first reply is overhead-dominated and
+under-predicted (0.6B -53%); known limit. MoE models (e.g. Qwen3-30B-A3B) are
+estimated as dense and therefore never picked; MoE is V2 scope.
+
+**Zero manual downloads:** empty `ATTUNE_HOME`, llama.cpp removed from PATH,
+release binary: `setup --yes` +5.6 s, `tune` (recommend) +11.6 s, `tune --model
+qwen3-0.6b --quant q8_0 --save` +19.8 s, `serve --yes` healthy +67.1 s, first
+reply +67.9 s, including the 24 MB llama.cpp and 0.64 GB model downloads.
+
+**Offline** (`HTTP(S)_PROXY` pointed at a closed port): recommend warned and
+used the built-in catalog; serving an already-downloaded profile answered.
+This check found that the proxy variables also captured `serve`'s localhost
+health check; fixed.
+
+**Download safety:** a download killed at 76 MB resumed from 10% and finished
+verified; a profile with a tampered SHA-256 was rejected with nothing left on
+disk.
+
 ## Caveats
 
 These are real failure modes the bench will not catch:
