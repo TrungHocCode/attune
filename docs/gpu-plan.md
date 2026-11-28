@@ -1,8 +1,9 @@
-# GPU Plan (M7 — proposed)
+# GPU Plan (M7 — background)
 
-> Status: **proposal, not started.** M5 (serve) closes first, then the open
-> estimate bugs (#69–#75), then this. Nothing here is promised until the
-> M7 slices are planned as issues.
+> Status: **superseded.** This was the early proposal. The design that shipped is
+> [docs/superpowers/specs/2026-11-28-gpu-design.md](superpowers/specs/2026-11-28-gpu-design.md),
+> released in v0.7.0. Results are in ROADMAP M7. Kept for background; the
+> "today" statements below describe attune before v0.7.0.
 
 ## Why
 

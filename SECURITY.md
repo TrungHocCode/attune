@@ -31,7 +31,13 @@ Attune downloads and runs third-party files, so these areas matter most:
   any other address requires `--api-key`. Auth bypasses and request smuggling
   to llama-server are in scope.
 - **Profiles**: a profile file must not be able to inject arbitrary
-  llama-server arguments.
+  llama-server arguments. This includes the GPU fields (`engine.variant`,
+  `load_config.gpu_name`) and the `-dev` value attune derives from them.
+- **GPU detection and builds**:
+  - `detect` runs `nvidia-smi` and, on Windows, a read-only PowerShell CIM
+    query. These must never run anything else.
+  - The Vulkan and CUDA llama.cpp builds have the same pin, SHA-256 and host
+    rules as the CPU build.
 
 Out of scope: vulnerabilities in llama.cpp itself or in model weights (report
 those upstream), and attacks that need an already-compromised machine.

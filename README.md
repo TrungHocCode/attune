@@ -16,11 +16,12 @@ typically only 60–85% of what you really get.
 
 Attune closes that gap in three steps:
 
-1. **Detect** your hardware (CPU, SIMD, cache, RAM).
-2. **Measure** its real capability (memory bandwidth, FLOPS, then end-to-end
-   inference speed with llama.cpp).
-3. **Tune** — pick the best inference config for your machine and export it
-   as a reusable JSON profile that `attune serve` can run.
+1. **Detect** your hardware: CPU, SIMD, cache, RAM and GPUs (name, VRAM, driver).
+2. **Measure** its real capability: memory bandwidth, FLOPS, then end-to-end
+   inference speed with llama.cpp, on the CPU and the GPU.
+3. **Tune**: pick the best inference config for your machine, on the CPU, the
+   GPU, or split across both, and export it as a reusable JSON profile that
+   `attune serve` and `attune run` use.
 
 ## Quick start
 
@@ -48,15 +49,18 @@ attune recommend
 ```
 
 ```
-Machine: RAM 33.5 GB/s, 3.2 GB for models · catalog 2026-11-27 (cached)
+Machine: RAM 35.8 GB/s, 7.3 GB for models · catalog 2026-11-27 (cached) · GPU NVIDIA GeForce RTX 4050 Laptop GPU 5.8 GB
 
-  Model                      Quant    Download      RAM      Speed  First reply  Fit
-★ Qwen3 4B Instruct 2507     q4_k_m     2.5 GB   3.1 GB   13.0 tok/s        6.5 s  ✅
-• Qwen3 0.6B                 q8_0       0.6 GB   1.1 GB   47.6 tok/s        1.0 s  ✅
-  Mistral 7B Instruct v0.3   q4_k_m     4.4 GB   4.9 GB    7.5 tok/s       11.7 s  ❌ needs 0.2 GB more
+  Model                          Quant    Download    RAM     Speed  First reply  Runs on        Fit
+★ Ministral 3 14B Reasoning 2512 q4_k_m     8.2 GB  3.8 GB   8.4 tok/s     1.2 s  GPU+CPU 25/40  ✅
+• granite 4.2 3b                 q4_k_m     2.2 GB  0.2 GB  71.2 tok/s     0.2 s  GPU            ✅
+  Qwen2 7B Instruct              q4_k_m     4.7 GB  0.3 GB  34.6 tok/s     0.5 s  GPU            ✅
   ...
-Next: attune run qwen3-4b-instruct-2507
+Next: attune run ministral-3-14b-reasoning-2512
 ```
+
+On a machine without a GPU, the `Runs on` column says `CPU`, and speeds are about 4–5× lower for models that would fit on a GPU.
+
 
 **3. Run it and chat:**
 
@@ -122,11 +126,13 @@ attune detect --json       # machine-readable JSON (the contract)
 attune bench --quick       # fast memory-bandwidth probe
 attune bench               # full bandwidth + FLOPS report
 attune bench --json        # machine-readable report
+attune bench --model m.gguf --device gpu             # measure the GPU (VRAM bandwidth) for calibration
 attune estimate --model smollm2-135m --quant q4_k_m   # predict before running
 attune tune --model smollm2-135m --objective throughput  # rank configs
 attune tune --model smollm2-135m --save profile.json     # export best profile
+attune tune --model qwen3-8b --device gpu                # GPU / GPU+CPU split configs only
 attune recommend --max-ram 4G --all                    # every model under a 4 GB budget
-attune setup --yes                                      # install the pinned llama.cpp build
+attune setup --yes                                      # install the pinned llama.cpp build (+ Vulkan GPU build when a GPU is found)
 attune serve --profile profile.json                     # serve a profile (file path or saved name)
 attune run qwen3-4b-instruct-2507                       # setup + tune + download + serve + chat
 attune chat --url http://127.0.0.1:8080                 # chat with a running server
@@ -162,6 +168,9 @@ JSON output is the stable contract for scripting; the pretty table is for humans
 |-----------------|--------|------------------------------------|
 | Linux (x86-64)  | ✅ Full | RAPL power readings where permitted |
 | Windows (x86-64)| ✅ Full | RAM speed via CIM, no RAPL          |
+| NVIDIA GPU      | ✅ Vulkan (default), CUDA 12 opt-in | Measured on an RTX 4050 Laptop (Windows); Linux GPU path untested on real hardware |
+| AMD GPU         | Best-effort | Vulkan build; detected by name only, VRAM unknown (no tuning on the GPU yet) |
+| Intel iGPU      | CPU only | Listed by `detect`; not used for inference |
 | macOS / ARM64   | Planned | After MVP                           |
 
 ## Roadmap

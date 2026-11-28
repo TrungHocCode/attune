@@ -14,8 +14,8 @@ crates/
   attune-estimate/  # roofline + calibrate + bottleneck — depends on attune-bench
   attune-tune/      # sweep + score — depends on estimate/bench
   attune-profile/   # schema/validate/migrate — depends on NOTHING (keep it pure)
-  attune-backend/   # Backend trait + llama_subprocess (FFI later)
-  attune-serve/     # launcher/health/proxy
+  attune-backend/   # Backend trait + llama_subprocess, llama.cpp build choice (setup --gpu) and GPU device pick; uses hal + estimate
+  attune-serve/     # launcher/health/proxy, chat client, profiles by name; uses tune for GPU fingerprints
   attune-cli/       # thin CLI, depends on all, no logic here
 catalog/   # publishers allow-list + built-in snapshot of the model catalog
 docs/ profiles/ models/ tests/ benches/

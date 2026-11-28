@@ -1,6 +1,6 @@
 # Friendly attune: install, run, chat (M6 completion)
 
-Status: proposed 2026-11-27. Ships in v0.6.0, which also closes M6. M7 (GPU) is prepared after it.
+Status: implemented in v0.6.0 (#121, #122, #126, #127, #128; M6 closed in #129).
 
 ## Why
 
