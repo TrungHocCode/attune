@@ -100,6 +100,16 @@ impl Profile {
     pub fn to_json_string(&self) -> Result<String, ProfileError> {
         Ok(serde_json::to_string_pretty(self)?)
     }
+
+    /// Placement implied by the load config: `"gpu"` when at least one layer
+    /// is offloaded, otherwise `"cpu"`.
+    pub fn device(&self) -> &str {
+        if self.load_config.n_gpu_layers > 0 {
+            "gpu"
+        } else {
+            "cpu"
+        }
+    }
 }
 
 /// Inference engine identity.
@@ -111,6 +121,14 @@ pub struct Engine {
     /// Engine version/build, or an explicit `unknown` marker when the
     /// estimate-only path did not inspect a binary.
     pub version: String,
+    /// llama.cpp build variant (`cpu`, `vulkan`, `cuda12`). v3; serves the
+    /// profile with the build it was tuned against.
+    #[serde(default = "cpu")]
+    pub variant: String,
+}
+
+fn cpu() -> String {
+    "cpu".to_string()
 }
 
 impl Default for Engine {
@@ -118,6 +136,7 @@ impl Default for Engine {
         Self {
             name: "llama.cpp".to_string(),
             version: "unknown".to_string(),
+            variant: cpu(),
         }
     }
 }
@@ -212,6 +231,11 @@ pub struct LoadConfig {
     pub cache_type_v: String,
     /// NUMA policy (`--numa`).
     pub numa: String,
+    /// GPU model name from detect (v3), e.g.
+    /// `NVIDIA GeForce RTX 4050 Laptop GPU`. The llama.cpp `-dev` id is
+    /// resolved at serve time and is not stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_name: Option<String>,
 }
 
 impl Default for LoadConfig {
@@ -227,6 +251,7 @@ impl Default for LoadConfig {
             cache_type_k: "q8_0".to_string(),
             cache_type_v: "q8_0".to_string(),
             numa: "local".to_string(),
+            gpu_name: None,
         }
     }
 }
@@ -381,6 +406,7 @@ mod tests {
                 cache_type_k: "q8_0".to_string(),
                 cache_type_v: "q8_0".to_string(),
                 numa: "local".to_string(),
+                gpu_name: None,
             },
             compute_config: ComputeConfig {
                 n_threads: 4,
@@ -406,6 +432,9 @@ mod tests {
         let profile = Profile::default();
         assert_eq!(profile.profile_version, PROFILE_VERSION);
         assert_eq!(profile.engine.name, "llama.cpp");
+        assert_eq!(profile.engine.variant, "cpu");
+        assert!(profile.load_config.gpu_name.is_none());
+        assert_eq!(profile.device(), "cpu");
         assert_eq!(profile.load_config.n_ctx, 2_048);
         assert_eq!(profile.load_config.n_batch, 512);
         assert_eq!(profile.load_config.n_ubatch, 128);
@@ -471,6 +500,27 @@ mod tests {
         assert_eq!(draft.model, "models/draft.gguf");
         assert_eq!(draft.draft_k, 4);
         assert!((draft.acceptance_rate - 0.72).abs() < 1e-12);
+    }
+
+    #[test]
+    fn roundtrips_a_v3_gpu_profile() {
+        let mut profile = sample();
+        profile.load_config.n_gpu_layers = 99;
+        profile.load_config.gpu_name = Some("NVIDIA GeForce RTX 4050 Laptop GPU".to_string());
+        profile.engine.variant = "vulkan".to_string();
+        assert_eq!(profile.device(), "gpu");
+
+        let json = profile.to_json_string().expect("serialize gpu profile");
+        assert!(json.contains("\"gpu_name\""));
+        assert!(json.contains("\"variant\": \"vulkan\""));
+        let back = Profile::from_json_str(&json).expect("parse gpu profile");
+        assert_eq!(back.engine, profile.engine);
+        assert_eq!(back.load_config, profile.load_config);
+        assert_eq!(back.device(), "gpu");
+
+        // A CPU profile keeps omitting the optional GPU name.
+        let cpu_json = sample().to_json_string().expect("serialize cpu profile");
+        assert!(!cpu_json.contains("\"gpu_name\""));
     }
 
     #[test]

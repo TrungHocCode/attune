@@ -62,6 +62,7 @@ pub fn from_best(
         engine: attune_profile::Engine {
             name: "llama.cpp".to_string(),
             version: inputs.engine_version.to_string(),
+            variant: "cpu".to_string(),
         },
         model: attune_profile::ModelConfig {
             path: inputs.model_path.to_string(),
@@ -80,6 +81,8 @@ pub fn from_best(
             cache_type_k: config.cache_type_k.clone(),
             cache_type_v: config.cache_type_v.clone(),
             numa: config.numa.clone(),
+            // GPU placement is wired in slice 4B.
+            gpu_name: None,
         },
         compute_config: attune_profile::ComputeConfig {
             n_threads: config.n_threads,
@@ -118,13 +121,35 @@ pub fn hardware_fingerprint(
     simd: &str,
     total_ram_bytes: u64,
 ) -> String {
-    format!(
+    hardware_fingerprint_with_gpu(brand, physical_cores, simd, total_ram_bytes, None)
+}
+
+/// Like [`hardware_fingerprint`], but records the GPU for GPU profiles.
+///
+/// Appends `|<name>|<vram GiB rounded>` when `gpu` is `Some`, e.g.
+/// `AMD Ryzen 9 7950X|16|AVX2|33500000000|NVIDIA GeForce RTX 4050 Laptop GPU|6`.
+/// CPU profiles pass `None` and keep the four-part fingerprint byte-for-byte.
+pub fn hardware_fingerprint_with_gpu(
+    brand: &str,
+    physical_cores: u32,
+    simd: &str,
+    total_ram_bytes: u64,
+    gpu: Option<(&str, u64)>,
+) -> String {
+    let base = format!(
         "{}|{}|{}|{}",
         brand.trim(),
         physical_cores,
         simd.trim(),
         total_ram_bytes
-    )
+    );
+    match gpu {
+        Some((name, vram_bytes)) => {
+            let vram_gib = (vram_bytes as f64 / (1024.0 * 1024.0 * 1024.0)).round() as u64;
+            format!("{base}|{}|{vram_gib}", name.trim())
+        }
+        None => base,
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +228,38 @@ mod tests {
         );
         assert_eq!(first, second);
         assert_eq!(first, "AMD Ryzen 9 7950X|16|AVX2, AVX-512F|33500000000");
+    }
+
+    #[test]
+    fn cpu_fingerprint_is_unchanged_by_the_gpu_entry_point() {
+        assert_eq!(
+            hardware_fingerprint_with_gpu(
+                " AMD Ryzen 9 7950X ",
+                16,
+                " AVX2 ",
+                33_500_000_000,
+                None
+            ),
+            "AMD Ryzen 9 7950X|16|AVX2|33500000000"
+        );
+        assert_eq!(
+            hardware_fingerprint("AMD Ryzen 9 7950X", 16, "AVX2", 33_500_000_000),
+            hardware_fingerprint_with_gpu("AMD Ryzen 9 7950X", 16, "AVX2", 33_500_000_000, None)
+        );
+    }
+
+    #[test]
+    fn gpu_fingerprint_appends_the_name_and_rounded_vram() {
+        assert_eq!(
+            hardware_fingerprint_with_gpu(
+                "AMD Ryzen 9 7950X",
+                16,
+                "AVX2",
+                33_500_000_000,
+                Some((" NVIDIA GeForce RTX 4050 Laptop GPU ", 6_442_450_944)),
+            ),
+            "AMD Ryzen 9 7950X|16|AVX2|33500000000|NVIDIA GeForce RTX 4050 Laptop GPU|6"
+        );
     }
 
     #[test]
