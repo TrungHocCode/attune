@@ -163,6 +163,7 @@ name = "attune-serve"
 version = "0.7.0"
 dependencies = [
  "attune-backend",
+ "attune-estimate",
  "attune-fetch",
  "attune-hal",
  "attune-profile",

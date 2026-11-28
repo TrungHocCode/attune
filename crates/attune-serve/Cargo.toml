@@ -13,6 +13,9 @@ attune-backend = { path = "../attune-backend" }
 attune-fetch = { path = "../attune-fetch" }
 attune-profile = { path = "../attune-profile" }
 attune-hal = { path = "../attune-hal" }
+# Justification (AGENTS §3.4): a profile's model.source owner is checked against
+# the catalog's TRUSTED_PUBLISHERS before serve downloads anything.
+attune-estimate = { path = "../attune-estimate" }
 # Justification (AGENTS §3.4): the GPU fingerprint check must match the exporter
 # byte-for-byte (`hardware_fingerprint_with_gpu`), so a GPU profile tuned on
 # this machine does not warn at serve time. attune-estimate/attune-bench are

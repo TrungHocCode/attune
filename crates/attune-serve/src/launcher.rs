@@ -6,17 +6,19 @@
 //! `--force` skips validation). Everything process-level lives in
 //! [`attune_backend`].
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use attune_backend::{
     ensure_model, list_devices, pick_device as pick_gpu_device, resolve_llama_server, Backend,
     LlamaServerBackend, Paths, ServerGuard, ENV_LLAMA_SERVER,
 };
+use attune_estimate::model::registry::TRUSTED_PUBLISHERS;
 use attune_hal::{GpuDevice, HardwareInfo};
-use attune_profile::{validate, Profile, WarningKind};
+use attune_profile::{validate, ModelSource, Profile, WarningKind};
 use serde::Serialize;
 
+use crate::server::is_loopback_host;
 use crate::ServeError;
 
 /// Where `attune serve` should run a profile.
@@ -179,31 +181,64 @@ fn needs_home(path: &str) -> bool {
 /// Point `profile.model.path` at a real file: expand a `~/.attune/` path
 /// against `home` and, when the file is missing and the profile has a
 /// `source`, download it under `consent`.
+///
+/// A profile's `model.path` is only ever read. Downloads always go to
+/// `<home>/models/<repo>/<file>` from the pinned source, so a profile cannot
+/// make `serve` write outside the attune home.
 pub fn resolve_model_file(
     profile: &mut Profile,
-    home: &std::path::Path,
+    home: &Path,
     consent: DownloadConsent,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<(), ServeError> {
-    let path = attune_profile::expand_home(&profile.model.path, home);
+    let path = expand_model_path(&profile.model.path, home)?;
     match profile.model.source.clone() {
         Some(source) => {
-            let present = std::fs::metadata(&path).is_ok_and(|m| m.len() == source.size);
+            validate_model_source(&source)?;
+            if std::fs::metadata(&path).is_ok_and(|m| m.len() == source.size) {
+                // A local file the profile points at is read in place and is
+                // never replaced by a download.
+                profile.model.path = path.display().to_string();
+                return Ok(());
+            }
+
+            let download_home = if home.as_os_str().is_empty() {
+                attune_fetch::home_dir()?
+            } else {
+                home.to_path_buf()
+            };
+            let dest = download_destination(&source, &download_home)?;
+            if std::fs::metadata(&dest).is_ok_and(|m| m.len() == source.size) {
+                profile.model.path = dest.display().to_string();
+                return Ok(());
+            }
+
             let size_gb = source.size as f64 / 1e9;
-            if !present && matches!(consent, DownloadConsent::No) {
+            let url = source.url();
+            let what = format!(
+                "{} ({size_gb:.1} GB) from {url} to {}",
+                source.file,
+                dest.display()
+            );
+            if matches!(consent, DownloadConsent::No) {
                 return Err(ServeError::InvalidConfig(format!(
-                    "model file `{}` is missing; pass --yes to download {size_gb:.1} GB from {}",
+                    "model file `{}` is missing or has the wrong size; pass --yes to download \
+                     {size_gb:.1} GB from {url} to {}",
                     path.display(),
-                    source.repo
+                    dest.display()
                 )));
             }
-            let what = format!("{} ({size_gb:.1} GB) from {}", source.file, source.repo);
             let mut confirm = |size: u64| match consent {
-                DownloadConsent::Yes => true,
+                // `--yes` still shows exactly what will be fetched and where.
+                DownloadConsent::Yes => {
+                    eprintln!("Download {what}?");
+                    true
+                }
                 DownloadConsent::No => false,
                 DownloadConsent::Ask(ask) => ask(size, &what),
             };
-            ensure_model(&path, &source, &mut confirm, progress)?;
+            ensure_model(&dest, &source, &mut confirm, progress)?;
+            profile.model.path = dest.display().to_string();
         }
         None if !path.exists() => {
             return Err(ServeError::InvalidConfig(format!(
@@ -211,10 +246,131 @@ pub fn resolve_model_file(
                 path.display()
             )));
         }
-        None => {}
+        None => {
+            profile.model.path = path.display().to_string();
+        }
     }
-    profile.model.path = path.display().to_string();
     Ok(())
+}
+
+/// Expand `model.path`, rejecting parent/absolute components inside the
+/// portable `~/.attune/` form. Absolute local paths are read-only inputs and
+/// are kept as-is.
+fn expand_model_path(path: &str, home: &Path) -> Result<PathBuf, ServeError> {
+    if let Some(rest) = path.strip_prefix(attune_profile::HOME_PREFIX) {
+        let unsafe_component = Path::new(rest).components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        });
+        if unsafe_component {
+            return Err(ServeError::InvalidConfig(format!(
+                "model.path `{path}` must stay under `~/.attune/` (no `..` or absolute components)"
+            )));
+        }
+    }
+    Ok(attune_profile::expand_home(path, home))
+}
+
+/// Validate the pinned source: exactly `owner/name`, a safe file name and a
+/// publisher on the catalog's trusted list.
+fn validate_model_source(source: &ModelSource) -> Result<(), ServeError> {
+    let (owner, name) = source.repo.split_once('/').ok_or_else(|| {
+        ServeError::InvalidConfig(format!(
+            "model source repo `{}` is invalid: expected exactly `owner/name`",
+            source.repo
+        ))
+    })?;
+    if name.contains('/') || !safe_component(owner) || !safe_component(name) {
+        return Err(ServeError::InvalidConfig(format!(
+            "model source repo `{}` is invalid: expected exactly `owner/name`",
+            source.repo
+        )));
+    }
+    if !safe_file_name(&source.file) {
+        return Err(ServeError::InvalidConfig(format!(
+            "model source file `{}` is invalid: expected a single safe file name",
+            source.file
+        )));
+    }
+    if !TRUSTED_PUBLISHERS.contains(&owner) {
+        return Err(ServeError::InvalidConfig(format!(
+            "model source repo `{}` comes from untrusted publisher `{owner}`; refusing to download",
+            source.repo
+        )));
+    }
+    Ok(())
+}
+
+fn safe_component(part: &str) -> bool {
+    !part.is_empty()
+        && part != "."
+        && part != ".."
+        && !part.starts_with('.')
+        && !part.contains('/')
+        && !part.contains('\\')
+        && !part.contains(':')
+        && !part.contains('\0')
+}
+
+fn safe_file_name(name: &str) -> bool {
+    safe_component(name)
+}
+
+/// The only writable destination: `<home>/models/<repo>/<file>`.
+fn download_destination(source: &ModelSource, home: &Path) -> Result<PathBuf, ServeError> {
+    validate_model_source(source)?;
+    let models = home.join("models");
+    let dest = attune_profile::expand_home(&source.home_path(), home);
+    let models_canon = canonical_with_missing_tail(&models)?;
+    let dest_canon = canonical_with_missing_tail(&dest)?;
+    if !dest_canon.starts_with(&models_canon) {
+        return Err(ServeError::InvalidConfig(format!(
+            "refusing to download to `{}`: it is outside `{}`",
+            dest.display(),
+            models.display()
+        )));
+    }
+    Ok(dest)
+}
+
+/// Canonicalize the existing prefix of `path` and append the missing tail, so
+/// the containment check also catches a symlinked parent.
+fn canonical_with_missing_tail(path: &Path) -> Result<PathBuf, ServeError> {
+    let mut current = path.to_path_buf();
+    let mut tail = Vec::new();
+    loop {
+        match std::fs::canonicalize(&current) {
+            Ok(mut base) => {
+                for part in tail.iter().rev() {
+                    base.push(part);
+                }
+                return Ok(base);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(name) = current.file_name().map(std::ffi::OsString::from) else {
+                    return Err(ServeError::InvalidConfig(format!(
+                        "cannot resolve `{}`: {error}",
+                        path.display()
+                    )));
+                };
+                tail.push(name);
+                if !current.pop() {
+                    return Err(ServeError::InvalidConfig(format!(
+                        "cannot resolve `{}`: {error}",
+                        path.display()
+                    )));
+                }
+            }
+            Err(error) => {
+                return Err(ServeError::InvalidConfig(format!(
+                    "cannot resolve `{}`: {error}",
+                    path.display()
+                )))
+            }
+        }
+    }
 }
 
 /// A launched server plus the metadata the CLI needs to print.
@@ -441,6 +597,7 @@ pub fn launch(options: &ServeOptions) -> Result<Serving, ServeError> {
             "--host must not be empty".to_string(),
         ));
     }
+    check_upstream_host(host)?;
     if options.port == 0 {
         return Err(ServeError::InvalidConfig(
             "--port must be between 1 and 65535".to_string(),
@@ -677,6 +834,18 @@ fn no_gpu_device_error(binary: &std::path::Path) -> ServeError {
     ))
 }
 
+/// llama-server has no authentication, so its bind address must stay local.
+/// Remote clients belong behind the proxy's `--listen` + `--api-key`.
+fn check_upstream_host(host: &str) -> Result<(), ServeError> {
+    if is_loopback_host(host) {
+        return Ok(());
+    }
+    Err(ServeError::InvalidConfig(format!(
+        "--host {host} is not a loopback address: llama-server has no authentication; remote \
+         clients must use --listen with --api-key"
+    )))
+}
+
 /// The `/health` URL for a bind address.
 fn health_url_for(host: &str, port: u16) -> String {
     format!("http://{host}:{port}/health")
@@ -804,7 +973,7 @@ mod tests {
         let mut profile = Profile::default();
         profile.model.path = path.to_string();
         profile.model.source = size.map(|size| attune_profile::ModelSource {
-            repo: "org/repo-GGUF".to_string(),
+            repo: "Qwen/repo-GGUF".to_string(),
             file: "m.gguf".to_string(),
             revision: "rev".to_string(),
             sha256: "a".repeat(64),
@@ -863,6 +1032,108 @@ mod tests {
         std::fs::write(&file, b"x").expect("write");
         assert!(!needs_home(&file.display().to_string()));
         assert!(needs_home("~/.attune/models/a/b.gguf"));
+    }
+
+    #[test]
+    fn upstream_host_must_be_loopback() {
+        for host in ["127.0.0.1", "localhost", "::1", "[::1]"] {
+            assert!(check_upstream_host(host).is_ok(), "{host}");
+        }
+        for host in ["0.0.0.0", "192.168.1.5", "::", "example.com"] {
+            let error = check_upstream_host(host).expect_err("must refuse");
+            assert!(error.to_string().contains("--listen"), "{error}");
+            assert!(error.to_string().contains("--api-key"), "{error}");
+        }
+    }
+
+    #[test]
+    fn home_relative_model_path_rejects_parent_components() {
+        let home = temp_home("parent");
+        let mut profile = download_profile("~/.attune/models/../../secret.gguf", None);
+        let err = resolve_model_file(&mut profile, &home, DownloadConsent::No, &mut |_, _| {})
+            .expect_err("parent traversal must be rejected");
+        assert!(err.to_string().contains("no `..`"), "{err}");
+    }
+
+    #[test]
+    fn source_rejects_an_untrusted_publisher() {
+        let home = temp_home("untrusted");
+        let mut profile = download_profile("~/.attune/models/evilcorp/repo/m.gguf", Some(5));
+        profile.model.source.as_mut().expect("source").repo = "evilcorp/repo".to_string();
+        let err = resolve_model_file(&mut profile, &home, DownloadConsent::No, &mut |_, _| {})
+            .expect_err("untrusted owner must be refused");
+        assert!(err.to_string().contains("evilcorp"), "{err}");
+        assert!(err.to_string().contains("untrusted publisher"), "{err}");
+    }
+
+    #[test]
+    fn source_rejects_traversal_repo_and_file() {
+        let home = temp_home("source-paths");
+        for (repo, file, needle) in [
+            ("../../evil", "m.gguf", "expected exactly"),
+            ("Qwen/repo/extra", "m.gguf", "expected exactly"),
+            ("Qwen/repo", "../../evil.gguf", "single safe file name"),
+            ("Qwen/repo", ".hidden.gguf", "single safe file name"),
+        ] {
+            let mut profile = download_profile("~/.attune/models/Qwen/repo/m.gguf", Some(5));
+            let source = profile.model.source.as_mut().expect("source");
+            source.repo = repo.to_string();
+            source.file = file.to_string();
+            let err = resolve_model_file(&mut profile, &home, DownloadConsent::No, &mut |_, _| {})
+                .expect_err("unsafe source must be refused");
+            assert!(err.to_string().contains(needle), "{repo}/{file}: {err}");
+        }
+    }
+
+    #[test]
+    fn download_destination_always_uses_home_models() {
+        let home = temp_home("dest");
+        let source = download_profile("nowhere", Some(5))
+            .model
+            .source
+            .expect("source");
+        let dest = download_destination(&source, &home).expect("dest");
+        assert_eq!(dest, home.join("models/Qwen/repo-GGUF/m.gguf"));
+    }
+
+    #[test]
+    fn existing_absolute_model_is_read_without_a_download() {
+        let home = temp_home("read-local");
+        let file = home.join("local.gguf");
+        std::fs::write(&file, b"12345").expect("write");
+        let mut profile = download_profile(&file.display().to_string(), Some(5));
+        resolve_model_file(
+            &mut profile,
+            &home,
+            DownloadConsent::Ask(|_, _| -> bool {
+                panic!("an existing local file must not trigger a download")
+            }),
+            &mut |_, _| {},
+        )
+        .expect("local file");
+        assert_eq!(PathBuf::from(&profile.model.path), file);
+    }
+
+    #[test]
+    fn a_wrong_size_absolute_model_is_never_overwritten() {
+        let home = temp_home("wrong-size");
+        let file = home.join("local.gguf");
+        std::fs::write(&file, b"x").expect("write");
+        let mut profile = download_profile(&file.display().to_string(), Some(2_500_000_000));
+        let err = resolve_model_file(&mut profile, &home, DownloadConsent::No, &mut |_, _| {})
+            .expect_err("must require consent for the home copy");
+        let text = err.to_string();
+        assert!(text.contains("pass --yes to download 2.5 GB"), "{text}");
+        assert!(
+            text.contains(
+                &home
+                    .join("models/Qwen/repo-GGUF/m.gguf")
+                    .display()
+                    .to_string()
+            ),
+            "{text}"
+        );
+        assert_eq!(std::fs::read(&file).expect("read"), b"x");
     }
 
     // ---- device / build resolution ----------------------------------------
