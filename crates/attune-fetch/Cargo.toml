@@ -13,7 +13,7 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # SHA-256 of downloaded files (models, llama.cpp archives) is the integrity check.
 sha2 = "0.11"
 # Already used by attune-hal; free disk space before a multi-GB download.
-sysinfo = "0.36"
+sysinfo = "0.40"
 # Unpack the pinned llama.cpp release: Windows ships .zip, Linux .tar.gz.
 # deflate pulls flate2's pure-Rust zlib-rs backend (no C toolchain needed).
 zip = { version = "9", default-features = false, features = ["deflate"] }
