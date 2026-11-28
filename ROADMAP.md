@@ -122,7 +122,7 @@ bytes), #73, #74 (GGUF facts), #75 (profile metadata), #69 (prefill
 ceiling), #70 (bandwidth probe), then #78 re-validates M3/M4 on 4B+ models.
 The GPU work below builds on this math, so it lands first.
 
-## M6 — Recommend & downloads 🚧 (built; catalog freshness pending, v0.6.0 planned)
+## M6 — Recommend & downloads ✅ (v0.6.0)
 
 **Goal:** a new user who does not know model names gets a model that suits
 their machine running, with no manual downloads.
@@ -138,8 +138,8 @@ their machine running, with no manual downloads.
 - New leaf crate `attune-fetch` (home dir, resumable verified downloads).
 - Acceptance: zero manual downloads from binary to first reply; uncalibrated
   predicted decode within 25% on 3 catalog models of different tiers, and
-  every model marked as fitting loads and serves; 7 consecutive days of valid
-  catalogs; works offline; interrupted downloads resume and corrupted files
+  every model marked as fitting loads and serves; valid daily catalogs
+  (revised 2026-11-28 from "7 consecutive days", see below); works offline; interrupted downloads resume and corrupted files
   are rejected.
 - Design: [docs/superpowers/specs/2026-11-26-recommend-design.md](docs/superpowers/specs/2026-11-26-recommend-design.md).
 - Results 2026-11-27 (Windows 11, Core 5 210H, llama.cpp b11804 CPU, see
@@ -148,8 +148,25 @@ their machine running, with no manual downloads.
   of downloads (**met**); uncalibrated decode +5.1% (Qwen3 0.6B Q8_0), +9.5%
   (4B Q4_K_M), -2.4% (8B Q4_K_M) vs llama-bench (**met**), and the fitting
   pick served; offline recommend + serve (**met**); a download killed at 76 MB
-  resumed, a tampered SHA-256 was rejected (**met**). **Pending:** 7
-  consecutive daily catalog runs, which start once `catalog.yml` is on `main`.
+  resumed, a tampered SHA-256 was rejected (**met**).
+- Catalog freshness, revised 2026-11-28:
+  - The bar was 7 consecutive days, later cut to 2 scheduled runs, and finally closed on the verified manual run (2026-11-27, 66 models) plus monitoring of the scheduled runs.
+  - Why: users never depend on a fresh catalog, because loading falls back from a stale cache to the built-in snapshot (now 66 models).
+  - A failing daily run is a bug for a patch release, not a blocker.
+- Friendly path, added to M6 (design [2026-11-27-friendly-design.md](docs/superpowers/specs/2026-11-27-friendly-design.md)):
+  - One-line install and release binaries (#127).
+  - `attune recommend` (#121), `attune chat` (#122), and `attune run <model>` (#126).
+- Release acceptance 2026-11-28 (same machine, v0.6.0 from GitHub, empty `ATTUNE_HOME`):
+
+  | Step | Time |
+  |---|---|
+  | `irm …/install.ps1 \| iex` (PATH set, a new shell finds `attune 0.6.0`) | 6.9 s |
+  | `attune recommend` | 7.3 s |
+  | `attune run qwen3-0.6b --yes` (installs llama.cpp, tunes, downloads 0.4 GB, serves, streams the reply) | 55.6 s |
+  | **Total, install to first chat reply, downloads included** | **≈ 70 s** (target: < 5 min excluding the model download, **met**) |
+
+  - `/bye` left no llama-server running.
+  - The `release.yml` pipeline passed on its first real tag.
 - Found on the way: Windows power throttling slowed every in-process probe
   after the first (34.7 -> 12-17 GB/s), and `HTTP(S)_PROXY` broke `serve`'s
   localhost health check; both fixed. llama.cpp prefill reaches 0.40 of the

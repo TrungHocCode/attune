@@ -1,9 +1,8 @@
 # attune — Tune LLM inference to your hardware
 
 > [!NOTE]
-> Beta (v0.5.x, MVP; M6 recommend & downloads on `main`). `detect`, `bench`,
-> `estimate`, `tune` and `serve` work on CPU (Linux/Windows x86-64). GPU
-> support is planned. Not production-ready yet.
+> Beta (v0.6.x). One-line install, `recommend`, `run` and `chat` work on CPU
+> (Linux/Windows x86-64). GPU support (M7) is in progress. Not production-ready yet.
 
 [![CI](https://github.com/TrungHocCode/attune/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TrungHocCode/attune/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -152,7 +151,7 @@ JSON output is the stable contract for scripting; the pretty table is for humans
 
 ## Roadmap
 
-M1 `detect` ✅ · M2 `bench` ✅ · M3 `estimate` ✅ · M4 `tune` ✅ · M5 `serve` ✅ (MVP) · M6 recommend & downloads (next) · M7 GPU (proposed)
+M1 `detect` ✅ · M2 `bench` ✅ · M3 `estimate` ✅ · M4 `tune` ✅ · M5 `serve` ✅ (MVP) · M6 recommend & downloads ✅ · M7 GPU (in progress)
 
 Details, acceptance criteria, and status live in [ROADMAP.md](ROADMAP.md).
 GitHub issues and milestones are the source of truth for what lands next.

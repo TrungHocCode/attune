@@ -49,10 +49,10 @@ cargo audit   # when Cargo.lock changes; CI runs it on every PR
 
 ## 4. Phase Discipline (do NOT jump ahead)
 
-Current phase: **PHASE 6 — RECOMMEND & DOWNLOADS (M6)**.
-- M1 (detect), M2 (bench), M3 (estimate), M4 (tune), M5 (serve) are done and tagged v0.1.0–v0.5.0. M4's target was revised in #103 (no regression vs defaults + calibrated prediction within 15%).
-- M6 design approved 2026-11-26: `docs/superpowers/specs/2026-11-26-recommend-design.md` (`tune` without `--model` recommends, daily catalog, `attune setup`, profile `source` + download on `serve`, new `attune-fetch` crate). Plan slices just before starting.
-- M7 GPU (`docs/gpu-plan.md`) comes after M6; do not start it yet.
+Current phase: **PHASE 7 — GPU (M7)**.
+- M1 (detect), M2 (bench), M3 (estimate), M4 (tune), M5 (serve), M6 (recommend & downloads, plus `run`/`chat`/one-line install) are done and tagged v0.1.0–v0.6.0. M4's target was revised in #103 (no regression vs defaults + calibrated prediction within 15%).
+- M6 designs: `docs/superpowers/specs/2026-11-26-recommend-design.md` and `docs/superpowers/specs/2026-11-27-friendly-design.md`.
+- M7 GPU: proposal in `docs/gpu-plan.md`. Write and get approval for the M7 design spec before any code.
 - Each task must meet its Acceptance column in plan §8 before marking done.
 
 **Phase-close checklist (mandatory when a milestone finishes):**
