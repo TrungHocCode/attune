@@ -4,7 +4,7 @@ use attune_bench::e2e::E2eResult;
 use attune_estimate::{
     default_compute_buffer_bytes, kv_elem_bytes, kv_filled_tokens, max_gpu_layers,
     predict_decode_tps_from_bytes, predict_split_decode_tps, weight_bytes_for, BenchCalibration,
-    CalibrationReport, HwInputs, Quant, RamFit, SplitInputs,
+    CalibrationReport, HwInputs, Quant, RamFit, SplitInputs, GPU_RESIDENT_WEIGHT_FRACTION,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::str::FromStr;
@@ -372,8 +372,11 @@ pub fn select_configs(
 
 /// Split the full-window footprint into the part that stays in system RAM.
 ///
-/// A CPU config keeps everything; a GPU config only keeps the layers it did not
-/// offload, so RAM fit must count `weights × (1 - f)` and `kv × (1 - f)`.
+/// A CPU config keeps everything; a GPU config keeps the host-resident weight
+/// share (the token-embedding table plus the layers it did not offload, see
+/// [`GPU_RESIDENT_WEIGHT_FRACTION`]) and the un-offloaded KV cache. This
+/// mirrors [`attune_estimate::host_resident_bytes`] so RAM fit and the reported
+/// RAM agree with `recommend`.
 fn cpu_resident_bytes(model: &TuneModel, config: &TuneConfig, kv_bytes: f64) -> (f64, f64) {
     let weight_bytes = model.weight_bytes_for(config.quant);
     if config.n_gpu_layers == 0 {
@@ -383,7 +386,10 @@ fn cpu_resident_bytes(model: &TuneModel, config: &TuneConfig, kv_bytes: f64) -> 
         return (weight_bytes, kv_bytes);
     };
     let frac = f64::from(config.n_gpu_layers.min(n_layers)) / f64::from(n_layers);
-    (weight_bytes * (1.0 - frac), kv_bytes * (1.0 - frac))
+    (
+        weight_bytes * (1.0 - GPU_RESIDENT_WEIGHT_FRACTION * frac),
+        kv_bytes * (1.0 - frac),
+    )
 }
 
 /// Drop configs that cannot run, then enforce the candidate cap.
@@ -1397,7 +1403,7 @@ mod tests {
         assert!(err.to_string().contains("VRAM unknown"), "{err}");
 
         let huge = TuneModel {
-            weight_bytes: Some(200_000_000_000),
+            weight_bytes: Some(400_000_000_000),
             ..model
         };
         let err = select_configs(Device::Gpu, grid, &huge, Some(&gpu), 8)
@@ -1450,7 +1456,9 @@ mod tests {
             n_gpu_layers: 18,
             ..cpu.clone()
         };
-        // Full footprint is ~5.6 GB; half offloaded is ~2.8 GB.
+        // Full footprint is ~5.6 GB; 18/36 offloaded leaves ~3.0 GB in RAM
+        // (the host-resident embedding share plus the un-offloaded layers
+        // and KV).
         let (kept, pruned) = prune(&[cpu, gpu.clone()], &model, 3.5e9, 512, 128, 8, 64);
         assert_eq!(kept, vec![gpu]);
         assert_eq!(pruned.len(), 1);
