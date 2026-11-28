@@ -204,9 +204,13 @@ pub enum Command {
         #[arg(long, value_name = "PATH_OR_NAME")]
         profile: String,
         /// Path to the llama.cpp `llama-server` binary (default:
-        /// $ATTUNE_LLAMA_SERVER, then a PATH search for `llama-server`)
+        /// $ATTUNE_LLAMA_SERVER, then the profile's installed build)
         #[arg(long, value_name = "PATH")]
         llama_server: Option<PathBuf>,
+        /// Where to run the profile: auto (the profile's own device), cpu or
+        /// gpu. `cpu` runs a GPU-tuned profile with no offloaded layers.
+        #[arg(long, value_enum, default_value_t = tune::TuneDevice::Auto)]
+        device: tune::TuneDevice,
         /// Interface llama-server (the upstream) binds to
         #[arg(long, value_name = "HOST", default_value = "127.0.0.1")]
         host: String,
@@ -449,6 +453,7 @@ pub fn dispatch(command: Command) -> Result<()> {
         Command::Serve {
             profile,
             llama_server,
+            device,
             host,
             port,
             listen,
@@ -461,6 +466,7 @@ pub fn dispatch(command: Command) -> Result<()> {
         } => serve::run(
             &profile,
             llama_server.as_deref(),
+            device.into(),
             &host,
             port,
             &listen,

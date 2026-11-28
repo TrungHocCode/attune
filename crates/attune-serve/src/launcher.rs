@@ -10,13 +10,131 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use attune_backend::{
-    ensure_model, resolve_llama_server, Backend, LlamaServerBackend, Paths, ServerGuard,
+    ensure_model, list_devices, pick_device as pick_gpu_device, resolve_llama_server, Backend,
+    LlamaServerBackend, Paths, ServerGuard, ENV_LLAMA_SERVER,
 };
-use attune_hal::HardwareInfo;
+use attune_hal::{GpuDevice, HardwareInfo};
 use attune_profile::{validate, Profile, WarningKind};
 use serde::Serialize;
 
 use crate::ServeError;
+
+/// Where `attune serve` should run a profile.
+///
+/// A CLI-side mirror of the values accepted by `--device`; a plain enum keeps
+/// clap out of this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServeDevice {
+    /// Use the device the profile was tuned for.
+    #[default]
+    Auto,
+    /// Force CPU execution (a GPU profile gets `n_gpu_layers = 0`).
+    Cpu,
+    /// Force GPU execution (a CPU-tuned profile is refused).
+    Gpu,
+}
+
+/// The build/device decision for one launch, before any I/O.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServePlan {
+    /// `true` when llama.cpp runs device layers and needs a `-dev` id.
+    pub gpu: bool,
+    /// llama.cpp build variant: `cpu`, `vulkan` or `cuda12`.
+    pub variant: String,
+    /// Emit the "running a GPU-tuned profile on the CPU" note.
+    pub cpu_override: bool,
+}
+
+/// The note printed when `--device cpu` forces a GPU-tuned profile onto the CPU.
+pub const CPU_OVERRIDE_NOTE: &str =
+    "running a GPU-tuned profile on the CPU; `attune tune --device cpu --save` gives a CPU-tuned one";
+
+/// Error text when a GPU profile has no GPU llama.cpp build to run on.
+pub const NO_GPU_BUILD: &str = "this profile runs on the GPU but no GPU llama.cpp build is \
+     installed. Fix: `attune setup --gpu auto`, or serve on the CPU with `--device cpu`";
+
+/// Error text when `--device gpu` is asked of a CPU-tuned profile.
+pub const CPU_PROFILE_ON_GPU: &str = "this profile was tuned for the CPU; retune with \
+     `attune tune --model <...> --device gpu --save <...>` or `attune run <model> --device gpu`";
+
+impl ServeDevice {
+    /// The device this flag asks for, given the profile's own placement.
+    fn resolves_to_gpu(self, profile_device: &str) -> bool {
+        match self {
+            ServeDevice::Auto => profile_device == "gpu",
+            ServeDevice::Cpu => false,
+            ServeDevice::Gpu => true,
+        }
+    }
+}
+
+/// Pure: decide which build/device a launch uses.
+///
+/// `profile_device` is [`Profile::device`] (`"gpu"` or `"cpu"`),
+/// `profile_variant` is `engine.variant`, and `installed` lists the GPU build
+/// variants present in the attune home dir (or just the chosen variant when the
+/// user passed an explicit binary). Returns the exact user-facing error text on
+/// a refusal so the caller can wrap it in [`ServeError::InvalidConfig`].
+pub fn plan_serve(
+    profile_device: &str,
+    profile_variant: &str,
+    requested: ServeDevice,
+    installed: &[String],
+) -> Result<ServePlan, String> {
+    let profile_is_gpu = profile_device == "gpu";
+    if !profile_is_gpu && requested.resolves_to_gpu(profile_device) {
+        return Err(CPU_PROFILE_ON_GPU.to_string());
+    }
+    if profile_is_gpu && requested == ServeDevice::Cpu {
+        return Ok(ServePlan {
+            gpu: false,
+            variant: "cpu".to_string(),
+            cpu_override: true,
+        });
+    }
+    if !profile_is_gpu {
+        return Ok(ServePlan {
+            gpu: false,
+            variant: "cpu".to_string(),
+            cpu_override: false,
+        });
+    }
+    let variant =
+        choose_gpu_variant(profile_variant, installed).ok_or_else(|| NO_GPU_BUILD.to_string())?;
+    Ok(ServePlan {
+        gpu: true,
+        variant,
+        cpu_override: false,
+    })
+}
+
+/// Prefer the profile's own build, then the other GPU build.
+fn choose_gpu_variant(profile_variant: &str, installed: &[String]) -> Option<String> {
+    let has = |variant: &str| installed.iter().any(|entry| entry == variant);
+    if has(profile_variant) {
+        return Some(profile_variant.to_string());
+    }
+    let fallbacks: &[&str] = match profile_variant {
+        "cuda12" => &["vulkan"],
+        "vulkan" => &["cuda12"],
+        _ => &["vulkan", "cuda12"],
+    };
+    fallbacks
+        .iter()
+        .find(|variant| has(variant))
+        .map(|variant| (*variant).to_string())
+}
+
+/// The build label reported for an explicit GPU binary, whose real variant we
+/// cannot introspect. A GPU profile records `vulkan` or `cuda12`; anything else
+/// is reported as `vulkan`.
+fn gpu_build_label(profile_variant: &str) -> &str {
+    if profile_variant == "cuda12" {
+        "cuda12"
+    } else {
+        "vulkan"
+    }
+}
 
 /// Parameters for one `attune serve` launch.
 #[derive(Debug, Clone)]
@@ -24,8 +142,10 @@ pub struct ServeOptions {
     /// Path to the profile JSON file.
     pub profile: PathBuf,
     /// Explicit `llama-server` path (`--llama-server`); `None` falls back to
-    /// `ATTUNE_LLAMA_SERVER` and then `PATH`.
+    /// `ATTUNE_LLAMA_SERVER` and then the profile's build (CPU: `PATH`).
     pub llama_server: Option<PathBuf>,
+    /// Where to run the profile (`--device`).
+    pub device: ServeDevice,
     /// Interface to bind the upstream server to.
     pub host: String,
     /// Upstream port.
@@ -114,6 +234,14 @@ pub struct Serving {
     pub health_elapsed: Duration,
     /// Validation and argv warnings to surface to the user.
     pub warnings: Vec<String>,
+    /// `cpu` or `gpu`, matching the device that actually ran.
+    pub device: String,
+    /// llama.cpp build variant that ran (`cpu`, `vulkan`, `cuda12`).
+    pub build: String,
+    /// llama.cpp device id passed to `-dev` (`Vulkan1`, `CUDA0`), when GPU.
+    pub device_id: Option<String>,
+    /// Human-readable GPU name from `--list-devices`, when GPU.
+    pub device_name: Option<String>,
 }
 
 /// One-line JSON ready message (`serve --json`).
@@ -133,6 +261,16 @@ pub struct ReadyReport {
     pub n_ctx: u32,
     /// Non-fatal warnings emitted during preparation.
     pub warnings: Vec<String>,
+    /// `cpu` or `gpu`.
+    pub device: String,
+    /// llama.cpp build variant that ran (`cpu`, `vulkan`, `cuda12`).
+    pub build: String,
+    /// llama.cpp device id passed to `-dev`, when running on the GPU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_device: Option<String>,
+    /// Human-readable GPU name, when running on the GPU.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_name: Option<String>,
 }
 
 impl Serving {
@@ -146,7 +284,28 @@ impl Serving {
             model: self.profile.model.path.clone(),
             n_ctx: self.profile.load_config.n_ctx,
             warnings: self.warnings.clone(),
+            device: self.device.clone(),
+            build: self.build.clone(),
+            gpu_device: self.device_id.clone(),
+            gpu_name: self.device_name.clone(),
         }
+    }
+
+    /// `CPU` or `GPU (<build>, <id> <name>)` for the human ready line.
+    pub fn device_label(&self) -> String {
+        if self.device != "gpu" {
+            return "CPU".to_string();
+        }
+        let mut detail = format!(
+            "{}, {}",
+            self.build,
+            self.device_id.as_deref().unwrap_or("?")
+        );
+        if let Some(name) = self.device_name.as_deref() {
+            detail.push(' ');
+            detail.push_str(name);
+        }
+        format!("GPU ({detail})")
     }
 }
 
@@ -206,27 +365,69 @@ pub fn prepare_profile(
     prepared
 }
 
-/// The readable hardware fingerprint, using the same
-/// `brand|physical_cores|simd|total_ram_bytes` format as
-/// `attune_tune::hardware_fingerprint`.
-///
-/// Duplicated on purpose: adding `attune-tune` here would drag in
-/// `attune-estimate` and the whole tuning sweep. Serve only needs to *compare*
-/// the fingerprint, never to produce a new profile. Keep the format in sync if
-/// the M4 exporter changes it.
+/// The readable hardware fingerprint for a CPU profile, using the same
+/// `brand|physical_cores|simd|total_ram_bytes` format the M4 exporter writes.
 pub fn fingerprint_of(
     brand: &str,
     physical_cores: u32,
     simd: &str,
     total_ram_bytes: u64,
 ) -> String {
-    format!(
-        "{}|{}|{}|{}",
-        brand.trim(),
+    fingerprint_of_gpu(brand, physical_cores, simd, total_ram_bytes, None)
+}
+
+/// Like [`fingerprint_of`], but appends the GPU name and rounded VRAM for GPU
+/// profiles.
+///
+/// Delegates to [`attune_tune::export::hardware_fingerprint_with_gpu`] so a
+/// profile saved by `attune tune --device gpu` compares byte-for-byte. CPU
+/// profiles pass `None` and keep the four-part form unchanged.
+pub fn fingerprint_of_gpu(
+    brand: &str,
+    physical_cores: u32,
+    simd: &str,
+    total_ram_bytes: u64,
+    gpu: Option<(&str, u64)>,
+) -> String {
+    attune_tune::export::hardware_fingerprint_with_gpu(
+        brand,
         physical_cores,
-        simd.trim(),
-        total_ram_bytes
+        simd,
+        total_ram_bytes,
+        gpu,
     )
+}
+
+/// The GPU `(name, total VRAM bytes)` a GPU profile was tuned on.
+///
+/// Matches the profile's recorded `load_config.gpu_name` against the detected
+/// adapters (case-insensitive substring, like the tune path); otherwise uses the
+/// adapter with the most VRAM. Returns `None` when no GPU is visible, which
+/// makes the fingerprint compare as CPU-only and warn (correctly) on a machine
+/// without that GPU.
+fn gpu_identity<'a>(devices: &'a [GpuDevice], preferred: Option<&str>) -> Option<(&'a str, u64)> {
+    if let Some(preferred) = preferred.map(str::trim).filter(|name| !name.is_empty()) {
+        let needle = preferred.to_ascii_lowercase();
+        if let Some(device) = devices
+            .iter()
+            .find(|device| device.name.to_ascii_lowercase().contains(&needle))
+        {
+            return Some((&device.name, device.vram_total_bytes.unwrap_or(0)));
+        }
+    }
+    devices
+        .iter()
+        .filter_map(|device| {
+            device
+                .vram_total_bytes
+                .map(|vram| (device.name.as_str(), vram))
+        })
+        .max_by_key(|(_, vram)| *vram)
+        .or_else(|| {
+            devices
+                .first()
+                .map(|d| (d.name.as_str(), d.vram_total_bytes.unwrap_or(0)))
+        })
 }
 
 /// Read, validate, resolve, spawn and health-check a profile.
@@ -262,6 +463,7 @@ pub fn launch(options: &ServeOptions) -> Result<Serving, ServeError> {
             "profile has an empty model.path; run `attune tune --save` first".to_string(),
         ));
     }
+    let profile_is_gpu = profile.device() == "gpu";
     // Only a `~/.attune/` path needs the home dir; an absolute path must keep
     // working where HOME/USERPROFILE is unset (services).
     let home = if needs_home(&profile.model.path) {
@@ -274,6 +476,17 @@ pub fn launch(options: &ServeOptions) -> Result<Serving, ServeError> {
         progress(done, total)
     })?;
 
+    let explicit = explicit_llama_server(options);
+    let install_home = attune_fetch::home_dir().ok();
+    let (plan, binary) = resolve_launch_binary(
+        &profile,
+        options.device,
+        explicit.as_deref(),
+        install_home.as_deref(),
+    )?;
+
+    apply_device_plan(&mut profile, &plan);
+
     // `--force` means "do not validate against this machine", so skip the
     // (not free) hardware probe entirely: no fingerprint is needed and a HAL
     // failure must not block a forced launch.
@@ -281,20 +494,51 @@ pub fn launch(options: &ServeOptions) -> Result<Serving, ServeError> {
         (String::new(), 0)
     } else {
         let hardware = HardwareInfo::detect()?;
-        let fingerprint = fingerprint_of(
+        let gpu = if profile_is_gpu {
+            gpu_identity(
+                &hardware.gpu.devices,
+                profile.load_config.gpu_name.as_deref(),
+            )
+        } else {
+            None
+        };
+        let fingerprint = fingerprint_of_gpu(
             &hardware.cpu.brand,
             hardware.cpu.physical_cores,
             &hardware.cpu.simd,
             hardware.memory.total_bytes,
+            gpu,
         );
         (fingerprint, hardware.memory.available_bytes)
     };
-    let prepared = prepare_profile(&profile, &current_fingerprint, ram_available, options.force);
+    let mut prepared =
+        prepare_profile(&profile, &current_fingerprint, ram_available, options.force);
+    if plan.cpu_override {
+        prepared.warnings.push(CPU_OVERRIDE_NOTE.to_string());
+    }
 
-    let binary = resolve_llama_server(options.llama_server.as_deref())?;
+    let (device_id, device_name) = if plan.gpu {
+        let devices = list_devices(&binary)?;
+        let id = pick_gpu_device(&devices, profile.load_config.gpu_name.as_deref())
+            .ok_or_else(|| no_gpu_device_error(&binary))?;
+        let name = devices
+            .iter()
+            .find(|(entry_id, _, _)| *entry_id == id)
+            .map(|(_, name, _)| name.clone());
+        (Some(id), name)
+    } else {
+        (None, None)
+    };
+
     let paths = Paths::new(binary);
     let backend = LlamaServerBackend;
-    let guard = backend.spawn(&prepared.profile, &paths, host, options.port)?;
+    let guard = backend.spawn_with_device(
+        &prepared.profile,
+        &paths,
+        host,
+        options.port,
+        device_id.as_deref(),
+    )?;
 
     let health_url = health_url_for(host, options.port);
     let health_elapsed = match backend.health_wait(&health_url, options.timeout) {
@@ -317,7 +561,120 @@ pub fn launch(options: &ServeOptions) -> Result<Serving, ServeError> {
         health_url,
         health_elapsed,
         warnings,
+        device: if plan.gpu { "gpu" } else { "cpu" }.to_string(),
+        build: plan.variant,
+        device_id,
+        device_name,
     })
+}
+
+/// Apply a plan to an in-memory profile.
+///
+/// A GPU-tuned profile forced onto the CPU loses its offload, so the emitted
+/// argv is CPU-only (`-ngl 0`, no `--fit`/`-np`/`-dev`).
+fn apply_device_plan(profile: &mut Profile, plan: &ServePlan) {
+    if plan.cpu_override {
+        profile.load_config.n_gpu_layers = 0;
+    }
+}
+
+/// The explicit binary from `--llama-server` or `ATTUNE_LLAMA_SERVER`, blank
+/// values treated as unset.
+fn explicit_llama_server(options: &ServeOptions) -> Option<PathBuf> {
+    let usable =
+        |path: &PathBuf| !path.as_os_str().is_empty() && !path.to_string_lossy().trim().is_empty();
+    options
+        .llama_server
+        .as_ref()
+        .filter(|path| usable(path))
+        .cloned()
+        .or_else(|| {
+            std::env::var_os(ENV_LLAMA_SERVER)
+                .map(PathBuf::from)
+                .filter(|path| usable(path))
+        })
+}
+
+/// GPU build variants installed in the attune home, in preference order.
+fn installed_gpu_builds(home: &std::path::Path) -> Vec<(String, PathBuf)> {
+    let mut builds = Vec::new();
+    for variant in ["vulkan", "cuda12"] {
+        if let Some(path) = attune_fetch::find_installed_variant(home, "llama-server", variant) {
+            builds.push((variant.to_string(), path));
+        }
+    }
+    builds
+}
+
+/// Pick the binary and the build/device plan for one launch.
+///
+/// An explicit flag/env binary always wins (the user chose it); otherwise a GPU
+/// profile uses its own installed build, then the other GPU build, then fails
+/// with [`NO_GPU_BUILD`]. CPU profiles keep the M5 resolution untouched.
+fn resolve_launch_binary(
+    profile: &Profile,
+    requested: ServeDevice,
+    explicit: Option<&std::path::Path>,
+    home: Option<&std::path::Path>,
+) -> Result<(ServePlan, PathBuf), ServeError> {
+    let profile_device = profile.device();
+
+    if let Some(binary) = explicit {
+        let installed = if profile_device == "gpu" {
+            vec![gpu_build_label(&profile.engine.variant).to_string()]
+        } else {
+            Vec::new()
+        };
+        let plan = plan_serve(
+            profile_device,
+            &profile.engine.variant,
+            requested,
+            &installed,
+        )
+        .map_err(ServeError::InvalidConfig)?;
+        let binary = resolve_llama_server(Some(binary))?;
+        return Ok((plan, binary));
+    }
+
+    // CPU profiles (and a GPU profile forced to the CPU) use the CPU build and
+    // the unchanged `--llama-server`/env/PATH/installed precedence.
+    if profile_device != "gpu" || requested == ServeDevice::Cpu {
+        let plan = plan_serve(profile_device, &profile.engine.variant, requested, &[])
+            .map_err(ServeError::InvalidConfig)?;
+        let binary = resolve_llama_server(None)?;
+        return Ok((plan, binary));
+    }
+
+    let builds = home.map(installed_gpu_builds).unwrap_or_default();
+    let variants: Vec<String> = builds.iter().map(|(variant, _)| variant.clone()).collect();
+    let plan = plan_serve(
+        profile_device,
+        &profile.engine.variant,
+        requested,
+        &variants,
+    )
+    .map_err(ServeError::InvalidConfig)?;
+    let binary = builds
+        .iter()
+        .find(|(variant, _)| *variant == plan.variant)
+        .map(|(_, path)| path.clone())
+        .ok_or_else(|| {
+            ServeError::InvalidConfig(format!(
+                "the `{}` llama.cpp build vanished while preparing the launch; rerun \
+                 `attune setup --gpu auto`",
+                plan.variant
+            ))
+        })?;
+    Ok((plan, binary))
+}
+
+/// Error text for a GPU build that lists no device.
+fn no_gpu_device_error(binary: &std::path::Path) -> ServeError {
+    ServeError::InvalidConfig(format!(
+        "this profile runs on the GPU but `{}` reports no GPU device. Fix: `attune setup --gpu \
+         auto`, or serve on the CPU with `--device cpu`",
+        binary.display()
+    ))
 }
 
 /// The `/health` URL for a bind address.
@@ -330,6 +687,7 @@ fn health_url_for(host: &str, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use attune_backend::parse_list_devices;
     use attune_profile::{ExpectedPerformance, Fallbacks, RamFallback};
 
     fn profile(fingerprint: &str, peak_gb: f64, n_ctx: u32, fallback: Option<u32>) -> Profile {
@@ -505,5 +863,165 @@ mod tests {
         std::fs::write(&file, b"x").expect("write");
         assert!(!needs_home(&file.display().to_string()));
         assert!(needs_home("~/.attune/models/a/b.gguf"));
+    }
+
+    // ---- device / build resolution ----------------------------------------
+
+    fn variants(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn gpu_profile_auto_prefers_its_own_build() {
+        let plan = plan_serve(
+            "gpu",
+            "vulkan",
+            ServeDevice::Auto,
+            &variants(&["vulkan", "cuda12"]),
+        )
+        .expect("plan");
+        assert_eq!(
+            plan,
+            ServePlan {
+                gpu: true,
+                variant: "vulkan".to_string(),
+                cpu_override: false,
+            }
+        );
+        // `--device gpu` on a GPU profile is the same as auto.
+        assert_eq!(
+            plan_serve("gpu", "vulkan", ServeDevice::Gpu, &variants(&["vulkan"]))
+                .expect("plan")
+                .variant,
+            "vulkan"
+        );
+    }
+
+    #[test]
+    fn gpu_profile_falls_back_to_the_other_gpu_build() {
+        let plan =
+            plan_serve("gpu", "cuda12", ServeDevice::Auto, &variants(&["vulkan"])).expect("plan");
+        assert_eq!(plan.variant, "vulkan");
+        assert!(plan.gpu);
+
+        let plan =
+            plan_serve("gpu", "vulkan", ServeDevice::Auto, &variants(&["cuda12"])).expect("plan");
+        assert_eq!(plan.variant, "cuda12");
+    }
+
+    #[test]
+    fn gpu_profile_without_a_gpu_build_reports_the_fix() {
+        let error = plan_serve("gpu", "vulkan", ServeDevice::Auto, &[]).expect_err("no build");
+        assert_eq!(error, NO_GPU_BUILD);
+        assert!(error.contains("attune setup --gpu auto"), "{error}");
+        assert!(error.contains("--device cpu"), "{error}");
+    }
+
+    #[test]
+    fn cpu_profile_refuses_device_gpu_with_a_retune_hint() {
+        let error = plan_serve("cpu", "cpu", ServeDevice::Gpu, &[]).expect_err("cpu profile");
+        assert_eq!(error, CPU_PROFILE_ON_GPU);
+        assert!(error.contains("attune tune --model"), "{error}");
+        assert!(error.contains("--device gpu"), "{error}");
+    }
+
+    #[test]
+    fn cpu_profile_auto_and_cpu_stay_on_the_cpu() {
+        for requested in [ServeDevice::Auto, ServeDevice::Cpu] {
+            let plan = plan_serve("cpu", "cpu", requested, &[]).expect("plan");
+            assert!(!plan.gpu);
+            assert_eq!(plan.variant, "cpu");
+            assert!(!plan.cpu_override);
+        }
+    }
+
+    fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2)
+            .any(|pair| pair[0] == flag && pair[1] == value)
+    }
+
+    #[test]
+    fn cpu_override_zeroes_layers_and_emits_cpu_args() {
+        let mut profile = Profile::default();
+        profile.load_config.n_gpu_layers = 20;
+        profile.load_config.gpu_name = Some("NVIDIA GeForce RTX 4050 Laptop GPU".to_string());
+        profile.engine.variant = "vulkan".to_string();
+
+        let plan = plan_serve("gpu", "vulkan", ServeDevice::Cpu, &[]).expect("plan");
+        assert!(plan.cpu_override);
+        assert!(!plan.gpu);
+        assert_eq!(plan.variant, "cpu");
+
+        apply_device_plan(&mut profile, &plan);
+        assert_eq!(profile.load_config.n_gpu_layers, 0);
+        assert_eq!(profile.device(), "cpu");
+
+        let args = attune_profile::to_llama_args_with_device(&profile, Some("Vulkan1"));
+        assert!(has_pair(&args, "-ngl", "0"));
+        assert!(!args.iter().any(|arg| arg == "--fit"));
+        assert!(!args.iter().any(|arg| arg == "-np"));
+        assert!(!args.iter().any(|arg| arg == "-dev"));
+    }
+
+    #[test]
+    fn device_id_prefers_the_discrete_gpu_in_a_recorded_listing() {
+        let text = "\
+Available devices:
+  Vulkan0: Intel(R) Graphics (RPL-P) (5934 MiB, 5150 MiB free)
+  Vulkan1: NVIDIA GeForce RTX 4050 Laptop GPU (5921 MiB, 5153 MiB free)
+";
+        let devices = parse_list_devices(text);
+        let picked = pick_gpu_device(&devices, Some("NVIDIA GeForce RTX 4050 Laptop GPU"))
+            .expect("a GPU device");
+        assert_eq!(picked, "Vulkan1");
+    }
+
+    fn nvidia_device() -> GpuDevice {
+        GpuDevice {
+            vendor: "nvidia".to_string(),
+            name: "NVIDIA GeForce RTX 4050 Laptop GPU".to_string(),
+            vram_total_bytes: Some(6_442_450_944),
+            vram_free_bytes: Some(6_200_000_000),
+            driver: Some("561.00".to_string()),
+            source: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn gpu_fingerprint_matches_the_tune_export_format() {
+        let devices = vec![nvidia_device()];
+        let gpu = gpu_identity(&devices, Some("nvidia geforce rtx 4050")).expect("gpu");
+        assert_eq!(gpu.0, "NVIDIA GeForce RTX 4050 Laptop GPU");
+        assert_eq!(gpu.1, 6_442_450_944);
+        assert_eq!(
+            fingerprint_of_gpu("AMD Ryzen 9 7950X", 16, "AVX2", 33_500_000_000, Some(gpu)),
+            "AMD Ryzen 9 7950X|16|AVX2|33500000000|NVIDIA GeForce RTX 4050 Laptop GPU|6"
+        );
+    }
+
+    #[test]
+    fn gpu_identity_falls_back_to_the_largest_adapter() {
+        let devices = vec![
+            GpuDevice {
+                vendor: "intel".to_string(),
+                name: "Intel(R) Graphics".to_string(),
+                vram_total_bytes: Some(2_000_000_000),
+                vram_free_bytes: None,
+                driver: None,
+                source: "test".to_string(),
+            },
+            nvidia_device(),
+        ];
+        let gpu = gpu_identity(&devices, None).expect("gpu");
+        assert_eq!(gpu.0, "NVIDIA GeForce RTX 4050 Laptop GPU");
+        assert_eq!(gpu_identity(&devices, Some("missing adapter")), Some(gpu));
+    }
+
+    #[test]
+    fn cpu_fingerprint_stays_four_parts() {
+        assert_eq!(
+            fingerprint_of("AMD Ryzen 9 7950X", 16, "AVX2", 33_500_000_000),
+            "AMD Ryzen 9 7950X|16|AVX2|33500000000"
+        );
     }
 }

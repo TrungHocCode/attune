@@ -25,6 +25,7 @@
 
 pub mod builds;
 pub mod error;
+pub mod gpu;
 pub mod llama_subprocess;
 pub mod models;
 
@@ -34,8 +35,10 @@ pub mod backend;
 pub use backend::{Backend, LlamaServerBackend, Paths};
 pub use builds::{choose_variants, GpuRequest, VariantPlan};
 pub use error::BackendError;
+pub use gpu::{list_devices, parse_list_devices, pick_device, DeviceEntry, LIST_DEVICES_TIMEOUT};
 pub use llama_subprocess::{
-    health_is_ok, health_wait, resolve_llama_server, server_args, server_args_with_warnings,
-    LlamaServerSource, ServerArgs, ServerGuard, ENV_LLAMA_SERVER, PATH_CANDIDATES,
+    health_is_ok, health_wait, resolve_llama_server, server_args, server_args_with_device,
+    server_args_with_warnings, LlamaServerSource, ServerArgs, ServerGuard, ENV_LLAMA_SERVER,
+    PATH_CANDIDATES,
 };
 pub use models::ensure_model;

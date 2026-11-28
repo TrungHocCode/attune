@@ -90,6 +90,7 @@ pub fn run(
     let mut running = serve::launch_running(
         &path.display().to_string(),
         llama_server,
+        attune_serve::ServeDevice::Auto,
         "127.0.0.1",
         port,
         listen,

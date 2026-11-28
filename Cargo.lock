@@ -166,6 +166,7 @@ dependencies = [
  "attune-fetch",
  "attune-hal",
  "attune-profile",
+ "attune-tune",
  "ctrlc",
  "serde",
  "serde_json",
