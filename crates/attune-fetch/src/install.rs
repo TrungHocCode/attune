@@ -1,20 +1,45 @@
-//! Unpack and find llama.cpp installs under `<home>/llama.cpp/<tag>/`.
+//! Unpack and find llama.cpp installs under `<home>/llama.cpp/<tag>/` and
+//! `<home>/llama.cpp/<tag>-<variant>/` (GPU builds, M7).
 
 use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 
 use crate::FetchError;
 
-/// Where build `tag` is installed.
+/// Where the CPU build `tag` is installed (the M6 layout).
 pub fn install_dir(home: &Path, tag: &str) -> PathBuf {
     home.join("llama.cpp").join(tag)
+}
+
+/// Where build `tag` of `variant` is installed. `cpu` keeps the M6 path;
+/// every GPU variant lives beside it as `<tag>-<variant>`.
+pub fn variant_dir(home: &Path, tag: &str, variant: &str) -> PathBuf {
+    if variant == "cpu" {
+        install_dir(home, tag)
+    } else {
+        home.join("llama.cpp").join(format!("{tag}-{variant}"))
+    }
 }
 
 /// `name` (or `name.exe`) anywhere inside build `tag`'s install, shallowest
 /// first (Windows zips are flat, Linux tarballs nest under `build/bin/`).
 pub fn installed_binary(home: &Path, tag: &str, name: &str) -> Option<PathBuf> {
+    binary_in(&install_dir(home, tag), name)
+}
+
+/// Like [`installed_binary`], but for `tag`'s `variant` install.
+pub fn installed_variant_binary(
+    home: &Path,
+    tag: &str,
+    variant: &str,
+    name: &str,
+) -> Option<PathBuf> {
+    binary_in(&variant_dir(home, tag, variant), name)
+}
+
+fn binary_in(root: &Path, name: &str) -> Option<PathBuf> {
     let exe = format!("{name}.exe");
-    let mut queue = vec![install_dir(home, tag)];
+    let mut queue = vec![root.to_path_buf()];
     while !queue.is_empty() {
         let mut next = Vec::new();
         for dir in queue {
@@ -39,44 +64,84 @@ pub fn installed_binary(home: &Path, tag: &str, name: &str) -> Option<PathBuf> {
     None
 }
 
-/// `name` from the newest installed build (`b11804` beats `b900`), for
-/// callers that do not know the catalog's pinned tag.
+/// The `bNNNN` number of a bare tag, or `None` for anything else (variant
+/// dirs like `b1-vulkan`, `.tmp` leftovers).
+fn build_number(tag: &str) -> Option<u64> {
+    tag.strip_prefix('b')?.parse::<u64>().ok()
+}
+
+/// `name` from the newest installed **CPU** build (`b11804` beats `b900`).
+/// Variant installs (`<tag>-<variant>`) are ignored.
 pub fn find_installed(home: &Path, name: &str) -> Option<PathBuf> {
     let root = home.join("llama.cpp");
     let mut tags: Vec<String> = std::fs::read_dir(root)
         .ok()?
         .flatten()
         .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|tag| !tag.ends_with(".tmp"))
+        .filter_map(|e| {
+            let tag = e.file_name().to_string_lossy().into_owned();
+            build_number(&tag).map(|_| tag)
+        })
         .collect();
-    let build = |tag: &str| tag.trim_start_matches('b').parse::<u64>().unwrap_or(0);
-    tags.sort_by_key(|tag| std::cmp::Reverse(build(tag)));
+    tags.sort_by_key(|tag| std::cmp::Reverse(build_number(tag).unwrap_or(0)));
     tags.iter()
         .find_map(|tag| installed_binary(home, tag, name))
 }
 
-/// Unpack `archive` (`.zip` or `.tar.gz`) into `dest` atomically: into
-/// `<dest>.tmp` first, renamed only when every entry unpacked. Entries that
-/// would escape the directory (`..`, absolute paths) fail the install.
-pub fn install_archive(archive: &Path, dest: &Path) -> Result<(), FetchError> {
+/// `name` from the newest installed build of `variant`. `cpu` uses the M6
+/// layout; a GPU variant reads `<tag>-<variant>` dirs.
+pub fn find_installed_variant(home: &Path, name: &str, variant: &str) -> Option<PathBuf> {
+    if variant == "cpu" {
+        return find_installed(home, name);
+    }
+    let root = home.join("llama.cpp");
+    let suffix = format!("-{variant}");
+    let mut tags: Vec<String> = std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let dir = e.file_name().to_string_lossy().into_owned();
+            let base = dir.strip_suffix(&suffix)?;
+            build_number(base)?;
+            Some(base.to_string())
+        })
+        .collect();
+    tags.sort_by_key(|tag| std::cmp::Reverse(build_number(tag).unwrap_or(0)));
+    tags.iter()
+        .find_map(|tag| installed_variant_binary(home, tag, variant, name))
+}
+
+/// Unpack `archives` (`.zip`/`.tar.gz`) into `dest` atomically: into
+/// `<dest>.tmp` first, renamed only when every archive unpacked. Several
+/// archives unpack into the same directory (a CUDA build plus its cudart
+/// companion). Entries that would escape the directory (`..`, absolute paths)
+/// fail the install.
+pub fn install_archives(archives: &[PathBuf], dest: &Path) -> Result<(), FetchError> {
     let tmp = PathBuf::from(format!("{}.tmp", dest.display()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).map_err(|err| FetchError::io(&tmp, err))?;
-    let name = archive.to_string_lossy().to_ascii_lowercase();
-    let result = if name.ends_with(".zip") {
-        unpack_zip(archive, &tmp)
-    } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-        unpack_tar_gz(archive, &tmp)
-    } else {
-        Err(archive_error(archive, "unknown archive type"))
-    };
-    if let Err(err) = result {
-        let _ = std::fs::remove_dir_all(&tmp);
-        return Err(err);
+    for archive in archives {
+        let name = archive.to_string_lossy().to_ascii_lowercase();
+        let result = if name.ends_with(".zip") {
+            unpack_zip(archive, &tmp)
+        } else if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+            unpack_tar_gz(archive, &tmp)
+        } else {
+            Err(archive_error(archive, "unknown archive type"))
+        };
+        if let Err(err) = result {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(err);
+        }
     }
     let _ = std::fs::remove_dir_all(dest);
     std::fs::rename(&tmp, dest).map_err(|err| FetchError::io(dest, err))
+}
+
+/// Unpack one `archive` (`.zip` or `.tar.gz`) into `dest` atomically.
+pub fn install_archive(archive: &Path, dest: &Path) -> Result<(), FetchError> {
+    install_archives(&[archive.to_path_buf()], dest)
 }
 
 fn archive_error(archive: &Path, detail: impl std::fmt::Display) -> FetchError {
@@ -318,5 +383,64 @@ mod tests {
             find_installed(&dir, "llama-server"),
             Some(install_dir(&dir, "b11804").join("llama-server"))
         );
+    }
+
+    #[test]
+    fn variant_dirs_do_not_confuse_cpu_tag_parsing() {
+        let dir = temp("variants");
+        for (tag, variant) in [("b1", "cpu"), ("b1", "vulkan"), ("b2", "cuda12")] {
+            let bin = variant_dir(&dir, tag, variant);
+            std::fs::create_dir_all(&bin).expect("mkdir");
+            std::fs::write(bin.join("llama-server"), b"x").expect("write");
+        }
+        // CPU lookup finds only the CPU build, not the newer-looking b2-cuda12.
+        assert_eq!(
+            find_installed(&dir, "llama-server"),
+            Some(install_dir(&dir, "b1").join("llama-server"))
+        );
+        assert_eq!(
+            find_installed_variant(&dir, "llama-server", "vulkan"),
+            Some(variant_dir(&dir, "b1", "vulkan").join("llama-server"))
+        );
+        assert_eq!(
+            find_installed_variant(&dir, "llama-server", "cuda12"),
+            Some(variant_dir(&dir, "b2", "cuda12").join("llama-server"))
+        );
+        assert!(find_installed_variant(&dir, "llama-server", "cuda11").is_none());
+        assert_eq!(
+            installed_variant_binary(&dir, "b1", "vulkan", "llama-server"),
+            Some(variant_dir(&dir, "b1", "vulkan").join("llama-server"))
+        );
+        assert_eq!(variant_dir(&dir, "b1", "cpu"), install_dir(&dir, "b1"));
+    }
+
+    #[test]
+    fn multiple_archives_install_into_one_dir() {
+        let dir = temp("multi");
+        let base = dir.join("llama.zip");
+        zip_with(&base, &[("llama-server.exe", b"MZ")]);
+        let cudart = dir.join("cudart.zip");
+        zip_with(&cudart, &[("cudart64_12.dll", b"dll")]);
+        let dest = variant_dir(&dir, "b1", "cuda12");
+        install_archives(&[base, cudart], &dest).expect("install");
+        assert_eq!(
+            installed_variant_binary(&dir, "b1", "cuda12", "llama-server"),
+            Some(dest.join("llama-server.exe"))
+        );
+        assert!(dest.join("cudart64_12.dll").exists());
+        assert!(!dir.join("llama.cpp").join("b1-cuda12.tmp").exists());
+    }
+
+    #[test]
+    fn bad_second_archive_leaves_no_install_dir() {
+        let dir = temp("multi-bad");
+        let good = dir.join("good.zip");
+        zip_with(&good, &[("llama-server.exe", b"MZ")]);
+        let bad = dir.join("bad.zip");
+        std::fs::write(&bad, b"not a zip").expect("write");
+        let dest = variant_dir(&dir, "b1", "cuda12");
+        assert!(install_archives(&[good, bad], &dest).is_err());
+        assert!(!dest.exists());
+        assert!(!dir.join("llama.cpp").join("b1-cuda12.tmp").exists());
     }
 }

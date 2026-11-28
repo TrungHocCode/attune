@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 attune-hal = { path = "../attune-hal" }
+attune-backend = { path = "../attune-backend" }
 attune-bench = { path = "../attune-bench" }
 attune-estimate = { path = "../attune-estimate" }
 attune-tune = { path = "../attune-tune" }

@@ -52,11 +52,27 @@ pub struct LlamaAsset {
     pub os: String,
     /// `std::env::consts::ARCH` value (`x86_64`).
     pub arch: String,
-    /// `cpu` in M6 (GPU builds arrive with M7).
+    /// Build flavour: `cpu`, `vulkan` or `cuda12`. Several assets share one
+    /// variant when a build ships as a base archive plus a companion (CUDA).
     pub variant: String,
     pub url: String,
     pub size: u64,
     pub sha256: String,
+    /// Minimum NVIDIA driver, when this build needs one (`cuda12`). Absent in
+    /// pre-M7 catalogs and for CPU/Vulkan builds.
+    #[serde(default)]
+    pub min_driver: Option<String>,
+}
+
+impl LlamaPin {
+    /// Every asset matching `os`/`arch`/`variant`, in catalog order. A CUDA
+    /// build returns both its base and companion archives.
+    pub fn assets_for(&self, os: &str, arch: &str, variant: &str) -> Vec<&LlamaAsset> {
+        self.assets
+            .iter()
+            .filter(|a| a.os == os && a.arch == arch && a.variant == variant)
+            .collect()
+    }
 }
 
 /// One model (merged across publisher repos).
@@ -429,6 +445,37 @@ mod tests {
         assert_eq!(parsed.models[0].arch.to_arch().n_layer, 36);
         assert!(parsed.models[0].file_for(Quant::Q4_K_M).is_some());
         assert!(parsed.models[0].file_for(Quant::Q8_0).is_none());
+    }
+
+    #[test]
+    fn assets_for_returns_every_asset_of_a_variant() {
+        let text = format!(
+            r#"{{ "schema": "{SCHEMA}", "generated_at": "2026-11-27T03:00:00Z",
+              "llama_cpp": {{ "tag": "b11804", "assets": [
+                {{ "os": "windows", "arch": "x86_64", "variant": "cpu",
+                  "url": "{prefix}b11804/llama-b11804-bin-win-cpu-x64.zip",
+                  "size": 1, "sha256": "{SHA_A}" }},
+                {{ "os": "windows", "arch": "x86_64", "variant": "cuda12",
+                  "url": "{prefix}b11804/llama-b11804-bin-win-cuda-12.4-x64.zip",
+                  "size": 2, "sha256": "{SHA_A}", "min_driver": "551.61" }},
+                {{ "os": "windows", "arch": "x86_64", "variant": "cuda12",
+                  "url": "{prefix}b11804/cudart-llama-bin-win-cuda-12.4-x64.zip",
+                  "size": 3, "sha256": "{SHA_A}", "min_driver": "551.61" }}
+              ] }},
+              "models": [] }}"#,
+            prefix = LLAMA_ASSET_PREFIX,
+        );
+        let pin = parse_catalog(&text).expect("parse").llama_cpp;
+        assert_eq!(pin.assets_for("windows", "x86_64", "cuda12").len(), 2);
+        assert_eq!(pin.assets_for("windows", "x86_64", "cpu").len(), 1);
+        assert!(pin.assets_for("windows", "x86_64", "cuda11").is_empty());
+        assert!(pin.assets_for("linux", "x86_64", "cpu").is_empty());
+        assert_eq!(
+            pin.assets_for("windows", "x86_64", "cuda12")[0]
+                .min_driver
+                .as_deref(),
+            Some("551.61")
+        );
     }
 
     #[test]

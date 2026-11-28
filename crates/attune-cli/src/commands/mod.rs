@@ -30,6 +30,10 @@ pub enum Command {
         /// Re-download the model catalog even if the cached copy is fresh
         #[arg(long)]
         refresh_catalog: bool,
+        /// Which llama.cpp build to install: auto (GPU build when a discrete
+        /// GPU is found), cpu, vulkan or cuda
+        #[arg(long, value_name = "BUILD", default_value = "auto")]
+        gpu: attune_backend::GpuRequest,
     },
     /// Show this machine's CPU, memory and GPU
     Detect {
@@ -373,7 +377,8 @@ pub fn dispatch(command: Command) -> Result<()> {
         Command::Setup {
             yes,
             refresh_catalog,
-        } => setup::run(yes, refresh_catalog),
+            gpu,
+        } => setup::run(yes, refresh_catalog, gpu),
         Command::Bench {
             quick,
             json,

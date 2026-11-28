@@ -19,6 +19,58 @@
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-ubuntu-x64.tar.gz",
         "size": 22331121,
         "sha256": "bb800fbd5e905fb8b9887c9a6cb0ab4f14c7267c5f99302874521e7558b0613f"
+      },
+      {
+        "os": "windows",
+        "arch": "x86_64",
+        "variant": "vulkan",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-vulkan-x64.zip",
+        "size": 36865203,
+        "sha256": "db9ab31997e93bf713d3dfec6eb1cf1b5a6a5f2940a3d4d111ad0ffab54c87d5"
+      },
+      {
+        "os": "linux",
+        "arch": "x86_64",
+        "variant": "vulkan",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-ubuntu-vulkan-x64.tar.gz",
+        "size": 34975120,
+        "sha256": "d7805abfa078792f8f48b191047a7e392412cfa3279e1668f04d8cb14ec1d764"
+      },
+      {
+        "os": "windows",
+        "arch": "x86_64",
+        "variant": "cuda12",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-cuda-12.4-x64.zip",
+        "size": 272315030,
+        "sha256": "09fe6c2e5b5ad2fc0073f9bd8eb03b42f205b1c5360855393514ec76dd5fdce4",
+        "min_driver": "551.61"
+      },
+      {
+        "os": "windows",
+        "arch": "x86_64",
+        "variant": "cuda12",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/cudart-llama-bin-win-cuda-12.4-x64.zip",
+        "size": 391443627,
+        "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+        "min_driver": "551.61"
+      },
+      {
+        "os": "linux",
+        "arch": "x86_64",
+        "variant": "cuda12",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-ubuntu-cuda-12.8-x64.tar.gz",
+        "size": 177931030,
+        "sha256": "0ed79c7a8ce3a5bead13b7c84c2524bb04d3027bcf36047a2ba4c2be5c8ce55c",
+        "min_driver": "550.54"
+      },
+      {
+        "os": "linux",
+        "arch": "x86_64",
+        "variant": "cuda12",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/cudart-llama-b11804-bin-ubuntu-cuda-12.8-x64.tar.gz",
+        "size": 594377688,
+        "sha256": "d55607757e3b8f8433aac08d072ab4dd54c09fbd6f304b013d6d86ed2e06996e",
+        "min_driver": "550.54"
       }
     ]
   },
