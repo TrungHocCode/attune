@@ -10,6 +10,9 @@ use crate::{FetchError, HostPolicy};
 /// Redirect hops followed by hand (each one checked against the policy).
 const MAX_REDIRECTS: usize = 5;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// A read that makes no progress for this long fails the download. The
+/// resumable `.part` file is kept, so a retry continues where it stopped.
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 const CHUNK: usize = 64 * 1024;
 
 /// One pinned file: where it comes from, where it goes, and what it must be.
@@ -40,6 +43,17 @@ pub fn download_with(
     free: &dyn Fn(&Path) -> Option<u64>,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<(), FetchError> {
+    download_with_stall(d, policy, free, STALL_TIMEOUT, progress)
+}
+
+/// [`download_with`] with an injectable stall timeout (tests).
+fn download_with_stall(
+    d: &Download,
+    policy: &HostPolicy,
+    free: &dyn Fn(&Path) -> Option<u64>,
+    stall: Duration,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<(), FetchError> {
     policy.check(&d.url)?;
     let dir = d.dest.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir).map_err(|err| FetchError::io(dir, err))?;
@@ -62,7 +76,7 @@ pub fn download_with(
         hash_file(&part, &mut hasher)?;
     }
     if have < d.size {
-        let response = get(&d.url, policy, (have > 0).then_some(have), None)?;
+        let response = get(&d.url, policy, (have > 0).then_some(have), None, stall)?;
         let status = response.status().as_u16();
         let append = match status {
             206 => true,
@@ -134,7 +148,7 @@ pub fn download_with(
 
 /// GET a small text document (catalog JSON), following checked redirects.
 pub fn fetch_text(url: &str, policy: &HostPolicy, timeout: Duration) -> Result<String, FetchError> {
-    let response = get(url, policy, None, Some(timeout))?;
+    let response = get(url, policy, None, Some(timeout), STALL_TIMEOUT)?;
     let status = response.status().as_u16();
     if status != 200 {
         return Err(FetchError::Http {
@@ -159,7 +173,7 @@ pub fn fetch_range(
     len: u64,
     timeout: Duration,
 ) -> Result<Vec<u8>, FetchError> {
-    let response = get_range(url, policy, 0, Some(len), Some(timeout))?;
+    let response = get_range(url, policy, 0, Some(len), Some(timeout), STALL_TIMEOUT)?;
     let status = response.status().as_u16();
     if status != 200 && status != 206 {
         return Err(FetchError::Http {
@@ -198,10 +212,11 @@ fn get(
     policy: &HostPolicy,
     from: Option<u64>,
     timeout: Option<Duration>,
+    stall: Duration,
 ) -> Result<ureq::http::Response<ureq::Body>, FetchError> {
     match from {
-        Some(from) => get_range(url, policy, from, None, timeout),
-        None => get_inner(url, policy, None, timeout),
+        Some(from) => get_range(url, policy, from, None, timeout, stall),
+        None => get_inner(url, policy, None, timeout, stall),
     }
 }
 
@@ -212,12 +227,13 @@ fn get_range(
     from: u64,
     len: Option<u64>,
     timeout: Option<Duration>,
+    stall: Duration,
 ) -> Result<ureq::http::Response<ureq::Body>, FetchError> {
     let range = match len {
         Some(len) => format!("bytes={from}-{}", from + len.saturating_sub(1)),
         None => format!("bytes={from}-"),
     };
-    get_inner(url, policy, Some(range), timeout)
+    get_inner(url, policy, Some(range), timeout, stall)
 }
 
 fn get_inner(
@@ -225,12 +241,16 @@ fn get_inner(
     policy: &HostPolicy,
     range: Option<String>,
     timeout: Option<Duration>,
+    stall: Duration,
 ) -> Result<ureq::http::Response<ureq::Body>, FetchError> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .max_redirects(0)
         .http_status_as_error(false)
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_global(timeout)
+        // Limits each transport read, not the total exchange, so a multi-GB
+        // download may take an hour while a stalled socket fails in `stall`.
+        .timeout_per_read(Some(stall))
         .build()
         .into();
     let mut current = url.to_string();
@@ -310,6 +330,49 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn stalled_body_times_out_and_keeps_the_part_file() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind stall server");
+        let url = format!("http://{}/model.gguf", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut head = [0_u8; 1024];
+            let _ = stream.read(&mut head);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n");
+            let _ = stream.flush();
+            // Keep the socket open without sending the body.
+            std::thread::sleep(Duration::from_secs(5));
+        });
+
+        let dir = std::env::temp_dir().join(format!("attune-stall-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let dest = dir.join("model.gguf");
+        let request = Download {
+            url,
+            dest: dest.clone(),
+            size: 1024,
+            sha256: "0".repeat(64),
+        };
+        let err = download_with_stall(
+            &request,
+            &HostPolicy::allow_local_for_tests(),
+            &|_| Some(u64::MAX),
+            Duration::from_millis(300),
+            &mut |_, _| {},
+        )
+        .expect_err("a stalled body must fail");
+        assert!(matches!(err, FetchError::Http { .. }), "{err}");
+        assert!(
+            part_path(&dest).exists(),
+            "the resumable .part file must survive a stall"
+        );
+    }
 
     #[test]
     fn relative_location_keeps_the_origin() {

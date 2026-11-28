@@ -227,6 +227,15 @@ impl Proxy {
 }
 
 fn handle_request(request: Request, state: &ProxyState) {
+    if state.api_key.is_none() && !host_is_loopback(&request) {
+        proxy::respond_error(
+            request,
+            403,
+            "forbidden",
+            "invalid Host header: without an API key the proxy only accepts loopback Host values",
+        );
+        return;
+    }
     if let Some(key) = &state.api_key {
         let path = request.url().split('?').next().unwrap_or("");
         if path != "/health" && !bearer_matches(&request, key) {
@@ -279,6 +288,40 @@ pub(crate) fn is_loopback_host(host: &str) -> bool {
         || host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// `Host` header check for the no-API-key DNS-rebinding guard. Accepts a
+/// loopback name/address with any port, bracketed IPv6 included.
+pub(crate) fn is_loopback_authority(authority: &str) -> bool {
+    let authority = authority.trim();
+    if authority.is_empty() {
+        return false;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, after)) = rest.split_once(']') else {
+            return false;
+        };
+        let port_ok = after.is_empty()
+            || after
+                .strip_prefix(':')
+                .is_some_and(|port| !port.is_empty() && port.parse::<u16>().is_ok());
+        return port_ok
+            && host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback());
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.parse::<u16>().is_ok() => {
+            is_loopback_host(host)
+        }
+        _ => is_loopback_host(authority),
+    }
+}
+
+fn host_is_loopback(request: &Request) -> bool {
+    proxy::header_value(request, "Host")
+        .as_deref()
+        .is_some_and(is_loopback_authority)
 }
 
 /// Constant-time byte equality (length is not secret).
@@ -636,6 +679,33 @@ mod tests {
     }
 
     #[test]
+    fn host_authority_accepts_loopback_with_a_port_only() {
+        for host in [
+            "localhost",
+            "localhost:8080",
+            "LOCALHOST:1",
+            "127.0.0.1",
+            "127.0.0.1:8080",
+            "127.9.9.9:65535",
+            "[::1]",
+            "[::1]:8080",
+        ] {
+            assert!(is_loopback_authority(host), "{host}");
+        }
+        for host in [
+            "",
+            "evil.example",
+            "evil.example:8080",
+            "192.168.1.5:8080",
+            "localhost.evil.example",
+            "[::1]junk",
+            "[::1]:not-a-port",
+        ] {
+            assert!(!is_loopback_authority(host), "{host}");
+        }
+    }
+
+    #[test]
     fn constant_time_compare() {
         assert!(ct_eq(b"secret", b"secret"));
         assert!(!ct_eq(b"secret", b"secreT"));
@@ -714,6 +784,66 @@ mod tests {
             seen.iter().all(Option::is_none),
             "key leaked upstream: {seen:?}"
         );
+    }
+
+    // ---- request size + DNS-rebinding guard --------------------------------
+
+    #[test]
+    fn oversized_request_bodies_answer_413() {
+        let stub = StubUpstream::start();
+        let proxy = TestProxy::start(&format!("http://{}", stub.addr));
+        let request = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: {}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            proxy.addr,
+            crate::proxy::MAX_REQUEST_BODY + 1
+        );
+        let (response, _) = http_raw(&proxy.addr, &request);
+        assert_eq!(response.status, 413);
+        let error: serde_json::Value =
+            serde_json::from_slice(&response.body).expect("413 body must be JSON");
+        assert_eq!(error["error"]["type"], "payload_too_large");
+        assert!(
+            stub.authorizations().is_empty(),
+            "an oversized body reached upstream"
+        );
+    }
+
+    #[test]
+    fn foreign_host_without_a_key_is_forbidden() {
+        let stub = StubUpstream::start();
+        let proxy = TestProxy::start(&format!("http://{}", stub.addr));
+        for path in ["/v1/models", "/health"] {
+            let request =
+                format!("GET {path} HTTP/1.1\r\nHost: evil.example\r\nConnection: close\r\n\r\n");
+            let (response, _) = http_raw(&proxy.addr, &request);
+            assert_eq!(response.status, 403, "{path}");
+            let error: serde_json::Value =
+                serde_json::from_slice(&response.body).expect("403 body must be JSON");
+            assert_eq!(error["error"]["type"], "forbidden");
+        }
+        assert!(stub.authorizations().is_empty());
+    }
+
+    #[test]
+    fn localhost_host_without_a_key_is_allowed() {
+        let stub = StubUpstream::start();
+        let proxy = TestProxy::start(&format!("http://{}", stub.addr));
+        let request = "GET /v1/models HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+        let (response, _) = http_raw(&proxy.addr, request);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, UPSTREAM_MODELS.as_bytes());
+    }
+
+    #[test]
+    fn foreign_host_with_a_valid_key_is_forwarded() {
+        let stub = StubUpstream::start();
+        let proxy = TestProxy::start_with_key(&format!("http://{}", stub.addr), Some("secret"));
+        let request = "GET /v1/models HTTP/1.1\r\nHost: evil.example\r\n\
+                       Authorization: Bearer secret\r\nConnection: close\r\n\r\n";
+        let (response, _) = http_raw(&proxy.addr, request);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, UPSTREAM_MODELS.as_bytes());
     }
 
     // ---- stub upstream -----------------------------------------------------
