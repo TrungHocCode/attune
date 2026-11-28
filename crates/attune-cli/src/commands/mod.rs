@@ -301,6 +301,9 @@ pub enum Command {
         /// Override the FP32 peak (decimal GFLOPS); skips the HAL estimate
         #[arg(long, value_name = "GFLOPS")]
         gflops: Option<f64>,
+        /// Where the model runs: auto (GPU when one is usable), cpu or gpu
+        #[arg(long, value_enum, default_value = "auto")]
+        device: tune::TuneDevice,
         /// Keep at most this many candidates after pruning (default 64)
         #[arg(long, value_name = "N", default_value_t = 64)]
         max_configs: usize,
@@ -510,6 +513,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             objective,
             bandwidth_gbps,
             gflops,
+            device,
             max_configs,
             save,
             name,
@@ -535,6 +539,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             &objective,
             bandwidth_gbps,
             gflops,
+            device,
             max_configs,
             save.as_deref(),
             name.as_deref(),
@@ -644,6 +649,25 @@ mod tests {
                 assert!(!retune);
             }
             _ => panic!("expected the run subcommand"),
+        }
+    }
+
+    #[test]
+    fn tune_parses_the_device_flag() {
+        let cli = crate::Cli::try_parse_from(["attune", "tune", "--model", "x", "--device", "gpu"])
+            .expect("tune should parse");
+        match cli.command {
+            Command::Tune { device, .. } => {
+                assert_eq!(device, super::tune::TuneDevice::Gpu);
+            }
+            _ => panic!("expected the tune subcommand"),
+        }
+
+        let cli = crate::Cli::try_parse_from(["attune", "tune", "--model", "x"])
+            .expect("tune should parse without --device");
+        match cli.command {
+            Command::Tune { device, .. } => assert_eq!(device, super::tune::TuneDevice::Auto),
+            _ => panic!("expected the tune subcommand"),
         }
     }
 
