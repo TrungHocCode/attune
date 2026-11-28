@@ -1299,14 +1299,15 @@ mod tests {
     fn catalog_id_tune_needs_no_file_and_saves_source() {
         use attune_estimate::model::registry::{parse_catalog, SNAPSHOT};
         let catalog = parse_catalog(SNAPSHOT).expect("snapshot");
-        let model = catalog.find("qwen3-4b").expect("prefix");
+        let model = catalog.find("qwen3-4b-instruct-2507").expect("id");
         let resolution = resolve_catalog_model(model, Quant::Q4_K_M).expect("resolve");
         let file = model.file_for(Quant::Q4_K_M).expect("file");
         assert_eq!(resolution.weight_bytes, Some(file.size));
         assert_eq!(resolution.params, model.params);
+        let expected_path = format!("~/.attune/models/{}/{}", file.repo, file.file);
         assert_eq!(
             resolution.model_path.as_deref(),
-            Some("~/.attune/models/unsloth/Qwen3-4B-Instruct-2507-GGUF/Qwen3-4B-Instruct-2507-Q4_K_M.gguf")
+            Some(expected_path.as_str())
         );
         let source = resolution.source.expect("source");
         assert_eq!(source.sha256, file.sha256);
@@ -1317,8 +1318,13 @@ mod tests {
     fn catalog_model_without_the_quant_lists_what_exists() {
         use attune_estimate::model::registry::{parse_catalog, SNAPSHOT};
         let catalog = parse_catalog(SNAPSHOT).expect("snapshot");
-        let model = catalog.find("qwen3-0.6b").expect("id");
-        let err = resolve_catalog_model(model, Quant::Q4_K_M)
+        let mut model = catalog.find("qwen3-0.6b").expect("id").clone();
+        model.files.retain(|file| file.quant != Quant::Q4_K_M);
+        assert!(
+            model.files.iter().any(|file| file.quant == Quant::Q8_0),
+            "the snapshot must keep a q8_0 file for this test"
+        );
+        let err = resolve_catalog_model(&model, Quant::Q4_K_M)
             .err()
             .expect("no q4_k_m file")
             .to_string();
