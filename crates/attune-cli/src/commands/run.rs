@@ -6,7 +6,7 @@
 //! wires those pieces together.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -45,6 +45,7 @@ pub fn run(
     let path = profiles_dir()
         .map_err(|error| anyhow!("{error}"))?
         .join(format!("{name}.json"));
+    let requested_model = local_gguf_path(model);
 
     let existing = existing_profile(&path);
     let current_cpu = tune::current_hardware_fingerprint();
@@ -61,6 +62,7 @@ pub fn run(
         existing.as_ref(),
         &current_cpu,
         current_gpu.as_deref(),
+        requested_model.as_deref(),
         retune,
     ) {
         tune::run(
@@ -171,11 +173,17 @@ pub fn run(
 /// A saved profile can be reused only when its fingerprint matches this
 /// machine, computed the same way the profile was made: GPU profiles
 /// (`n_gpu_layers > 0`) use the GPU-aware fingerprint, CPU profiles the CPU one.
-/// `retune` always forces a fresh tune.
+///
+/// When the input is a local `.gguf`, the profile's `model.path` must also
+/// resolve to the same file: the name alone is not enough, because
+/// `attune run D:\b\model.gguf` would otherwise reuse the profile tuned for
+/// `C:\a\model.gguf` (same stem, different weights). `retune` always forces a
+/// fresh tune.
 pub fn needs_tune(
     existing: Option<&Profile>,
     current_cpu: &str,
     current_gpu: Option<&str>,
+    requested_model: Option<&Path>,
     retune: bool,
 ) -> bool {
     if retune {
@@ -184,6 +192,11 @@ pub fn needs_tune(
     let Some(profile) = existing else {
         return true;
     };
+    if let Some(requested) = requested_model {
+        if canonical_or_given(Path::new(&profile.model.path)) != canonical_or_given(requested) {
+            return true;
+        }
+    }
     let current = if profile.device() == "gpu" {
         match current_gpu {
             Some(fingerprint) => fingerprint,
@@ -195,22 +208,60 @@ pub fn needs_tune(
     profile.hardware_fingerprint != current
 }
 
+/// Whether `path` names a GGUF file (extension match is case-insensitive).
+fn is_gguf(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+}
+
+/// Canonical absolute path when the file can be resolved, else the path as
+/// given. Two spellings of the same file (`C:\a\x.gguf`, `c:/a/../a/x.gguf`)
+/// compare equal; a path that does not exist still compares by text.
+fn canonical_or_given(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The canonical path of a local `.gguf` input; `None` for catalog names and
+/// other model ids.
+fn local_gguf_path(model: &str) -> Option<PathBuf> {
+    let path = Path::new(model.trim());
+    is_gguf(path).then(|| canonical_or_given(path))
+}
+
+/// 8 lowercase hex characters of the FNV-1a (64-bit) hash of `text`.
+///
+/// `std`'s `DefaultHasher` is explicitly undocumented and may change between
+/// Rust releases, so the profile name gets a hash it controls: the same file
+/// must keep its profile across toolchain upgrades.
+fn path_tag(text: &str) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{:08x}", hash as u32)
+}
+
 /// Profile name for a device: `<id>-<quant>` on the CPU (unchanged, so saved
 /// CPU profiles keep working), `-gpu` for `--device gpu` and `-auto` for
-/// `--device auto`. A `.gguf` source contributes its file stem.
+/// `--device auto`.
+///
+/// A `.gguf` source contributes its file stem plus 8 hex characters of the
+/// hash of its canonical path, so two different `model.gguf` files never share
+/// a profile just because their names match.
 pub fn profile_name(model: &str, quant: &str, device: TuneDevice) -> String {
     let text = model.trim();
     let path = Path::new(text);
-    let is_gguf = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"));
-    let name = if is_gguf {
-        // Split on both separators so a Windows path behaves the same on Linux.
-        let file = text.rsplit(['/', '\\']).next().unwrap_or(text);
-        file.rsplit_once('.')
-            .map_or(file, |(stem, _)| stem)
-            .to_string()
+    let name = if is_gguf(path) {
+        let canonical = canonical_or_given(path);
+        let stem = canonical.file_stem().map_or_else(
+            || text.to_string(),
+            |stem| stem.to_string_lossy().into_owned(),
+        );
+        format!("{stem}-{}", path_tag(&canonical.to_string_lossy()))
     } else {
         format!("{text}-{quant}")
     };
@@ -271,13 +322,45 @@ mod tests {
         let saved_cpu = profile_with(cpu, 0);
         let saved_gpu = profile_with(gpu, 36);
 
-        assert!(!needs_tune(Some(&saved_cpu), cpu, Some(gpu), false));
-        assert!(needs_tune(Some(&saved_cpu), gpu, Some(gpu), false));
-        assert!(!needs_tune(Some(&saved_gpu), cpu, Some(gpu), false));
-        assert!(needs_tune(Some(&saved_gpu), cpu, Some(cpu), false));
-        assert!(needs_tune(Some(&saved_gpu), cpu, None, false));
-        assert!(needs_tune(None, cpu, Some(gpu), false));
-        assert!(needs_tune(Some(&saved_cpu), cpu, Some(gpu), true));
+        assert!(!needs_tune(Some(&saved_cpu), cpu, Some(gpu), None, false));
+        assert!(needs_tune(Some(&saved_cpu), gpu, Some(gpu), None, false));
+        assert!(!needs_tune(Some(&saved_gpu), cpu, Some(gpu), None, false));
+        assert!(needs_tune(Some(&saved_gpu), cpu, Some(cpu), None, false));
+        assert!(needs_tune(Some(&saved_gpu), cpu, None, None, false));
+        assert!(needs_tune(None, cpu, Some(gpu), None, false));
+        assert!(needs_tune(Some(&saved_cpu), cpu, Some(gpu), None, true));
+    }
+
+    /// The 8-hex path tag at the end of a GGUF profile name.
+    fn tag(name: &str) -> &str {
+        name.rsplit('-').next().expect("tag")
+    }
+
+    #[test]
+    fn needs_tune_requires_the_same_gguf_file() {
+        let cpu = "cpu|8|avx2|16000000000";
+        let dir = std::env::temp_dir().join(format!("attune-run-reuse-{}", std::process::id()));
+        let (a_dir, b_dir) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a_dir).expect("mkdir a");
+        std::fs::create_dir_all(&b_dir).expect("mkdir b");
+        let a = a_dir.join("model.gguf");
+        let b = b_dir.join("model.gguf");
+        std::fs::write(&a, b"GGUF").expect("write a");
+        std::fs::write(&b, b"GGUF").expect("write b");
+
+        let mut saved = profile_with(cpu, 0);
+        saved.model.path = a.to_string_lossy().into_owned();
+        // Same file (and same fingerprint): reuse.
+        assert!(!needs_tune(Some(&saved), cpu, None, Some(&a), false));
+        // Same name, different file: retune.
+        assert!(
+            needs_tune(Some(&saved), cpu, None, Some(&b), false),
+            "a profile for {a:?} must not serve {b:?}"
+        );
+        // A catalog name skips the path check.
+        assert!(!needs_tune(Some(&saved), cpu, None, None, false));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -301,18 +384,38 @@ mod tests {
     }
 
     #[test]
-    fn profile_name_is_the_file_stem_with_the_device_suffix_for_gguf_paths() {
+    fn profile_name_keys_gguf_files_by_their_path() {
+        // Not created on disk: the hash covers the path as given.
+        let dir = std::env::temp_dir().join("attune-run-name-test");
+        let a = dir.join("a").join("model.gguf");
+        let b = dir.join("b").join("model.gguf");
+        let a_text = a.to_string_lossy();
+        let b_text = b.to_string_lossy();
+
+        let a_name = profile_name(&a_text, "q4_k_m", TuneDevice::Cpu);
+        let b_name = profile_name(&b_text, "q4_k_m", TuneDevice::Cpu);
+        assert!(a_name.starts_with("model-"), "{a_name}");
+        assert_ne!(a_name, b_name, "same file name, different paths");
+        assert_eq!(tag(&a_name).len(), 8);
+        assert!(tag(&a_name).chars().all(|c| c.is_ascii_hexdigit()));
+        // The same path keeps its name; quant does not matter for GGUF names,
+        // only the device suffix does.
+        assert_eq!(a_name, profile_name(&a_text, "q8_0", TuneDevice::Cpu));
         assert_eq!(
-            profile_name("models/smollm2-Q4.gguf", "q4_k_m", TuneDevice::Cpu),
-            "smollm2-Q4"
+            format!("{a_name}-gpu"),
+            profile_name(&a_text, "q4_k_m", TuneDevice::Gpu)
         );
         assert_eq!(
-            profile_name("C:\\models\\smollm2-Q4_K_M.GGUF", "q8_0", TuneDevice::Gpu),
-            "smollm2-Q4_K_M-gpu"
+            format!("{a_name}-auto"),
+            profile_name(&a_text, "q4_k_m", TuneDevice::Auto)
         );
-        assert_eq!(
-            profile_name("models/smollm2-Q4.gguf", "q4_k_m", TuneDevice::Auto),
-            "smollm2-Q4-auto"
+        // Extension matching stays case-insensitive.
+        let upper = profile_name(
+            &dir.join("smollm2-Q4_K_M.GGUF").to_string_lossy(),
+            "",
+            TuneDevice::Cpu,
         );
+        assert!(upper.starts_with("smollm2-Q4_K_M-"), "{upper}");
+        assert!(!upper.contains('/') && !upper.contains('\\'));
     }
 }

@@ -23,8 +23,8 @@ use attune_bench::e2e::{DEFAULT_GEN_TOKENS, DEFAULT_PROMPT_TOKENS};
 use attune_bench::gpu::GpuE2eResult;
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::{
-    gpu_bandwidth_gbps, kv_bytes_per_token, parse_bench_report, parse_quants, weight_bytes_for,
-    BenchCalibration, HwInputs, Quant, GPU_DECODE_EFFICIENCY,
+    gpu_bandwidth_gbps, kv_bytes_per_token, offload_layers, parse_bench_report, parse_quants,
+    weight_bytes_for, BenchCalibration, HwInputs, Quant, GPU_DECODE_EFFICIENCY,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::{GpuDevice, HardwareInfo};
@@ -426,10 +426,15 @@ fn format_params(params: u64) -> String {
     }
 }
 
-/// GPU-column value: `<n_gpu_layers>/<n_layers>` for GPU rows, `-` for CPU.
+/// GPU-column value: `<n_gpu_layers>/<offloadable layers>` for GPU rows, `-`
+/// for CPU. The denominator is `n_layers + 1` because llama.cpp can offload
+/// the output layer too, so a full offload reads `37/37`, not `37/36`.
 fn gpu_layers_cell(ranked: &RankedConfig, n_layers: Option<u32>) -> String {
     if ranked.device == Device::Gpu {
-        let layers = n_layers.map_or_else(|| "?".to_string(), |layers| layers.to_string());
+        let layers = n_layers.map_or_else(
+            || "?".to_string(),
+            |layers| offload_layers(layers).to_string(),
+        );
         format!("{}/{}", ranked.config.n_gpu_layers, layers)
     } else {
         "-".to_string()
@@ -439,7 +444,10 @@ fn gpu_layers_cell(ranked: &RankedConfig, n_layers: Option<u32>) -> String {
 /// Where the winning config runs, for the quiet `attune run` line.
 fn placement_label(ranked: &RankedConfig, n_layers: Option<u32>) -> String {
     if ranked.device == Device::Gpu {
-        let layers = n_layers.map_or_else(|| "?".to_string(), |layers| layers.to_string());
+        let layers = n_layers.map_or_else(
+            || "?".to_string(),
+            |layers| offload_layers(layers).to_string(),
+        );
         format!("on GPU {}/{}", ranked.config.n_gpu_layers, layers)
     } else {
         "on CPU".to_string()
@@ -1476,8 +1484,17 @@ mod tests {
         let cpu = report_for("m");
         assert_eq!(placement_label(&cpu.configs[0], Some(36)), "on CPU");
         let gpu = gpu_report_for("m");
-        assert_eq!(placement_label(&gpu.configs[0], Some(36)), "on GPU 24/36");
+        // 36 blocks + the output layer = 37 offloadable layers.
+        assert_eq!(placement_label(&gpu.configs[0], Some(36)), "on GPU 24/37");
         assert_eq!(placement_label(&gpu.configs[0], None), "on GPU 24/?");
+    }
+
+    #[test]
+    fn gpu_layers_cell_reads_full_offload_as_n_over_n() {
+        let mut report = gpu_report_for("m");
+        report.configs[0].config.n_gpu_layers = 37;
+        assert_eq!(gpu_layers_cell(&report.configs[0], Some(36)), "37/37");
+        assert_eq!(gpu_layers_cell(&report_for("m").configs[0], Some(36)), "-");
     }
 
     #[test]
@@ -1583,7 +1600,7 @@ mod tests {
             ),
             "{text}"
         );
-        assert!(text.contains("24/36"), "{text}");
+        assert!(text.contains("24/37"), "{text}");
     }
 
     #[test]

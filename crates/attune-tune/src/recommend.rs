@@ -7,8 +7,8 @@ use crate::sweep::{Device, GpuTarget};
 use attune_estimate::model::registry::{CatalogFile, CatalogModel};
 use attune_estimate::{
     default_compute_buffer_bytes, host_resident_bytes, kv_bytes_per_token, kv_filled_tokens,
-    max_gpu_layers, predict_decode_tps_from_bytes, predict_split_decode_tps, HwInputs, Quant,
-    SplitInputs,
+    max_gpu_layers, offload_layers, predict_decode_tps_from_bytes, predict_split_decode_tps,
+    HwInputs, Quant, SplitInputs,
 };
 use serde::Serialize;
 
@@ -107,7 +107,9 @@ pub struct RecommendRow {
     pub device: String,
     /// Layers offloaded to the GPU, when this row uses one.
     pub gpu_layers: Option<u32>,
-    /// The model's layer count, so a split row can be shown as `g/n`.
+    /// The model's offloadable layer count (`n_layers + 1`: the repeating
+    /// blocks plus the output layer llama.cpp can also place on the GPU), so a
+    /// split row can be shown as `g/n` and a full one as `n/n`.
     pub n_layers: Option<u32>,
 }
 
@@ -218,7 +220,7 @@ fn cpu_row(
         star: false,
         device: "cpu".to_string(),
         gpu_layers: None,
-        n_layers: Some(model.arch.n_layer),
+        n_layers: Some(offload_layers(model.arch.n_layer)),
     })
 }
 
@@ -237,6 +239,8 @@ fn gpu_row(
     if n_layers == 0 {
         return None;
     }
+    // llama.cpp also offloads the output layer, so full offload is n_layers + 1.
+    let offloadable = offload_layers(n_layers);
     if !gpu.vram_gbps.is_finite() || gpu.vram_gbps <= 0.0 {
         return None;
     }
@@ -254,7 +258,7 @@ fn gpu_row(
     if gpu_layers == 0 {
         return None;
     }
-    let frac = f64::from(gpu_layers.min(n_layers)) / f64::from(n_layers);
+    let frac = f64::from(gpu_layers.min(offloadable)) / f64::from(offloadable);
     let decode_tps = predict_split_decode_tps(&SplitInputs {
         weight_bytes: file.size as f64,
         n_layers,
@@ -292,13 +296,13 @@ fn gpu_row(
         tier: Tier::of(model.params),
         pick: false,
         star: false,
-        device: if gpu_layers >= n_layers {
+        device: if gpu_layers >= offloadable {
             "gpu".to_string()
         } else {
             "gpu+cpu".to_string()
         },
         gpu_layers: Some(gpu_layers),
-        n_layers: Some(n_layers),
+        n_layers: Some(offloadable),
     })
 }
 
@@ -311,7 +315,7 @@ fn no_vram_row(cpu: &RecommendRow, model: &CatalogModel) -> RecommendRow {
         verdict: Verdict::DoesNotFitVram,
         device: "gpu".to_string(),
         gpu_layers: None,
-        n_layers: Some(model.arch.n_layer),
+        n_layers: Some(offload_layers(model.arch.n_layer)),
         ..cpu.to_owned()
     }
 }
@@ -705,7 +709,7 @@ mod tests {
             &opts_for(Device::Auto, Some(rtx_4050()), 6e9, 1024),
         );
         assert_eq!(gpu[0].device, "gpu", "{:?}", gpu[0]);
-        assert_eq!(gpu[0].gpu_layers, Some(36));
+        assert_eq!(gpu[0].gpu_layers, Some(37));
         assert!(
             gpu[0].decode_tps > 3.0 * cpu[0].decode_tps,
             "GPU {:.1} tok/s must beat CPU {:.1} tok/s by 3x",
@@ -717,7 +721,7 @@ mod tests {
     #[test]
     fn qwen3_8b_at_the_default_context_still_fully_offloads_and_beats_the_cpu_by_3x() {
         // At 4096 tokens the smaller compute buffer and host-resident
-        // embeddings leave room for all 36 layers.
+        // embeddings leave room for all 37 layers (36 blocks + the output).
         let m = qwen3_8b();
         let cpu = recommend(
             std::slice::from_ref(&m),
@@ -730,7 +734,8 @@ mod tests {
             &opts_for(Device::Auto, Some(rtx_4050()), 6e9, 4096),
         );
         assert_eq!(gpu[0].device, "gpu", "{:?}", gpu[0]);
-        assert_eq!(gpu[0].gpu_layers, Some(36));
+        assert_eq!(gpu[0].gpu_layers, Some(37));
+        assert_eq!(gpu[0].n_layers, Some(37), "the output layer counts");
         assert!(
             gpu[0].decode_tps > 3.0 * cpu[0].decode_tps,
             "GPU {:.1} tok/s must beat CPU {:.1} tok/s by 3x",
@@ -750,7 +755,7 @@ mod tests {
             &opts_for(Device::Gpu, Some(rtx_4050()), 6e9, 4096),
         );
         assert_eq!(rows[0].device, "gpu", "{:?}", rows[0]);
-        assert_eq!(rows[0].gpu_layers, Some(36));
+        assert_eq!(rows[0].gpu_layers, Some(37));
         let expected = (5_027_783_488.0 * (1.0 - attune_estimate::GPU_RESIDENT_WEIGHT_FRACTION))
             .round() as u64;
         assert_eq!(rows[0].ram_bytes, expected);
@@ -766,7 +771,8 @@ mod tests {
         );
         assert_eq!(rows[0].device, "gpu+cpu", "{:?}", rows[0]);
         let layers = rows[0].gpu_layers.expect("split offload");
-        assert!((1..48).contains(&layers), "{layers}");
+        assert!((1..49).contains(&layers), "{layers}");
+        assert_eq!(rows[0].n_layers, Some(49), "48 blocks + the output layer");
         assert_eq!(rows[0].verdict, Verdict::Fits);
     }
 
@@ -818,7 +824,7 @@ mod tests {
         );
         let json = serde_json::to_value(&rows[0]).expect("serialize");
         assert_eq!(json["device"], "gpu");
-        assert_eq!(json["gpu_layers"], 36);
-        assert_eq!(json["n_layers"], 36);
+        assert_eq!(json["gpu_layers"], 37);
+        assert_eq!(json["n_layers"], 37);
     }
 }

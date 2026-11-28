@@ -2,7 +2,7 @@
 
 use attune_bench::e2e::E2eResult;
 use attune_estimate::{
-    default_compute_buffer_bytes, kv_elem_bytes, kv_filled_tokens, max_gpu_layers,
+    default_compute_buffer_bytes, kv_elem_bytes, kv_filled_tokens, max_gpu_layers, offload_layers,
     predict_decode_tps_from_bytes, predict_split_decode_tps, weight_bytes_for, BenchCalibration,
     CalibrationReport, HwInputs, Quant, RamFit, SplitInputs, GPU_RESIDENT_WEIGHT_FRACTION,
 };
@@ -276,10 +276,11 @@ pub fn expand_grid(
 /// Thread count does not change decode at full offload, so every distinct
 /// non-thread combination of `cpu_grid` is collapsed to a single config with
 /// `n_threads = physical_cores`. For each combination the largest number of
-/// layers that fit VRAM is computed with [`max_gpu_layers`]; candidates use
-/// `max_fit`, `max_fit - 2` and `max_fit - 4`, keeping only values `>= 1` and
-/// dropping duplicates. Returns empty when the model has no known layer count
-/// or nothing fits.
+/// layers that fit VRAM is computed with [`max_gpu_layers`]; the value can be
+/// `n_layers + 1` because llama.cpp also offloads the output layer. Candidates
+/// use `max_fit`, `max_fit - 2` and `max_fit - 4`, keeping only values `>= 1`
+/// and dropping duplicates. Returns empty when the model has no known layer
+/// count or nothing fits.
 pub fn gpu_configs(
     cpu_grid: &[TuneConfig],
     model: &TuneModel,
@@ -376,7 +377,8 @@ pub fn select_configs(
 /// share (the token-embedding table plus the layers it did not offload, see
 /// [`GPU_RESIDENT_WEIGHT_FRACTION`]) and the un-offloaded KV cache. This
 /// mirrors [`attune_estimate::host_resident_bytes`] so RAM fit and the reported
-/// RAM agree with `recommend`.
+/// RAM agree with `recommend`. The offloaded fraction counts `n_layers + 1`
+/// layers because llama.cpp can also place the output layer on the GPU.
 fn cpu_resident_bytes(model: &TuneModel, config: &TuneConfig, kv_bytes: f64) -> (f64, f64) {
     let weight_bytes = model.weight_bytes_for(config.quant);
     if config.n_gpu_layers == 0 {
@@ -385,7 +387,8 @@ fn cpu_resident_bytes(model: &TuneModel, config: &TuneConfig, kv_bytes: f64) -> 
     let Some(n_layers) = model.n_layers.filter(|&layers| layers > 0) else {
         return (weight_bytes, kv_bytes);
     };
-    let frac = f64::from(config.n_gpu_layers.min(n_layers)) / f64::from(n_layers);
+    let offloadable = offload_layers(n_layers);
+    let frac = f64::from(config.n_gpu_layers.min(offloadable)) / f64::from(offloadable);
     (
         weight_bytes * (1.0 - GPU_RESIDENT_WEIGHT_FRACTION * frac),
         kv_bytes * (1.0 - frac),
@@ -502,7 +505,8 @@ pub fn rank_by_estimate(
                 )));
             }
 
-            let frac = f64::from(config.n_gpu_layers.min(n_layers)) / f64::from(n_layers);
+            let offloadable = offload_layers(n_layers);
+            let frac = f64::from(config.n_gpu_layers.min(offloadable)) / f64::from(offloadable);
             // Decode reads the same filled-KV length as the CPU path, split
             // between VRAM and RAM by the offloaded layer fraction.
             let decode_tps = predict_split_decode_tps(&SplitInputs {
@@ -1334,6 +1338,39 @@ mod tests {
             top.decode_tps > 3.0 * best_cpu,
             "GPU {} tok/s must beat CPU {best_cpu} tok/s by 3x",
             top.decode_tps
+        );
+    }
+
+    #[test]
+    fn gpu_configs_emit_the_output_layer_beyond_the_block_count() {
+        // 36 blocks: full offload is 37, so the candidate grid must include 37
+        // and rank it as a GPU config with only the host-resident embeddings in
+        // RAM (frac 1.0).
+        let model = qwen3_8b();
+        let gpu = rtx_4050();
+        let cpu_grid = vec![TuneConfig::new(Quant::Q4_K_M, 4_096, 8, 512, Quant::Fp16)];
+        let configs = gpu_configs(&cpu_grid, &model, &gpu, 8);
+        let full = configs
+            .iter()
+            .find(|config| config.n_gpu_layers == 37)
+            .expect("37 layers must be offered");
+        let ranked = rank_by_estimate(
+            std::slice::from_ref(full),
+            &model,
+            Some(&gpu),
+            hw33(),
+            16e9,
+            Objective::Throughput,
+            512,
+            128,
+        )
+        .expect("rank");
+        assert_eq!(ranked[0].device, Device::Gpu);
+        let (weight_bytes, kv_bytes) = cpu_resident_bytes(&model, full, 1_000.0);
+        let want = model.weight_bytes_for(full.quant) * (1.0 - GPU_RESIDENT_WEIGHT_FRACTION);
+        assert!(
+            (weight_bytes - want).abs() < 1e-6 && kv_bytes == 0.0,
+            "full offload keeps only the embeddings in RAM, got {weight_bytes}"
         );
     }
 
