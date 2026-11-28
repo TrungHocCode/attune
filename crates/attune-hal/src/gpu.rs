@@ -51,17 +51,20 @@ pub struct GpuInfo {
 /// Detect every GPU we can see. Never fails: an empty `devices` list with
 /// `count == 0` is the safe result when no vendor tool is available.
 pub fn detect() -> GpuInfo {
-    let nvidia = run_nvidia_smi()
-        .map(|text| parse_nvidia_smi(&text))
-        .unwrap_or_default();
-
     #[cfg(target_os = "windows")]
     let devices = {
-        let cim = run_cim().map(|text| parse_cim(&text)).unwrap_or_default();
+        let (nvidia, cim) = std::thread::scope(|scope| {
+            let nvidia = scope.spawn(probe_nvidia);
+            let cim = scope.spawn(probe_cim);
+            (
+                nvidia.join().unwrap_or_default(),
+                cim.join().unwrap_or_default(),
+            )
+        });
         merge_devices(nvidia, cim)
     };
     #[cfg(not(target_os = "windows"))]
-    let devices = nvidia;
+    let devices = probe_nvidia();
 
     let note = if devices.is_empty() {
         "no GPU found (nvidia-smi not available)".to_string()
@@ -74,6 +77,20 @@ pub fn detect() -> GpuInfo {
         note,
         devices,
     }
+}
+
+/// Run the `nvidia-smi` probe and parse it. A missing or failed tool yields no
+/// devices rather than an error.
+fn probe_nvidia() -> Vec<GpuDevice> {
+    run_nvidia_smi()
+        .map(|text| parse_nvidia_smi(&text))
+        .unwrap_or_default()
+}
+
+/// Run the CIM probe and parse it (Windows only), falling back to no devices.
+#[cfg(target_os = "windows")]
+fn probe_cim() -> Vec<GpuDevice> {
+    run_cim().map(|text| parse_cim(&text)).unwrap_or_default()
 }
 
 /// Run `nvidia-smi`, returning its stdout only on a successful exit.
