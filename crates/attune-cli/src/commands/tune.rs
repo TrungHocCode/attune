@@ -555,8 +555,8 @@ pub fn current_hardware_fingerprint() -> String {
 }
 
 /// Same as [`current_hardware_fingerprint`], but appends the GPU name and
-/// rounded VRAM when a GPU profile is being saved.
-fn current_hardware_fingerprint_with_gpu(gpu: Option<(&str, u64)>) -> String {
+/// rounded VRAM when a GPU profile is being saved or compared.
+pub fn current_hardware_fingerprint_with_gpu(gpu: Option<(&str, u64)>) -> String {
     let cpu = attune_hal::cpu::detect();
     let memory = attune_hal::memory::detect();
     let brand = cpu
@@ -590,6 +590,16 @@ fn gpu_layers_cell(ranked: &RankedConfig, n_layers: Option<u32>) -> String {
         format!("{}/{}", ranked.config.n_gpu_layers, layers)
     } else {
         "-".to_string()
+    }
+}
+
+/// Where the winning config runs, for the quiet `attune run` line.
+fn placement_label(ranked: &RankedConfig, n_layers: Option<u32>) -> String {
+    if ranked.device == Device::Gpu {
+        let layers = n_layers.map_or_else(|| "?".to_string(), |layers| layers.to_string());
+        format!("on GPU {}/{}", ranked.config.n_gpu_layers, layers)
+    } else {
+        "on CPU".to_string()
     }
 }
 
@@ -1449,12 +1459,13 @@ pub fn run(
     if quiet {
         if let Some(best) = report.configs.first() {
             println!(
-                "Tuned: {} ctx={} threads={} batch={} kv={} - about {:.1} tok/s, first reply ~{:.1} s",
+                "Tuned: {} ctx={} threads={} batch={} kv={} {} - about {:.1} tok/s, first reply ~{:.1} s",
                 best.config.quant.as_str(),
                 best.config.n_ctx,
                 best.config.n_threads,
                 best.config.n_batch,
                 best.config.cache_kv.as_str(),
+                placement_label(best, model.n_layers),
                 best.decode_tps,
                 best.ttft_ms / 1000.0,
             );
@@ -1610,6 +1621,15 @@ mod tests {
             None,
             vec![ranked],
         )
+    }
+
+    #[test]
+    fn placement_label_names_the_cpu_or_gpu_split() {
+        let cpu = report_for("m");
+        assert_eq!(placement_label(&cpu.configs[0], Some(36)), "on CPU");
+        let gpu = gpu_report_for("m");
+        assert_eq!(placement_label(&gpu.configs[0], Some(36)), "on GPU 24/36");
+        assert_eq!(placement_label(&gpu.configs[0], None), "on GPU 24/?");
     }
 
     #[test]
