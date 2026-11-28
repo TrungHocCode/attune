@@ -41,6 +41,25 @@ fn render_cache(c: &attune_hal::cache::CacheInfo) -> String {
     )
 }
 
+/// Render one GPU row: name, VRAM (total + free) and driver when known.
+fn render_gpu(dev: &attune_hal::GpuDevice) -> String {
+    let mut line = dev.name.clone();
+    match dev.vram_total_bytes {
+        Some(total) => {
+            let free = dev
+                .vram_free_bytes
+                .map(|f| format!(" ({} free)", human_bytes(f)))
+                .unwrap_or_default();
+            line.push_str(&format!(", {} VRAM{free}", human_bytes(total)));
+        }
+        None => line.push_str(" (VRAM unknown)"),
+    }
+    if let Some(driver) = &dev.driver {
+        line.push_str(&format!(", driver {driver}"));
+    }
+    line
+}
+
 fn print_pretty(hw: &HardwareInfo) {
     println!(
         "CPU:        {} ({vendor}, {p}C/{l}T)",
@@ -65,15 +84,13 @@ fn print_pretty(hw: &HardwareInfo) {
         if hw.numa.nodes == 1 { "" } else { "s" },
         hw.numa.note,
     );
-    println!(
-        "GPU:        {} ({})",
-        if hw.gpu.count == 0 {
-            "none detected".to_string()
-        } else {
-            hw.gpu.count.to_string()
-        },
-        hw.gpu.note,
-    );
+    if hw.gpu.devices.is_empty() {
+        println!("GPU:        none detected ({})", hw.gpu.note);
+    } else {
+        for dev in &hw.gpu.devices {
+            println!("GPU:        {}", render_gpu(dev));
+        }
+    }
     println!(
         "RAM:        {:.1} GB total / {:.1} GB available",
         hw.memory.total_gb, hw.memory.available_gb,
