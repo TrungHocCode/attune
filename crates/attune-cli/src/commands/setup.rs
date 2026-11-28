@@ -161,6 +161,7 @@ mod tests {
                 url: "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-cpu-x64.zip".to_string(),
                 size: 24_067_910,
                 sha256: "3".repeat(64),
+                min_driver: None,
             }],
         }
     }

@@ -357,7 +357,7 @@ pub fn guard(new: &Catalog, previous: Option<&Catalog>) -> Result<(), EstimateEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::registry::{CatalogArch, LlamaPin};
+    use crate::model::registry::{parse_catalog, CatalogArch, LlamaPin};
 
     fn config() -> GenConfig {
         GenConfig {
@@ -573,6 +573,34 @@ mod tests {
         // 1 of 4 models left: shrank by 75%.
         assert!(guard(&one, Some(&big)).is_err());
         assert!(guard(&big, Some(&one)).is_ok());
+    }
+
+    #[test]
+    fn llama_pin_variants_and_min_driver_survive_the_round_trip() {
+        let sha = "d".repeat(64);
+        let text = format!(
+            r#"{{
+              "llama_cpp": {{ "tag": "b11804", "assets": [
+                {{ "os": "windows", "arch": "x86_64", "variant": "cuda12",
+                  "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-win-cuda.zip",
+                  "size": 10, "sha256": "{sha}", "min_driver": "551.61" }},
+                {{ "os": "linux", "arch": "x86_64", "variant": "vulkan",
+                  "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-linux-vulkan.tar.gz",
+                  "size": 20, "sha256": "{sha}" }}
+              ] }},
+              "max_params": 1, "quants": ["q4_k_m"],
+              "publishers": ["Qwen"], "base_orgs": ["Qwen"], "per_publisher_limit": 1
+            }}"#
+        );
+        let config: GenConfig = serde_json::from_str(&text).expect("config");
+        let catalog = assemble(&config, Vec::new(), "x");
+        let round_trip = serde_json::to_string(&catalog).expect("serialize");
+        let parsed = parse_catalog(&round_trip).expect("reparse");
+        let assets = &parsed.llama_cpp.assets;
+        assert_eq!(assets[0].variant, "cuda12");
+        assert_eq!(assets[0].min_driver.as_deref(), Some("551.61"));
+        assert_eq!(assets[1].variant, "vulkan");
+        assert_eq!(assets[1].min_driver, None);
     }
 
     #[test]
