@@ -1,6 +1,6 @@
 # Recommend and model downloads — design
 
-Status: approved 2026-11-26 (M6)
+Status: approved 2026-11-26, implemented in v0.6.0 (M6).
 
 ## Intent
 

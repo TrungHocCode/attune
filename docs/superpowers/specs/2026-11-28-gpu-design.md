@@ -1,6 +1,6 @@
 # M7 GPU: use the GPU you already have
 
-Status: proposed 2026-11-28. This builds on the proposal in `docs/gpu-plan.md`, which stays as background. Target release: v0.7.0.
+Status: implemented in v0.7.0 (#131–#141, closed in #143). Deferred: `estimate --device` (the table below lists it; `estimate` is still CPU-only), and VRAM in `/v1/metrics`.
 
 ## Why
 
