@@ -25,7 +25,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use attune_profile::{to_llama_args, Profile};
+use attune_profile::{to_llama_args_with_device, Profile};
 
 use crate::BackendError;
 
@@ -248,13 +248,24 @@ pub fn is_runnable_file(path: &Path) -> bool {
 /// default `numa: "local"` becomes "omit `--numa`", and a bare `-fa` becomes
 /// `--flash-attn on` so its optional-value parser cannot swallow the next flag.
 pub fn server_args(profile: &Profile, host: &str, port: u16) -> Vec<String> {
-    server_args_with_warnings(profile, host, port).args
+    server_args_with_device(profile, host, port, None).args
 }
 
 /// Same as [`server_args`], but also returns the non-fatal mapping warnings
 /// (currently: an affinity value that is neither a hex mask nor a range).
 pub fn server_args_with_warnings(profile: &Profile, host: &str, port: u16) -> ServerArgs {
-    let mut args = to_llama_args(profile);
+    server_args_with_device(profile, host, port, None)
+}
+
+/// Same as [`server_args`], but resolves the GPU device id for a GPU profile
+/// (the id the installed build lists, e.g. `Vulkan1`). CPU profiles ignore it.
+pub fn server_args_with_device(
+    profile: &Profile,
+    host: &str,
+    port: u16,
+    device_id: Option<&str>,
+) -> ServerArgs {
+    let mut args = to_llama_args_with_device(profile, device_id);
     let mut warnings = Vec::new();
 
     // The M4 mapper emits `--numa <policy>` unconditionally, but "local" (the
@@ -1049,6 +1060,20 @@ mod tests {
     fn absent_or_blank_affinity_is_silent() {
         assert_eq!(cpu_affinity_args(None), (Vec::new(), None));
         assert_eq!(cpu_affinity_args(Some("   ")), (Vec::new(), None));
+    }
+
+    #[test]
+    fn server_args_with_device_passes_dev_only_for_gpu_profiles() {
+        let mut profile = profile();
+        profile.load_config.n_gpu_layers = 12;
+        let prepared = server_args_with_device(&profile, "127.0.0.1", 8081, Some("Vulkan1"));
+        assert!(has_pair(&prepared.args, "-dev", "Vulkan1"));
+        assert!(has_pair(&prepared.args, "-ngl", "12"));
+        assert!(has_pair(&prepared.args, "--fit", "off"));
+
+        profile.load_config.n_gpu_layers = 0;
+        let args = server_args_with_device(&profile, "127.0.0.1", 8081, Some("Vulkan1")).args;
+        assert!(!args.iter().any(|arg| arg == "-dev"));
     }
 
     #[test]
