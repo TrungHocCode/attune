@@ -46,6 +46,33 @@ On the reference laptop (RTX 4050 Laptop, 6 GB VRAM, about 190 GB/s, against 33 
 
 ## Design
 
+### Device choice: one flag on every command
+
+The user can always choose where the model runs. Every command that predicts, tunes or runs a model takes the same flag:
+
+```
+--device auto|cpu|gpu        (default: auto)
+```
+
+- **`auto`** uses the GPU when one is detected and a GPU-capable llama.cpp build is installed (or can be installed); otherwise the CPU. It also picks partial offload when the model doesn't fit fully in VRAM.
+- **`cpu`** forces the CPU (`-ngl 0`). It works with any llama.cpp build, so it also runs on machines with a GPU.
+- **`gpu`** requires a GPU. With no GPU, or only a CPU build, it fails with a clear message: what's missing and the command that fixes it, e.g. `attune setup --gpu auto`. It never falls back to CPU silently.
+
+Per command:
+
+| Command | `--device` effect |
+|---|---|
+| `detect` | No flag: always shows CPU, RAM **and** every GPU. |
+| `bench` | `cpu`: today's RAM/FLOPS probes. `gpu`: a GPU e2e run with `--model`, giving VRAM bandwidth (`eta_gpu`). `auto`: CPU probes, plus the GPU run when a GPU and `--model` are present. |
+| `estimate` | Predicts for the chosen device. `auto` shows CPU and GPU side by side when a GPU exists. |
+| `tune` | Sweeps only the chosen device's configs (`cpu` → `-ngl 0`; `gpu` → full or partial offload). `auto` sweeps both and ranks them together. The saved profile records its device. |
+| `recommend` | Fit and speed for the chosen device. `auto` judges each model on the best device for it; the Fit column says `GPU`, `GPU+CPU` or `CPU`. |
+| `run` | Uses or creates the profile for that device: `~/.attune/profiles/<id>-<quant>-<device>.json`. `run qwen3-4b --device cpu` and `run qwen3-4b --device gpu` keep separate tuned profiles. |
+| `serve` | `--device cpu` runs any profile on the CPU (forces `-ngl 0`, with a note that the profile was tuned for the GPU when it was). `--device gpu` needs a GPU profile and a GPU build, and explains how to get them otherwise. Without the flag, it uses the device recorded in the profile. |
+| `setup` | `--gpu auto\|cpu\|vulkan\|cuda` picks which llama.cpp build(s) to install. Installing a GPU build keeps the CPU build, so `--device cpu` always works. |
+
+The JSON output of `estimate`, `tune` and `recommend` gains a `device` field per row. Existing fields stay.
+
 ### Slice 1: detect + measurement spike
 
 - **`attune-hal`:**
@@ -86,6 +113,8 @@ On the reference laptop (RTX 4050 Laptop, 6 GB VRAM, about 190 GB/s, against 33 
 
 ### Slice 4: tune, profile, recommend
 
+- The `--device` flag (see "Device choice") lands here for `estimate`, `tune`, `recommend` and `run`. `serve --device` lands in slice 5.
+
 - **`tune`:**
   - New axes: `n_gpu_layers` ∈ {0, max_fit, L} plus 2 points in between when partial offload is possible, and `--flash-attn` on full offload.
   - KV placement only if slice 1 shows it matters.
@@ -112,6 +141,10 @@ On the reference laptop (RTX 4050 Laptop, 6 GB VRAM, about 190 GB/s, against 33 
 - **Full offload:** calibrated decode estimate within 12% of measured; uncalibrated within 25%.
 - **Partial offload** (14B Q4_K_M): the tuned profile matches or beats llama.cpp's default offload. Numbers are posted either way.
 - No VRAM OOM when serving any profile `tune` exported on that machine.
+- `--device` on the reference laptop:
+  - `--device cpu` and `--device gpu` both work for `estimate`, `tune`, `recommend`, `run` and `serve` on the same model.
+  - `--device gpu` on a machine with no usable GPU (simulated in tests) fails with the fix-it message.
+  - `serve --device cpu` on a GPU profile runs with `-ngl 0`.
 - CPU-only machines: all existing tests pass and results are unchanged. CI has no GPU, so the GPU code paths are unit-tested with recorded `nvidia-smi` outputs.
 
 ## Left to the builder
