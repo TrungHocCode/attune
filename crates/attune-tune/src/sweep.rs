@@ -2,10 +2,12 @@
 
 use attune_bench::e2e::E2eResult;
 use attune_estimate::{
-    kv_elem_bytes, kv_filled_tokens, predict_decode_tps_from_bytes, weight_bytes_for,
-    BenchCalibration, CalibrationReport, HwInputs, Quant, RamFit,
+    default_compute_buffer_bytes, kv_elem_bytes, kv_filled_tokens, max_gpu_layers,
+    predict_decode_tps_from_bytes, predict_split_decode_tps, weight_bytes_for, BenchCalibration,
+    CalibrationReport, HwInputs, Quant, RamFit, SplitInputs,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::str::FromStr;
 
 use crate::{Objective, TuneConfig, TuneError};
 
@@ -24,6 +26,9 @@ pub struct TuneModel {
     pub params: u64,
     pub weight_bytes: Option<u64>,
     pub kv_f16_per_token: f64,
+    /// Number of transformer layers when the architecture is known; `None`
+    /// disables GPU layer planning and split predictions.
+    pub n_layers: Option<u32>,
 }
 
 impl TuneModel {
@@ -33,6 +38,7 @@ impl TuneModel {
             params,
             weight_bytes: None,
             kv_f16_per_token: 0.0,
+            n_layers: None,
         }
     }
 
@@ -44,6 +50,78 @@ impl TuneModel {
     /// KV bytes per token for this config's cache type.
     pub fn kv_per_token(&self, cache_kv: Quant) -> f64 {
         self.kv_f16_per_token * kv_elem_bytes(cache_kv) / 2.0
+    }
+}
+
+/// A GPU the sweep can plan layer offload against.
+///
+/// `vram_gbps` and `prefill_tflops` are already *effective* (the caller has
+/// multiplied by the measured efficiency or applied a bench calibration), so
+/// the pure ranking can use them without detecting anything.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GpuTarget {
+    /// Device name, used in warnings and the report.
+    pub name: String,
+    /// Free VRAM in bytes, before the safety margin.
+    pub vram_free_bytes: u64,
+    /// Effective VRAM bandwidth in decimal GB/s.
+    pub vram_gbps: f64,
+    /// Effective prefill throughput in decimal TFLOP/s.
+    pub prefill_tflops: f64,
+}
+
+/// Which device the sweep should plan for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Device {
+    /// CPU configs plus GPU configs when a GPU is available.
+    #[default]
+    Auto,
+    /// CPU-only configs.
+    Cpu,
+    /// GPU configs only; an error when none can be planned.
+    Gpu,
+}
+
+impl Device {
+    /// Canonical lowercase name (also the JSON value).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Device::Auto => "auto",
+            Device::Cpu => "cpu",
+            Device::Gpu => "gpu",
+        }
+    }
+
+    /// The device a ranked config actually runs on, derived from its
+    /// `n_gpu_layers`.
+    pub fn of_config(config: &TuneConfig) -> Self {
+        if config.n_gpu_layers > 0 {
+            Device::Gpu
+        } else {
+            Device::Cpu
+        }
+    }
+}
+
+impl std::fmt::Display for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Device {
+    type Err = TuneError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        match input.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "cpu" => Ok(Self::Cpu),
+            "gpu" => Ok(Self::Gpu),
+            other => Err(TuneError::InvalidConfig(format!(
+                "invalid device: {other} (expected auto, cpu or gpu)"
+            ))),
+        }
     }
 }
 
@@ -97,6 +175,9 @@ impl std::fmt::Display for PruneReason {
 pub struct RankedConfig {
     /// The swept config.
     pub config: TuneConfig,
+    /// Device this config runs on, derived from `config.n_gpu_layers`.
+    #[serde(default)]
+    pub device: Device,
     /// Predicted decode throughput in tokens/second (weights-only in slice 1).
     #[serde(default)]
     pub decode_tps: f64,
@@ -190,6 +271,121 @@ pub fn expand_grid(
     configs
 }
 
+/// Turn CPU grid points into GPU layer-offload candidates.
+///
+/// Thread count does not change decode at full offload, so every distinct
+/// non-thread combination of `cpu_grid` is collapsed to a single config with
+/// `n_threads = physical_cores`. For each combination the largest number of
+/// layers that fit VRAM is computed with [`max_gpu_layers`]; candidates use
+/// `max_fit`, `max_fit - 2` and `max_fit - 4`, keeping only values `>= 1` and
+/// dropping duplicates. Returns empty when the model has no known layer count
+/// or nothing fits.
+pub fn gpu_configs(
+    cpu_grid: &[TuneConfig],
+    model: &TuneModel,
+    gpu: &GpuTarget,
+    physical_cores: u32,
+) -> Vec<TuneConfig> {
+    let Some(n_layers) = model.n_layers.filter(|&layers| layers > 0) else {
+        return Vec::new();
+    };
+    let threads = physical_cores.max(1);
+    let mut seen: Vec<TuneConfig> = Vec::new();
+    let mut configs = Vec::new();
+
+    for base in cpu_grid {
+        let mut normalized = base.clone();
+        normalized.n_threads = threads;
+        normalized.n_gpu_layers = 0;
+        if seen.contains(&normalized) {
+            continue;
+        }
+        seen.push(normalized.clone());
+
+        let max_fit = max_gpu_layers(
+            model.weight_bytes_for(base.quant),
+            n_layers,
+            model.kv_per_token(base.cache_kv) * f64::from(base.n_ctx),
+            default_compute_buffer_bytes(base.n_ctx),
+            gpu.vram_free_bytes,
+        );
+
+        let mut emitted: Vec<u32> = Vec::new();
+        for step in [0, 2, 4] {
+            let Some(layers) = max_fit.checked_sub(step).filter(|&layers| layers >= 1) else {
+                continue;
+            };
+            if emitted.contains(&layers) {
+                continue;
+            }
+            emitted.push(layers);
+            let mut config = normalized.clone();
+            config.n_gpu_layers = layers;
+            configs.push(config);
+        }
+    }
+
+    configs
+}
+
+/// Pick the candidate set for the requested [`Device`].
+///
+/// `Cpu` returns the CPU grid unchanged; `Gpu` returns only fitted GPU configs
+/// and fails with [`TuneError::NoGpu`] and an actionable reason when it cannot;
+/// `Auto` concatenates the two, falling back to CPU-only when no GPU was
+/// supplied or the model cannot be planned on one.
+pub fn select_configs(
+    device: Device,
+    cpu_grid: Vec<TuneConfig>,
+    model: &TuneModel,
+    gpu: Option<&GpuTarget>,
+    physical_cores: u32,
+) -> Result<Vec<TuneConfig>, TuneError> {
+    match device {
+        Device::Cpu => Ok(cpu_grid),
+        Device::Gpu => {
+            let gpu = gpu.ok_or_else(|| TuneError::NoGpu("no GPU detected".to_string()))?;
+            if gpu.vram_free_bytes == 0 {
+                return Err(TuneError::NoGpu("GPU VRAM unknown".to_string()));
+            }
+            if model.n_layers.is_none_or(|layers| layers == 0) {
+                return Err(TuneError::NoGpu("model layer count unknown".to_string()));
+            }
+            let configs = gpu_configs(&cpu_grid, model, gpu, physical_cores);
+            if configs.is_empty() {
+                return Err(TuneError::NoGpu(
+                    "model does not fit in VRAM even with 1 layer".to_string(),
+                ));
+            }
+            Ok(configs)
+        }
+        Device::Auto => {
+            let mut configs = cpu_grid;
+            let gpu_list = gpu
+                .map(|gpu| gpu_configs(&configs, model, gpu, physical_cores))
+                .unwrap_or_default();
+            configs.extend(gpu_list);
+            Ok(configs)
+        }
+    }
+}
+
+/// Split the full-window footprint into the part that stays in system RAM.
+///
+/// A CPU config keeps everything; a GPU config only keeps the layers it did not
+/// offload, so RAM fit must count `weights × (1 - f)` and `kv × (1 - f)`.
+fn cpu_resident_bytes(model: &TuneModel, config: &TuneConfig, kv_bytes: f64) -> (f64, f64) {
+    let weight_bytes = model.weight_bytes_for(config.quant);
+    if config.n_gpu_layers == 0 {
+        return (weight_bytes, kv_bytes);
+    }
+    let Some(n_layers) = model.n_layers.filter(|&layers| layers > 0) else {
+        return (weight_bytes, kv_bytes);
+    };
+    let frac = f64::from(config.n_gpu_layers.min(n_layers)) / f64::from(n_layers);
+    (weight_bytes * (1.0 - frac), kv_bytes * (1.0 - frac))
+}
+
 /// Drop configs that cannot run, then enforce the candidate cap.
 ///
 /// Checks run in a fixed order so the same grid always reports the same reason:
@@ -213,10 +409,11 @@ pub fn prune(
     let mut pruned = Vec::new();
 
     for config in configs {
-        // Capacity: weights plus the KV cache for the full window.
+        // Capacity: weights plus the KV cache for the full window. GPU configs
+        // only keep the CPU-resident share in RAM; the rest lives in VRAM.
         let kv_bytes = model.kv_per_token(config.cache_kv) * f64::from(config.n_ctx);
-        let fits = RamFit::new(model.weight_bytes_for(config.quant), kv_bytes, avail_bytes)
-            .is_none_or(|fit| fit.fits);
+        let (weight_bytes, kv_bytes) = cpu_resident_bytes(model, config, kv_bytes);
+        let fits = RamFit::new(weight_bytes, kv_bytes, avail_bytes).is_none_or(|fit| fit.fits);
         if !fits {
             pruned.push((config.clone(), PruneReason::Oom));
             continue;
@@ -262,9 +459,11 @@ pub fn prune(
 /// The `Result` exists because the roofline math rejects invalid inputs
 /// (zero params, bad bandwidth/FLOPS); swallowing those would silently rank
 /// nonsense.
+#[allow(clippy::too_many_arguments)]
 pub fn rank_by_estimate(
     configs: &[TuneConfig],
     model: &TuneModel,
+    gpu: Option<&GpuTarget>,
     hw: HwInputs,
     avail_bytes: f64,
     objective: Objective,
@@ -281,29 +480,70 @@ pub fn rank_by_estimate(
 
         let weight_bytes = model.weight_bytes_for(config.quant);
         let kv_per_token = model.kv_per_token(config.cache_kv);
-        // Decode reads the expected filled KV; RAM fit below uses the full window.
-        let decode_tps = predict_decode_tps_from_bytes(
-            weight_bytes,
-            hw.bw_gbps,
-            kv_per_token,
-            kv_filled_tokens(prompt_tokens, gen_tokens, config.n_ctx),
-        )?;
-        let ttft_ms = hw.predict_prefill_ms(
-            model.params,
-            prompt_tokens.min(u64::from(config.n_ctx)),
-            config.quant,
-        )?;
-        let fit = RamFit::new(
-            weight_bytes,
-            kv_per_token * f64::from(config.n_ctx),
-            avail_bytes,
-        );
+        let (decode_tps, ttft_ms) = if config.n_gpu_layers > 0 {
+            let Some(gpu) = gpu else {
+                return Err(TuneError::NoGpu(
+                    "GPU config ranking requires a GPU target".to_string(),
+                ));
+            };
+            let Some(n_layers) = model.n_layers.filter(|&layers| layers > 0) else {
+                return Err(TuneError::NoGpu("model layer count unknown".to_string()));
+            };
+            if !gpu.prefill_tflops.is_finite() || gpu.prefill_tflops <= 0.0 {
+                return Err(TuneError::NoGpu(format!(
+                    "GPU `{}` has no usable prefill throughput",
+                    gpu.name
+                )));
+            }
+
+            let frac = f64::from(config.n_gpu_layers.min(n_layers)) / f64::from(n_layers);
+            // Decode reads the same filled-KV length as the CPU path, split
+            // between VRAM and RAM by the offloaded layer fraction.
+            let decode_tps = predict_split_decode_tps(&SplitInputs {
+                weight_bytes,
+                n_layers,
+                gpu_layers: config.n_gpu_layers,
+                kv_bytes: kv_per_token
+                    * f64::from(kv_filled_tokens(prompt_tokens, gen_tokens, config.n_ctx)),
+                vram_gbps: gpu.vram_gbps,
+                ram_gbps: hw.bw_gbps,
+            })?;
+
+            // Prefill: GPU layers compute at `prefill_tflops`; the CPU-resident
+            // weights stream over PCIe at ~12 GB/s once per prompt batch
+            // (measured assumption from the M7 spike).
+            let cpu_bytes = weight_bytes * (1.0 - frac);
+            let prefill_secs = 2.0 * model.params as f64 * prompt_tokens as f64
+                / (gpu.prefill_tflops * 1e12)
+                + cpu_bytes / 12e9 * (prompt_tokens as f64 / f64::from(config.n_batch)).ceil();
+            (decode_tps, prefill_secs * 1000.0)
+        } else {
+            // Decode reads the expected filled KV; RAM fit below uses the full window.
+            let decode_tps = predict_decode_tps_from_bytes(
+                weight_bytes,
+                hw.bw_gbps,
+                kv_per_token,
+                kv_filled_tokens(prompt_tokens, gen_tokens, config.n_ctx),
+            )?;
+            let ttft_ms = hw.predict_prefill_ms(
+                model.params,
+                prompt_tokens.min(u64::from(config.n_ctx)),
+                config.quant,
+            )?;
+            (decode_tps, ttft_ms)
+        };
+
+        // RAM fit counts only the CPU-resident share of weights + KV.
+        let kv_full = kv_per_token * f64::from(config.n_ctx);
+        let (cpu_weight_bytes, cpu_kv_bytes) = cpu_resident_bytes(model, config, kv_full);
+        let fit = RamFit::new(cpu_weight_bytes, cpu_kv_bytes, avail_bytes);
         let fits = fit.is_none_or(|fit| fit.fits);
         let ram_ratio = fit.map_or(0.0, |fit| fit.peak_bytes / fit.avail_bytes);
         let score = objective.score(decode_tps, ttft_ms, fits, ram_ratio);
 
         ranked.push(RankedConfig {
             config: config.clone(),
+            device: Device::of_config(config),
             decode_tps,
             ttft_ms,
             fits,
@@ -416,6 +656,7 @@ mod tests {
         rank_by_estimate(
             configs,
             &TuneModel::nominal(params),
+            None,
             hw,
             avail,
             objective,
@@ -510,8 +751,17 @@ mod tests {
         }
 
         // Prompt larger than the smaller window: clamps to n_ctx there only.
-        let ranked = rank_by_estimate(&configs, &model, hw(), 16e9, Objective::Latency, 3_000, 128)
-            .expect("rank");
+        let ranked = rank_by_estimate(
+            &configs,
+            &model,
+            None,
+            hw(),
+            16e9,
+            Objective::Latency,
+            3_000,
+            128,
+        )
+        .expect("rank");
         for (n_ctx, tokens) in [(4_096_u32, 3_000_u64), (2_048, 2_048)] {
             let want = hw()
                 .predict_prefill_ms(params, tokens, Quant::Q4_K_M)
@@ -535,6 +785,7 @@ mod tests {
         let ranked = rank_by_estimate(
             &configs,
             &TuneModel::nominal(135_000_000),
+            None,
             hw(),
             16e9,
             Objective::Latency,
@@ -893,6 +1144,7 @@ mod tests {
             params: 135_000_000,
             weight_bytes: Some(103_700_000),
             kv_f16_per_token: 100_000.0,
+            n_layers: None,
         }
     }
 
@@ -906,6 +1158,7 @@ mod tests {
         let ranked = rank_by_estimate(
             &configs,
             &kv_model(),
+            None,
             hw(),
             16e9,
             Objective::Throughput,
@@ -948,6 +1201,7 @@ mod tests {
         let ranked = rank_by_estimate(
             &grid,
             &TuneModel::nominal(4_000_000_000),
+            None,
             hw(),
             16e9,
             Objective::Throughput,
@@ -967,6 +1221,7 @@ mod tests {
         let ranked = rank_by_estimate(
             &grid,
             &TuneModel::nominal(4_000_000_000),
+            None,
             hw(),
             16e9,
             Objective::Throughput,
@@ -981,6 +1236,7 @@ mod tests {
         let ranked = rank_by_estimate(
             &grid,
             &kv_model(),
+            None,
             hw(),
             250e6,
             Objective::Throughput,
@@ -991,5 +1247,213 @@ mod tests {
         assert!(ranked[0].fits);
         assert_eq!(ranked[0].config.cache_kv, Quant::Q8_0);
         assert_eq!(ranked[0].config.n_batch, 512);
+    }
+
+    fn rtx_4050() -> GpuTarget {
+        GpuTarget {
+            name: "RTX 4050 Laptop".to_string(),
+            vram_free_bytes: 5_921 * 1024 * 1024,
+            vram_gbps: 192.0 * attune_estimate::GPU_DECODE_EFFICIENCY,
+            prefill_tflops: 15.0,
+        }
+    }
+
+    fn hw33() -> HwInputs {
+        HwInputs {
+            bw_gbps: 33.0,
+            flops_gflops: 50.0,
+            int8_gops: None,
+        }
+    }
+
+    fn qwen3_8b() -> TuneModel {
+        TuneModel {
+            params: 8_000_000_000,
+            weight_bytes: Some(5_027_783_488),
+            // 36 layers × 8 KV heads × 128 dim × 2 (K+V) × 2 bytes.
+            kv_f16_per_token: 147_456.0,
+            n_layers: Some(36),
+        }
+    }
+
+    #[test]
+    fn auto_with_gpu_ranks_a_split_config_above_cpu_by_3x() {
+        let model = qwen3_8b();
+        let gpu = rtx_4050();
+        let cpu_grid = expand_grid(
+            &[Quant::Q4_K_M],
+            &[4_096],
+            &[4, 8],
+            &[512, 128],
+            &[Quant::Fp16],
+        );
+        let configs =
+            select_configs(Device::Auto, cpu_grid, &model, Some(&gpu), 8).expect("select configs");
+        assert!(
+            configs.iter().any(|config| config.n_gpu_layers > 0),
+            "auto must add GPU configs"
+        );
+
+        let ranked = rank_by_estimate(
+            &configs,
+            &model,
+            Some(&gpu),
+            hw33(),
+            16e9,
+            Objective::Throughput,
+            512,
+            128,
+        )
+        .expect("rank");
+
+        let top = &ranked[0];
+        assert_eq!(top.device, Device::Gpu);
+        let expected = max_gpu_layers(
+            model.weight_bytes_for(top.config.quant),
+            36,
+            model.kv_per_token(top.config.cache_kv) * f64::from(top.config.n_ctx),
+            default_compute_buffer_bytes(top.config.n_ctx),
+            gpu.vram_free_bytes,
+        );
+        assert_eq!(top.config.n_gpu_layers, expected);
+        assert!(top.config.n_gpu_layers >= 1);
+        assert_eq!(top.config.n_threads, 8, "GPU configs keep one thread value");
+
+        let best_cpu = ranked
+            .iter()
+            .filter(|entry| entry.device == Device::Cpu)
+            .map(|entry| entry.decode_tps)
+            .fold(f64::MIN, f64::max);
+        assert!(
+            top.decode_tps > 3.0 * best_cpu,
+            "GPU {} tok/s must beat CPU {best_cpu} tok/s by 3x",
+            top.decode_tps
+        );
+    }
+
+    #[test]
+    fn gpu_configs_respect_the_vram_fit_for_a_14b() {
+        let model = TuneModel {
+            params: 14_000_000_000,
+            weight_bytes: Some(8_988_110_976),
+            // 48 layers × 8 KV heads × 128 dim × 2 (K+V) × 2 bytes.
+            kv_f16_per_token: 196_608.0,
+            n_layers: Some(48),
+        };
+        let gpu = rtx_4050();
+        let (cpu_grid, _) = crate::expand_full_grid_with_quants(8, &[Quant::Q4_K_M]);
+        let configs = gpu_configs(&cpu_grid, &model, &gpu, 8);
+        assert!(!configs.is_empty(), "14B must partially fit the GPU");
+
+        for config in &configs {
+            let max = max_gpu_layers(
+                model.weight_bytes_for(config.quant),
+                48,
+                model.kv_per_token(config.cache_kv) * f64::from(config.n_ctx),
+                default_compute_buffer_bytes(config.n_ctx),
+                gpu.vram_free_bytes,
+            );
+            assert!(
+                config.n_gpu_layers <= max,
+                "{} layers exceed the {max} that fit at ctx {}",
+                config.n_gpu_layers,
+                config.n_ctx
+            );
+            assert!(config.n_gpu_layers >= 1);
+        }
+    }
+
+    #[test]
+    fn select_cpu_returns_the_grid_and_gpu_requires_a_usable_target() {
+        let model = qwen3_8b();
+        let gpu = rtx_4050();
+        let grid = vec![TuneConfig::new(Quant::Q4_K_M, 4_096, 4, 512, Quant::Fp16)];
+
+        assert_eq!(
+            select_configs(Device::Cpu, grid.clone(), &model, Some(&gpu), 8).expect("cpu"),
+            grid
+        );
+
+        let err = select_configs(Device::Gpu, grid.clone(), &model, None, 8)
+            .expect_err("gpu without a target must fail");
+        assert!(matches!(err, TuneError::NoGpu(_)), "got {err:?}");
+        assert!(err.to_string().contains("no GPU detected"), "{err}");
+
+        let err = select_configs(
+            Device::Gpu,
+            grid.clone(),
+            &TuneModel::nominal(8_000_000_000),
+            Some(&gpu),
+            8,
+        )
+        .expect_err("unknown layer count must fail");
+        assert!(matches!(err, TuneError::NoGpu(_)), "got {err:?}");
+        assert!(err.to_string().contains("layer count unknown"), "{err}");
+
+        let mut blind = gpu.clone();
+        blind.vram_free_bytes = 0;
+        let err = select_configs(Device::Gpu, grid.clone(), &model, Some(&blind), 8)
+            .expect_err("unknown VRAM must fail");
+        assert!(err.to_string().contains("VRAM unknown"), "{err}");
+
+        let huge = TuneModel {
+            weight_bytes: Some(200_000_000_000),
+            ..model
+        };
+        let err = select_configs(Device::Gpu, grid, &huge, Some(&gpu), 8)
+            .expect_err("a model larger than VRAM must fail");
+        assert!(err.to_string().contains("does not fit"), "{err}");
+    }
+
+    #[test]
+    fn device_parses_displays_and_serializes() {
+        for (input, expected) in [
+            ("auto", Device::Auto),
+            ("CPU", Device::Cpu),
+            (" gpu ", Device::Gpu),
+        ] {
+            assert_eq!(input.parse::<Device>().expect("device"), expected);
+        }
+        assert_eq!(Device::Gpu.to_string(), "gpu");
+        assert_eq!(
+            serde_json::to_string(&Device::Cpu).expect("serialize"),
+            "\"cpu\""
+        );
+        assert!("tpu".parse::<Device>().is_err());
+    }
+
+    #[test]
+    fn ranking_a_gpu_config_without_a_target_is_an_error() {
+        let config = TuneConfig {
+            n_gpu_layers: 4,
+            ..TuneConfig::new(Quant::Q4_K_M, 4_096, 4, 512, Quant::Fp16)
+        };
+        let err = rank_by_estimate(
+            &[config],
+            &qwen3_8b(),
+            None,
+            hw33(),
+            16e9,
+            Objective::Throughput,
+            512,
+            128,
+        )
+        .expect_err("GPU config requires a GPU target");
+        assert!(matches!(err, TuneError::NoGpu(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn prune_counts_only_cpu_resident_bytes_for_gpu_configs() {
+        let model = qwen3_8b();
+        let cpu = TuneConfig::new(Quant::Q4_K_M, 4_096, 8, 512, Quant::Fp16);
+        let gpu = TuneConfig {
+            n_gpu_layers: 18,
+            ..cpu.clone()
+        };
+        // Full footprint is ~5.6 GB; half offloaded is ~2.8 GB.
+        let (kept, pruned) = prune(&[cpu, gpu.clone()], &model, 3.5e9, 512, 128, 8, 64);
+        assert_eq!(kept, vec![gpu]);
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].1, PruneReason::Oom);
     }
 }

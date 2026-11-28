@@ -1011,6 +1011,7 @@ pub fn run(
         params: resolution.params,
         weight_bytes: resolution.weight_bytes,
         kv_f16_per_token: resolution.arch.as_ref().map_or(0.0, kv_bytes_per_token),
+        n_layers: resolution.arch.as_ref().map(|arch| arch.n_layer),
     };
     let (grid, cap_from_expand) = expand_full_grid_with_quants(physical_cores, &quants);
     let (mut kept, mut pruned) = prune(
@@ -1059,6 +1060,7 @@ pub fn run(
     let mut ranked = rank_by_estimate(
         &kept,
         &model,
+        None,
         hw,
         effective_avail.unwrap_or(0.0),
         objective,
@@ -1213,11 +1215,13 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use attune_tune::Device;
 
     fn report_for(label: &str) -> TuneReport {
         let config = TuneConfig::new(Quant::Q4_K_M, 2048, 4, 512, Quant::Fp16);
         let ranked = RankedConfig {
             config,
+            device: Device::Cpu,
             decode_tps: 100.0,
             ttft_ms: 50.0,
             fits: true,
@@ -1340,6 +1344,7 @@ mod tests {
         let configs = (0..n)
             .map(|index| RankedConfig {
                 config: TuneConfig::new(Quant::Q4_K_M, 2048 + index as u32, 4, 512, Quant::Fp16),
+                device: Device::Cpu,
                 decode_tps: 100.0 - index as f64,
                 ttft_ms: 50.0 + index as f64,
                 fits: true,

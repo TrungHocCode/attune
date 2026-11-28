@@ -310,12 +310,14 @@ fn config_label(config: &TuneConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Device;
     use attune_estimate::Quant;
     use std::path::PathBuf;
 
     fn ranked(config: TuneConfig, decode_tps: f64, ttft_ms: f64, score: f64) -> RankedConfig {
         RankedConfig {
             config,
+            device: Device::Cpu,
             decode_tps,
             ttft_ms,
             fits: true,
