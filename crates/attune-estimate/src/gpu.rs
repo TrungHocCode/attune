@@ -30,6 +30,13 @@ pub const GPU_DECODE_EFFICIENCY: f64 = 0.85;
 /// of the 14B left ~280 MB free and misbehaved; ~512 MiB is the safe margin.
 pub const VRAM_SAFETY_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
 
+/// Share of the GGUF weights that actually lands in VRAM when a layer is
+/// offloaded. llama.cpp keeps the token-embedding table in host memory, so
+/// about 8% of the file (vocab × hidden) never reaches the GPU: measured ~8%
+/// for Qwen3 4B/8B and Qwen2.5 14B in the M7 spike. The remainder (weights and
+/// KV) scales with the offloaded layer fraction.
+pub const GPU_RESIDENT_WEIGHT_FRACTION: f64 = 0.92;
+
 /// Theoretical VRAM bandwidth in GB/s for known GPUs.
 ///
 /// Matched case-insensitively by substring, longest entry first so the laptop
@@ -158,8 +165,9 @@ fn split_fraction(gpu_layers: u32, n_layers: u32) -> f64 {
     gpu_layers.min(n_layers) as f64 / n_layers as f64
 }
 
-/// VRAM needed to hold `gpu_layers` of the model: the offloaded share of the
-/// weights and the KV cache plus the fixed compute buffer.
+/// VRAM needed to hold `gpu_layers` of the model: the GPU-resident share of
+/// the weights (see [`GPU_RESIDENT_WEIGHT_FRACTION`]), the offloaded share of
+/// the KV cache, plus the fixed compute buffer.
 pub fn vram_needed_bytes(
     weight_bytes: f64,
     n_layers: u32,
@@ -168,17 +176,31 @@ pub fn vram_needed_bytes(
     compute_buffer_bytes: f64,
 ) -> f64 {
     let frac = split_fraction(gpu_layers, n_layers);
-    (weight_bytes + kv_total_bytes) * frac + compute_buffer_bytes
+    (weight_bytes * GPU_RESIDENT_WEIGHT_FRACTION + kv_total_bytes) * frac + compute_buffer_bytes
+}
+
+/// Host (system-RAM) bytes for a GPU config: the weights that stay on the host
+/// (the embedding table plus the layers left on the CPU) and the CPU-resident
+/// share of the KV cache. This is the RAM twin of [`vram_needed_bytes`] and
+/// must stay in sync with it; the CPU path adds no extra fixed overhead.
+pub fn host_resident_bytes(
+    weight_bytes: f64,
+    n_layers: u32,
+    gpu_layers: u32,
+    kv_total_bytes: f64,
+) -> f64 {
+    let frac = split_fraction(gpu_layers, n_layers);
+    weight_bytes * (1.0 - GPU_RESIDENT_WEIGHT_FRACTION * frac) + kv_total_bytes * (1.0 - frac)
 }
 
 /// Estimated llama.cpp compute buffer for a context of `n_ctx` tokens:
-/// 300 MiB base plus 0.1 MiB per context token.
+/// 150 MiB base plus 0.05 MiB per context token.
 ///
-/// Measured in the GPU spike as ~0.6–0.8 GB of VRAM used beyond the weights
-/// and KV cache at a 4096-token context.
+/// Measured in the GPU spike; the earlier 300 MiB + 0.1 MiB/token estimate was
+/// about twice the real usage and needlessly kept layers on the CPU.
 pub fn default_compute_buffer_bytes(n_ctx: u32) -> f64 {
     const MIB: f64 = 1024.0 * 1024.0;
-    300.0 * MIB + 0.1 * MIB * n_ctx as f64
+    150.0 * MIB + 0.05 * MIB * n_ctx as f64
 }
 
 /// Largest number of GPU layers (`0..=n_layers`) whose VRAM footprint fits in
@@ -200,7 +222,7 @@ pub fn max_gpu_layers(
     if !budget.is_finite() || budget <= 0.0 {
         return 0;
     }
-    let total_offload = weight_bytes + kv_total_bytes;
+    let total_offload = weight_bytes * GPU_RESIDENT_WEIGHT_FRACTION + kv_total_bytes;
     if !total_offload.is_finite() || total_offload <= 0.0 {
         return 0;
     }
@@ -387,15 +409,31 @@ mod tests {
     #[test]
     fn compute_buffer_scales_with_context() {
         let at_4096 = default_compute_buffer_bytes(4096);
-        assert!((at_4096 - (300.0 + 0.1 * 4096.0) * 1024.0 * 1024.0).abs() < 1e-6);
+        assert!((at_4096 - (150.0 + 0.05 * 4096.0) * 1024.0 * 1024.0).abs() < 1e-6);
         assert!(default_compute_buffer_bytes(8192) > at_4096);
     }
 
     #[test]
     fn vram_needed_scales_weights_and_kv_with_fraction() {
         let needed = vram_needed_bytes(6_000.0, 48, 24, 1_000.0, 500.0);
-        // (6000 + 1000) * 0.5 + 500 = 4000
-        assert!((needed - 4_000.0).abs() < 1e-9, "got {needed}");
+        // (6000 * 0.92 + 1000) * 0.5 + 500 = 3760
+        assert!((needed - 3_760.0).abs() < 1e-9, "got {needed}");
+    }
+
+    #[test]
+    fn host_resident_keeps_embeddings_and_cpu_layers() {
+        // Full offload: only the ~8% host-resident weight share remains.
+        let host = host_resident_bytes(6_000.0, 48, 48, 1_000.0);
+        assert!((host - 6000.0 * (1.0 - GPU_RESIDENT_WEIGHT_FRACTION)).abs() < 1e-9);
+        // No offload: the whole model lives in RAM, like the CPU path.
+        let all = host_resident_bytes(6_000.0, 48, 0, 1_000.0);
+        assert!((all - 7_000.0).abs() < 1e-9, "got {all}");
+        // Half: the CPU layers plus the embedding share, and half the KV.
+        let half = host_resident_bytes(6_000.0, 48, 24, 1_000.0);
+        assert!(
+            (half - (6000.0 * (1.0 - 0.46) + 500.0)).abs() < 1e-9,
+            "got {half}"
+        );
     }
 
     #[test]
@@ -409,8 +447,38 @@ mod tests {
     }
 
     #[test]
+    fn max_layers_8b_fits_all_with_compute_buffer() {
+        // At ctx 4096 the full 36 layers fit even after the compute buffer.
+        let kv = 36.0 * 8.0 * 128.0 * 2.0 * 2.0 * 4096.0;
+        let g = max_gpu_layers(
+            5_027_783_488.0,
+            36,
+            kv,
+            default_compute_buffer_bytes(4096),
+            5_921 * 1024 * 1024,
+        );
+        assert_eq!(g, 36);
+    }
+
+    #[test]
+    fn max_layers_4b_fits_all() {
+        // Qwen3 4B: weights + KV are far below the 5.4 GiB budget, so every
+        // layer is offloaded.
+        let kv = 36.0 * 8.0 * 128.0 * 2.0 * 2.0 * 4096.0;
+        let g = max_gpu_layers(
+            2_497_281_120.0,
+            36,
+            kv,
+            default_compute_buffer_bytes(4096),
+            5_921 * 1024 * 1024,
+        );
+        assert_eq!(g, 36);
+    }
+
+    #[test]
     fn max_layers_14b_lands_in_spike_range() {
         // Qwen2.5-14B at ctx 4096: 48 × 8 × 128 × 2 × 2 × 4096 = 805 MB KV.
+        // Measured safe: 28 layers used 5.5 GB; 30 layers left only ~280 MB.
         let kv = 48.0 * 8.0 * 128.0 * 2.0 * 2.0 * 4096.0;
         assert_eq!(kv, 805_306_368.0);
         let g = max_gpu_layers(
@@ -420,7 +488,7 @@ mod tests {
             default_compute_buffer_bytes(4096),
             5_921 * 1024 * 1024,
         );
-        assert!((24..=29).contains(&g), "got {g}, want 24..=29");
+        assert!((27..=28).contains(&g), "got {g}, want 27..=28");
     }
 
     #[test]

@@ -6,8 +6,9 @@
 use crate::sweep::{Device, GpuTarget};
 use attune_estimate::model::registry::{CatalogFile, CatalogModel};
 use attune_estimate::{
-    default_compute_buffer_bytes, kv_bytes_per_token, kv_filled_tokens, max_gpu_layers,
-    predict_decode_tps_from_bytes, predict_split_decode_tps, HwInputs, Quant, SplitInputs,
+    default_compute_buffer_bytes, host_resident_bytes, kv_bytes_per_token, kv_filled_tokens,
+    max_gpu_layers, predict_decode_tps_from_bytes, predict_split_decode_tps, HwInputs, Quant,
+    SplitInputs,
 };
 use serde::Serialize;
 
@@ -275,8 +276,10 @@ fn gpu_row(
         return None;
     }
 
-    // Only the CPU-resident share of weights and KV stays in system RAM.
-    let ram_bytes = ((file.size as f64 + kv_total) * (1.0 - frac)).round() as u64;
+    // Only the host-resident share of weights and KV stays in system RAM:
+    // the embedding table plus the CPU layers, and the un-offloaded KV.
+    let ram_bytes =
+        host_resident_bytes(file.size as f64, n_layers, gpu_layers, kv_total).round() as u64;
     Some(RecommendRow {
         model_id: model.id.clone(),
         display: model.display.clone(),
@@ -712,9 +715,9 @@ mod tests {
     }
 
     #[test]
-    fn qwen3_8b_at_the_default_context_splits_and_still_beats_the_cpu_by_3x() {
-        // At 4096 tokens the 512 MiB safety margin plus the compute buffer
-        // leave a few layers on the CPU, but the split is still far faster.
+    fn qwen3_8b_at_the_default_context_still_fully_offloads_and_beats_the_cpu_by_3x() {
+        // At 4096 tokens the smaller compute buffer and host-resident
+        // embeddings leave room for all 36 layers.
         let m = qwen3_8b();
         let cpu = recommend(
             std::slice::from_ref(&m),
@@ -726,14 +729,32 @@ mod tests {
             hw(),
             &opts_for(Device::Auto, Some(rtx_4050()), 6e9, 4096),
         );
-        assert_eq!(gpu[0].device, "gpu+cpu", "{:?}", gpu[0]);
-        assert!(gpu[0].gpu_layers.is_some_and(|g| (1..36).contains(&g)));
+        assert_eq!(gpu[0].device, "gpu", "{:?}", gpu[0]);
+        assert_eq!(gpu[0].gpu_layers, Some(36));
         assert!(
             gpu[0].decode_tps > 3.0 * cpu[0].decode_tps,
             "GPU {:.1} tok/s must beat CPU {:.1} tok/s by 3x",
             gpu[0].decode_tps,
             cpu[0].decode_tps
         );
+    }
+
+    #[test]
+    fn full_gpu_rows_report_the_host_resident_ram() {
+        // A fully offloaded model still needs RAM for the token-embedding
+        // table left on the host: ~8% of the file, not 0.
+        let m = qwen3_8b();
+        let rows = recommend(
+            std::slice::from_ref(&m),
+            hw(),
+            &opts_for(Device::Gpu, Some(rtx_4050()), 6e9, 4096),
+        );
+        assert_eq!(rows[0].device, "gpu", "{:?}", rows[0]);
+        assert_eq!(rows[0].gpu_layers, Some(36));
+        let expected = (5_027_783_488.0 * (1.0 - attune_estimate::GPU_RESIDENT_WEIGHT_FRACTION))
+            .round() as u64;
+        assert_eq!(rows[0].ram_bytes, expected);
+        assert!(rows[0].ram_bytes > 0);
     }
 
     #[test]
@@ -779,7 +800,7 @@ mod tests {
 
         // A model too large for any layer gets the same marker.
         let mut huge = qwen3_8b();
-        huge.files[0].size = 200_000_000_000;
+        huge.files[0].size = 400_000_000_000;
         let rows = recommend(
             &[huge],
             hw(),

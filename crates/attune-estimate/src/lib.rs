@@ -28,8 +28,9 @@ pub use calibrate::{
 };
 pub use error::EstimateError;
 pub use gpu::{
-    default_compute_buffer_bytes, gpu_bandwidth_gbps, max_gpu_layers, predict_split_decode_tps,
-    vram_needed_bytes, SplitInputs, GPU_DECODE_EFFICIENCY, VRAM_SAFETY_MARGIN_BYTES,
+    default_compute_buffer_bytes, gpu_bandwidth_gbps, host_resident_bytes, max_gpu_layers,
+    predict_split_decode_tps, vram_needed_bytes, SplitInputs, GPU_DECODE_EFFICIENCY,
+    GPU_RESIDENT_WEIGHT_FRACTION, VRAM_SAFETY_MARGIN_BYTES,
 };
 pub use model::{
     cache_is_fresh, cache_path, fetch_config, is_gguf_file, is_hf_id, kv_bytes_per_token,
