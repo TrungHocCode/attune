@@ -4,7 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-28
+
+M6 (recommend and downloads) plus the friendly path for new users. You install with one line, see which models suit the machine, and go from a model id to a chat in one command. This is the first release with prebuilt binaries.
+
 ### Added
+- **One-line install:**
+  - `install.ps1` (Windows) and `install.sh` (Linux x64) fetch the latest release and verify it against `SHA256SUMS`.
+  - They install to `~/.attune/bin` and add it to the user PATH. Re-running upgrades in place (#127).
+  - `release.yml` builds and publishes the Windows and Linux binaries on every `v*` tag (#127).
+- **`attune run <model>`:** installs llama.cpp if missing, tunes and saves `~/.attune/profiles/<id>-<quant>.json` (reused while the hardware fingerprint matches), downloads the model, serves it and opens a chat.
+  - `--no-chat` only serves; `--retune` forces a fresh tune (#126).
+- **`attune chat`:** a streaming terminal chat with any running attune server. It keeps history, and `/clear` and `/bye` work.
+  - After each reply it shows `[N tok, X tok/s]`.
+  - While a reasoning model thinks, it shows a dim `thinking…` (#122, #126).
+- **`attune recommend`:** the model list as its own command, ending with `Next: attune run <id>` (#121).
+- `serve --profile` accepts a saved profile name as well as a path (#122).
+- `tune --verbose` (#121).
 - M6 recommend & downloads: `attune tune` without `--model` lists catalog models that suit this machine (fit verdict, predicted speed and first reply, one pick per size tier, `--max-ram`, `--all`, `--refresh-catalog`, `--json`); `tune --model <catalog id> --save` needs no file and writes a v2 profile with `model.source`; `serve` downloads a missing model after confirmation (`--yes` for scripts); `attune setup` installs the pinned llama.cpp build into `~/.attune`.
 - New crate `attune-fetch`: home dir (`ATTUNE_HOME`), HTTPS host allow-list checked on every redirect, resumable SHA-256-verified downloads, zip/tar.gz installs that reject path escapes.
 - Model catalog (`attune-catalog/1`): `catalog/snapshot.json` built in, daily `catalog.yml` Action regenerating `catalog.json` on the `catalog` branch via the hidden `attune catalog build`.
@@ -23,6 +39,13 @@ All notable changes to this project will be documented in this file.
 - `SECURITY.md` adds private vulnerability reporting through GitHub Security Advisories and defines what is in scope (#112).
 
 ### Changed
+- **Plainer output:**
+  - Help text has no milestone notes.
+  - The `tune` table shows the top 5 configs; scores and pruning are behind `--verbose`.
+  - Download progress is one line in MB/GB.
+  - Catalog fallbacks show a short notice instead of a raw HTTP error (#121).
+- The built-in model list (`catalog/snapshot.json`) is refreshed from the daily catalog: 9 -> 66 models.
+  - `qwen3-4b` now resolves to the official Qwen3-4B. Use `qwen3-4b-instruct-2507` for the instruct model.
 - Contributor and CI hygiene (#112):
   - Added `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) and `.github/CODEOWNERS`.
   - GitHub Actions are pinned to commit SHAs, and workflows run with a read-only token.
