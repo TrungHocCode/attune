@@ -4,14 +4,18 @@
 //! - `cpu::CpuInfo`        — brand, vendor, cores, SIMD (via raw-cpuid on x86)
 //! - `memory::MemoryInfo`  — total/available RAM (via sysinfo)
 //! - `cache::CacheInfo`    — L1d/L1i/L2/L3 + line size (via raw-cpuid on x86)
-//! - `NumaInfo` / `GpuInfo` — placeholders; no real NUMA/GPU probing yet
+//! - `gpu::GpuInfo`        — GPU adapters (via `nvidia-smi`, Windows CIM fallback)
+//! - `NumaInfo`            — placeholder; no real NUMA probing yet
 //!
 //! Cross-platform: x86/x86_64 get full detail; other targets compile and
 //! gracefully degrade to `"unknown"` placeholders.
 
 pub mod cache;
 pub mod cpu;
+pub mod gpu;
 pub mod memory;
+
+pub use gpu::{GpuDevice, GpuInfo};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -27,14 +31,6 @@ pub enum HalError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NumaInfo {
     pub nodes: u32,
-    pub note: String,
-}
-
-/// Placeholder: GPU enumeration is not implemented;
-/// `count == 0` is the safe default.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GpuInfo {
-    pub count: u32,
     pub note: String,
 }
 
@@ -59,10 +55,7 @@ impl HardwareInfo {
                 nodes: 1,
                 note: "not detected; single node assumed".to_string(),
             },
-            gpu: GpuInfo {
-                count: 0,
-                note: "GPU detection not implemented".to_string(),
-            },
+            gpu: gpu::detect(),
             os: std::env::consts::OS.to_string(),
         })
     }
@@ -81,7 +74,8 @@ mod tests {
         assert!(hw.cpu.physical_cores >= 1);
         assert!(hw.memory.total_bytes > 0);
         assert_eq!(hw.numa.nodes, 1); // placeholder invariant
-        assert_eq!(hw.gpu.count, 0); // placeholder invariant
+                                      // GPU may or may not exist; count must always match the device list.
+        assert_eq!(hw.gpu.count as usize, hw.gpu.devices.len());
     }
 
     #[test]
