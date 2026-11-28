@@ -687,6 +687,7 @@ mod tests {
                 power_avg_watts: None,
                 elapsed_ms: 0.0,
             }),
+            gpu: None,
         }
     }
 

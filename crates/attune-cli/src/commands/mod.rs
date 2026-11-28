@@ -78,6 +78,10 @@ pub enum Command {
         /// decide. Ignored unless `--model` is also passed.
         #[arg(long, value_name = "N", requires = "model")]
         threads: Option<u32>,
+        /// Device for the e2e run: `cpu` (default) or `gpu`. `gpu` runs all
+        /// layers on an installed Vulkan/CUDA build and requires `--model`.
+        #[arg(long, value_enum, default_value = "cpu", requires = "model")]
+        device: bench::BenchDevice,
     },
     /// Predict how fast a model will run on this machine
     #[command(group(
@@ -389,6 +393,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             gen_tokens,
             ctx,
             threads,
+            device,
         } => bench::run(
             quick,
             json,
@@ -399,6 +404,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             gen_tokens,
             ctx,
             threads,
+            device,
         ),
         Command::Estimate {
             model,
