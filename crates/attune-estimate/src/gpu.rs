@@ -37,6 +37,19 @@ pub const VRAM_SAFETY_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
 /// KV) scales with the offloaded layer fraction.
 pub const GPU_RESIDENT_WEIGHT_FRACTION: f64 = 0.92;
 
+/// Number of layers llama.cpp can offload for a model with `n_layers`
+/// repeating blocks.
+///
+/// `-ngl` counts the output layer on top of the repeating blocks, so a model
+/// whose blocks all fit is launched with `-ngl n_layers + 1`. Capping at
+/// `n_layers` leaves the (large) output layer on the CPU: measured on the
+/// reference RTX 4050 Laptop (Vulkan, flash-attn, f16 KV, ctx 4096), Qwen3 4B
+/// decodes at 44.3 tok/s with `-ngl 36` vs 57.6 at full offload, and Qwen3 8B
+/// at 25.5 vs 33.4 tok/s.
+pub fn offload_layers(n_layers: u32) -> u32 {
+    n_layers.saturating_add(1)
+}
+
 /// Theoretical VRAM bandwidth in GB/s for known GPUs.
 ///
 /// Matched case-insensitively by substring, longest entry first so the laptop
@@ -92,7 +105,8 @@ pub struct SplitInputs {
     pub weight_bytes: f64,
     /// Number of transformer layers in the model.
     pub n_layers: u32,
-    /// Number of layers offloaded to the GPU (`0..=n_layers`).
+    /// Number of layers offloaded to the GPU (`0..=n_layers + 1`; the `+ 1`
+    /// is the output layer, see [`offload_layers`]).
     pub gpu_layers: u32,
     /// KV-cache bytes read per generated token (filled context).
     pub kv_bytes: f64,
@@ -157,12 +171,16 @@ pub fn predict_split_decode_tps(inputs: &SplitInputs) -> Result<f64, EstimateErr
     Ok(tps)
 }
 
-/// Fraction of layers offloaded to the GPU, clamped to `0..=1`.
+/// Fraction of the offloadable layers on the GPU, clamped to `0..=1`.
+///
+/// The denominator is [`offload_layers`] (blocks plus the output layer), so
+/// offloading every layer the model has reaches exactly `1.0`.
 fn split_fraction(gpu_layers: u32, n_layers: u32) -> f64 {
     if n_layers == 0 {
         return 0.0;
     }
-    gpu_layers.min(n_layers) as f64 / n_layers as f64
+    let offloadable = offload_layers(n_layers);
+    gpu_layers.min(offloadable) as f64 / offloadable as f64
 }
 
 /// VRAM needed to hold `gpu_layers` of the model: the GPU-resident share of
@@ -203,11 +221,14 @@ pub fn default_compute_buffer_bytes(n_ctx: u32) -> f64 {
     150.0 * MIB + 0.05 * MIB * n_ctx as f64
 }
 
-/// Largest number of GPU layers (`0..=n_layers`) whose VRAM footprint fits in
-/// `vram_free_bytes` minus [`VRAM_SAFETY_MARGIN_BYTES`].
+/// Largest number of GPU layers (`0..=n_layers + 1`) whose VRAM footprint fits
+/// in `vram_free_bytes` minus [`VRAM_SAFETY_MARGIN_BYTES`].
 ///
-/// Returns `0` if even a single layer does not fit. Weights and the KV cache
-/// scale with the offloaded fraction; the compute buffer does not.
+/// The upper bound is [`offload_layers`]: llama.cpp can also put the output
+/// layer on the GPU, and leaving it on the CPU costs about 30% decode on the
+/// reference laptop. Returns `0` if even a single layer does not fit. Weights
+/// and the KV cache scale with the offloaded fraction; the compute buffer does
+/// not.
 pub fn max_gpu_layers(
     weight_bytes: f64,
     n_layers: u32,
@@ -218,6 +239,7 @@ pub fn max_gpu_layers(
     if n_layers == 0 {
         return 0;
     }
+    let offloadable = offload_layers(n_layers);
     let budget = vram_free_bytes as f64 - VRAM_SAFETY_MARGIN_BYTES as f64;
     if !budget.is_finite() || budget <= 0.0 {
         return 0;
@@ -227,8 +249,8 @@ pub fn max_gpu_layers(
         return 0;
     }
 
-    // needed(g) = total_offload × g/n_layers + compute_buffer <= budget
-    let per_layer = total_offload / n_layers as f64;
+    // needed(g) = total_offload × g/(n_layers + 1) + compute_buffer <= budget
+    let per_layer = total_offload / f64::from(offloadable);
     let headroom = budget - compute_buffer_bytes;
     if !per_layer.is_finite() || per_layer <= 0.0 {
         return 0;
@@ -240,7 +262,7 @@ pub fn max_gpu_layers(
     if !fit.is_finite() || fit <= 0.0 {
         return 0;
     }
-    (fit as u32).min(n_layers)
+    (fit as u32).min(offloadable)
 }
 
 #[cfg(test)]
@@ -335,11 +357,12 @@ mod tests {
 
     #[test]
     fn qwen3_8b_full_offload_matches_spike() {
-        // 34.6 tok/s measured (CUDA); additive model -> 32.5.
+        // 34.6 tok/s measured (CUDA); additive model -> 32.5. Full offload is
+        // 37 layers (36 blocks + the output layer).
         let inputs = SplitInputs {
             weight_bytes: 5_027_783_488.0,
             n_layers: 36,
-            gpu_layers: 36,
+            gpu_layers: offload_layers(36),
             kv_bytes: 0.0,
             vram_gbps: RTX_4050_EFFECTIVE,
             ram_gbps: RAM_GBPS,
@@ -354,13 +377,41 @@ mod tests {
         let inputs = SplitInputs {
             weight_bytes: 2_497_281_120.0,
             n_layers: 36,
-            gpu_layers: 36,
+            gpu_layers: offload_layers(36),
             kv_bytes: 0.0,
             vram_gbps: RTX_4050_EFFECTIVE,
             ram_gbps: RAM_GBPS,
         };
         let tps = predict_split_decode_tps(&inputs).expect("predict");
         assert!(within(tps, 61.4, 0.25), "got {tps} tok/s, want ~61.4");
+    }
+
+    #[test]
+    fn offload_layers_counts_the_output_layer() {
+        assert_eq!(offload_layers(36), 37);
+        assert_eq!(offload_layers(48), 49);
+        // Nothing offloaded is still the CPU-only path.
+        let all_on_gpu = SplitInputs {
+            weight_bytes: 5_027_783_488.0,
+            n_layers: 36,
+            gpu_layers: 37,
+            kv_bytes: 0.0,
+            vram_gbps: RTX_4050_EFFECTIVE,
+            ram_gbps: RAM_GBPS,
+        };
+        let tps = predict_split_decode_tps(&all_on_gpu).expect("predict");
+        let vram_only = 5_027_783_488.0 / (RTX_4050_EFFECTIVE * 1e9);
+        assert!(
+            (tps - 1.0 / vram_only).abs() < 1e-6,
+            "37/37 must leave nothing on the CPU, got {tps} tok/s"
+        );
+        // 36/37 is a split, so it is slower than full offload.
+        let one_short = SplitInputs {
+            gpu_layers: 36,
+            ..all_on_gpu
+        };
+        let split = predict_split_decode_tps(&one_short).expect("predict");
+        assert!(split < tps, "split {split} vs full {tps}");
     }
 
     #[test]
@@ -415,40 +466,42 @@ mod tests {
 
     #[test]
     fn vram_needed_scales_weights_and_kv_with_fraction() {
+        // 24 of the 49 offloadable layers (48 blocks + the output layer).
+        let frac = 24.0 / 49.0;
         let needed = vram_needed_bytes(6_000.0, 48, 24, 1_000.0, 500.0);
-        // (6000 * 0.92 + 1000) * 0.5 + 500 = 3760
-        assert!((needed - 3_760.0).abs() < 1e-9, "got {needed}");
+        let want = (6_000.0 * GPU_RESIDENT_WEIGHT_FRACTION + 1_000.0) * frac + 500.0;
+        assert!((needed - want).abs() < 1e-9, "got {needed}");
     }
 
     #[test]
     fn host_resident_keeps_embeddings_and_cpu_layers() {
         // Full offload: only the ~8% host-resident weight share remains.
-        let host = host_resident_bytes(6_000.0, 48, 48, 1_000.0);
+        let host = host_resident_bytes(6_000.0, 48, offload_layers(48), 1_000.0);
         assert!((host - 6000.0 * (1.0 - GPU_RESIDENT_WEIGHT_FRACTION)).abs() < 1e-9);
         // No offload: the whole model lives in RAM, like the CPU path.
         let all = host_resident_bytes(6_000.0, 48, 0, 1_000.0);
         assert!((all - 7_000.0).abs() < 1e-9, "got {all}");
         // Half: the CPU layers plus the embedding share, and half the KV.
+        let frac = 24.0 / 49.0;
         let half = host_resident_bytes(6_000.0, 48, 24, 1_000.0);
-        assert!(
-            (half - (6000.0 * (1.0 - 0.46) + 500.0)).abs() < 1e-9,
-            "got {half}"
-        );
+        let want = 6_000.0 * (1.0 - GPU_RESIDENT_WEIGHT_FRACTION * frac) + 1_000.0 * (1.0 - frac);
+        assert!((half - want).abs() < 1e-9, "got {half}");
     }
 
     #[test]
     fn max_layers_8b_fits_all() {
         // Weights + Qwen3 8B KV at ctx 4096 (~576 MiB) fit the ~5.4 GiB free
-        // the spike reported, so every layer is offloaded.
+        // the spike reported, so every layer is offloaded: 36 blocks plus the
+        // output layer = 37.
         let kv = 36.0 * 8.0 * 128.0 * 2.0 * 2.0 * 4096.0;
         assert_eq!(kv, 603_979_776.0);
         let g = max_gpu_layers(5_027_783_488.0, 36, kv, 0.0, 5_921 * 1024 * 1024);
-        assert_eq!(g, 36);
+        assert_eq!(g, 37);
     }
 
     #[test]
     fn max_layers_8b_fits_all_with_compute_buffer() {
-        // At ctx 4096 the full 36 layers fit even after the compute buffer.
+        // At ctx 4096 the full 37 layers fit even after the compute buffer.
         let kv = 36.0 * 8.0 * 128.0 * 2.0 * 2.0 * 4096.0;
         let g = max_gpu_layers(
             5_027_783_488.0,
@@ -457,13 +510,13 @@ mod tests {
             default_compute_buffer_bytes(4096),
             5_921 * 1024 * 1024,
         );
-        assert_eq!(g, 36);
+        assert_eq!(g, 37);
     }
 
     #[test]
     fn max_layers_4b_fits_all() {
         // Qwen3 4B: weights + KV are far below the 5.4 GiB budget, so every
-        // layer is offloaded.
+        // layer (36 blocks + output) is offloaded.
         let kv = 36.0 * 8.0 * 128.0 * 2.0 * 2.0 * 4096.0;
         let g = max_gpu_layers(
             2_497_281_120.0,
@@ -472,7 +525,7 @@ mod tests {
             default_compute_buffer_bytes(4096),
             5_921 * 1024 * 1024,
         );
-        assert_eq!(g, 36);
+        assert_eq!(g, 37);
     }
 
     #[test]
@@ -488,7 +541,8 @@ mod tests {
             default_compute_buffer_bytes(4096),
             5_921 * 1024 * 1024,
         );
-        assert!((27..=28).contains(&g), "got {g}, want 27..=28");
+        assert!((27..=30).contains(&g), "got {g}, want 27..=30");
+        assert!(g < offload_layers(48), "the 14B must stay a split");
     }
 
     #[test]

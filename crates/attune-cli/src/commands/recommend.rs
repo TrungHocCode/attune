@@ -70,7 +70,9 @@ fn fit_label(verdict: Verdict) -> String {
     }
 }
 
-/// The `Runs on` cell: `CPU`, `GPU`, or `GPU+CPU <g>/<n>` for a split.
+/// The `Runs on` cell: `CPU`, `GPU`, or `GPU+CPU <g>/<n>` for a split, where
+/// `n` is the offloadable layer count (`n_layers + 1`: llama.cpp can also
+/// offload the output layer, so a full offload reads `37/37`).
 fn runs_on(row: &RecommendRow) -> String {
     match row.device.as_str() {
         "gpu" => match row.gpu_layers {
@@ -394,14 +396,17 @@ mod tests {
             prefill_tflops: 15.0,
         };
         let rows = [
-            row_for("gpu", Some(36), Some(36)),
-            row_for("gpu+cpu", Some(30), Some(48)),
+            row_for("gpu", Some(37), Some(37)),
+            row_for("gpu+cpu", Some(30), Some(49)),
             row_for("cpu", None, Some(32)),
         ];
         let text = render_recommend(&rows, hw(), 6e9, "cached", "2026-11-26", true, Some(&gpu));
         assert!(text.contains("Runs on"), "{text}");
         assert!(text.contains("GPU RTX 4050 Laptop 5.8 GB"), "{text}");
-        assert!(text.contains("GPU+CPU 30/48"), "{text}");
+        assert!(text.contains("GPU+CPU 30/49"), "{text}");
+        // Full offload of all 37 layers (36 blocks + the output layer).
+        assert_eq!(runs_on(&row_for("gpu", Some(37), Some(37))), "GPU");
+        assert_eq!(runs_on(&row_for("gpu", None, Some(37))), "-");
     }
 
     #[test]
