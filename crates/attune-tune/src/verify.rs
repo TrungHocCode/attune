@@ -79,6 +79,8 @@ pub fn e2e_config_for(
         cache_type_k: Some(config.cache_type_k.clone()),
         cache_type_v: Some(config.cache_type_v.clone()),
         flash_attn: config.flash_attn,
+        n_gpu_layers: None,
+        device: None,
     }
 }
 
