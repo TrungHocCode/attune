@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-28
+
+M7 GPU: attune uses the GPU the machine already has. It splits a model across GPU and CPU when it doesn't fit in VRAM, and every command takes `--device auto|cpu|gpu`. On the reference RTX 4050 Laptop, `attune run` from an empty home serves on the GPU with no flags, at 3.9× the CPU decode.
+
+### Added
+- **`detect`** lists GPUs (name, VRAM total/free, driver) via `nvidia-smi`, with a Windows CIM fallback. `gpu.devices` is additive JSON, and the probes run in parallel (#131).
+- **`setup --gpu auto|cpu|vulkan|cuda`:** the catalog pins the llama.cpp Vulkan and CUDA 12 builds (CUDA includes cudart and a minimum driver), installed beside the CPU build in `~/.attune/llama.cpp/<tag>-<variant>`.
+  - `auto` adds Vulkan when an NVIDIA/AMD GPU is found (#133).
+- **`bench --model <gguf> --device gpu`:** a full-offload e2e on the GPU build, reporting effective VRAM bandwidth and `eta_gpu`.
+  - Picks the GPU device (Vulkan lists the iGPU first) and warms up shader compilation before measuring (#135).
+- **`tune --device`:** ranks CPU, full-GPU and split configs (`n_gpu_layers`) with a VRAM fit, and saves GPU profiles (#137).
+- **`recommend --device`:** judges each model on the GPU, a split or the CPU, with a new `Runs on` column (#138).
+- **`serve --device`:** GPU profiles run on the matching GPU build with `-dev <gpu> --fit off -np 1`. `--device cpu` runs any profile on the CPU (#139).
+- **`run --device`** (default `auto`): installs the GPU build, tunes and serves on the GPU when one is usable. Profiles are kept per device (#141).
+
+### Changed
+- **Profile schema v3:** `engine.variant` and `load_config.gpu_name`, with a v2 → v3 migration. CPU profiles produce byte-identical llama.cpp arguments (#136).
+- **The GPU estimate** uses the split model `t ≈ bytes·f/BW_vram + bytes·(1−f)/BW_ram`, with a VRAM fit that keeps token embeddings on the host and a 512 MiB margin (#134, #140).
+
+### Docs
+- M7 design spec and the measurement spike: Vulkan is the default build, and attune's own split beats llama.cpp auto-fit by 1.5–2.1× (#130, #132).
+
+### Known issues
+- CPU decode through `serve`/`run` on Windows is about 2× below llama-bench (#142).
+
 ## [0.6.0] - 2026-11-28
 
 M6 (recommend and downloads) plus the friendly path for new users. You install with one line, see which models suit the machine, and go from a model id to a chat in one command. This is the first release with prebuilt binaries.

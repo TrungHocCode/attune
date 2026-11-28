@@ -1,8 +1,8 @@
 # attune — Tune LLM inference to your hardware
 
 > [!NOTE]
-> Beta (v0.6.x). One-line install, `recommend`, `run` and `chat` work on CPU
-> (Linux/Windows x86-64). GPU support (M7) is in progress. Not production-ready yet.
+> Beta (v0.7.x). One-line install, `recommend`, `run` and `chat` work on CPU and GPU
+> (Linux/Windows x86-64; NVIDIA/AMD via Vulkan, CUDA opt-in). Not production-ready yet.
 
 [![CI](https://github.com/TrungHocCode/attune/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/TrungHocCode/attune/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -80,6 +80,21 @@ Predictions are uncalibrated (about ±25%; within ±10% decode on the reference 
 `attune recommend --max-ram 4G` plans against a RAM budget instead of the RAM free right now,
 and `--all` lists every model and quant.
 
+### CPU or GPU
+
+attune uses your GPU automatically when it has one (NVIDIA or AMD, via llama.cpp's Vulkan build). If the model doesn't fit in VRAM, attune splits it between GPU and CPU.
+
+You can choose with `--device` on `recommend`, `tune`, `run` and `serve`:
+
+```powershell
+attune run qwen3-4b-instruct-2507                  # auto: GPU when usable
+attune run qwen3-4b-instruct-2507 --device cpu     # always on the CPU
+attune run qwen3-4b-instruct-2507 --device gpu     # must use the GPU (explains what is missing)
+attune setup --gpu cuda                            # optional: NVIDIA CUDA build (~660 MB, faster prefill)
+```
+
+On an RTX 4050 Laptop, a 4B model decodes about 4× faster on the GPU than on the CPU. A 14B model split across GPU and CPU runs 1.5× faster than llama.cpp's own automatic offload.
+
 ### Where files go
 
 Everything lives in `~/.attune` (`%USERPROFILE%\.attune` on Windows):
@@ -151,7 +166,7 @@ JSON output is the stable contract for scripting; the pretty table is for humans
 
 ## Roadmap
 
-M1 `detect` ✅ · M2 `bench` ✅ · M3 `estimate` ✅ · M4 `tune` ✅ · M5 `serve` ✅ (MVP) · M6 recommend & downloads ✅ · M7 GPU (in progress)
+M1 `detect` ✅ · M2 `bench` ✅ · M3 `estimate` ✅ · M4 `tune` ✅ · M5 `serve` ✅ (MVP) · M6 recommend & downloads ✅ · M7 GPU ✅
 
 Details, acceptance criteria, and status live in [ROADMAP.md](ROADMAP.md).
 GitHub issues and milestones are the source of truth for what lands next.
