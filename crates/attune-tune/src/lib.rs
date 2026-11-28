@@ -36,7 +36,8 @@ pub use export::{from_best, hardware_fingerprint, ProfileInputs};
 pub use objective::{ram_penalty, stars, tpot_ms_from_tps, Objective};
 pub use report::TuneReport;
 pub use sweep::{
-    calibrate_ranked, expand_grid, prune, rank_by_estimate, PruneReason, RankedConfig, TuneModel,
+    calibrate_ranked, expand_grid, gpu_configs, prune, rank_by_estimate, select_configs, Device,
+    GpuTarget, PruneReason, RankedConfig, TuneModel,
 };
 pub use verify::{e2e_config_for, rerank_with_e2e, run_verify_topk, VerifyOutcome};
 

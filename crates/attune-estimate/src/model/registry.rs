@@ -52,11 +52,27 @@ pub struct LlamaAsset {
     pub os: String,
     /// `std::env::consts::ARCH` value (`x86_64`).
     pub arch: String,
-    /// `cpu` in M6 (GPU builds arrive with M7).
+    /// Build flavour: `cpu`, `vulkan` or `cuda12`. Several assets share one
+    /// variant when a build ships as a base archive plus a companion (CUDA).
     pub variant: String,
     pub url: String,
     pub size: u64,
     pub sha256: String,
+    /// Minimum NVIDIA driver, when this build needs one (`cuda12`). Absent in
+    /// pre-M7 catalogs and for CPU/Vulkan builds.
+    #[serde(default)]
+    pub min_driver: Option<String>,
+}
+
+impl LlamaPin {
+    /// Every asset matching `os`/`arch`/`variant`, in catalog order. A CUDA
+    /// build returns both its base and companion archives.
+    pub fn assets_for(&self, os: &str, arch: &str, variant: &str) -> Vec<&LlamaAsset> {
+        self.assets
+            .iter()
+            .filter(|a| a.os == os && a.arch == arch && a.variant == variant)
+            .collect()
+    }
 }
 
 /// One model (merged across publisher repos).
@@ -128,6 +144,44 @@ impl CatalogModel {
 }
 
 impl Catalog {
+    /// Up to `limit` ids that look like `query`, closest first.
+    ///
+    /// Matching is case-insensitive: an exact id wins, then ids that start
+    /// with the query, then ids that contain it. Ties are broken by id length
+    /// (shorter is closer) and then alphabetically, so the list is stable.
+    /// Meant for unknown-model errors: the caller names what the catalog does
+    /// have instead of dumping all of it.
+    pub fn suggest_ids(&self, query: &str, limit: usize) -> Vec<&str> {
+        let query = query.trim().to_ascii_lowercase();
+        if query.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let mut matches: Vec<(u8, &str)> = self
+            .models
+            .iter()
+            .filter_map(|model| {
+                let id = model.id.as_str();
+                let lower = id.to_ascii_lowercase();
+                let rank = if lower == query {
+                    0
+                } else if lower.starts_with(&query) {
+                    1
+                } else if lower.contains(&query) {
+                    2
+                } else {
+                    return None;
+                };
+                Some((rank, id))
+            })
+            .collect();
+        matches.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.len().cmp(&b.1.len()))
+                .then(a.1.cmp(b.1))
+        });
+        matches.into_iter().take(limit).map(|(_, id)| id).collect()
+    }
+
     /// Exact id (case-insensitive), else a unique id prefix.
     pub fn find(&self, query: &str) -> Result<&CatalogModel, EstimateError> {
         let query = query.trim().to_ascii_lowercase();
@@ -432,6 +486,37 @@ mod tests {
     }
 
     #[test]
+    fn assets_for_returns_every_asset_of_a_variant() {
+        let text = format!(
+            r#"{{ "schema": "{SCHEMA}", "generated_at": "2026-11-27T03:00:00Z",
+              "llama_cpp": {{ "tag": "b11804", "assets": [
+                {{ "os": "windows", "arch": "x86_64", "variant": "cpu",
+                  "url": "{prefix}b11804/llama-b11804-bin-win-cpu-x64.zip",
+                  "size": 1, "sha256": "{SHA_A}" }},
+                {{ "os": "windows", "arch": "x86_64", "variant": "cuda12",
+                  "url": "{prefix}b11804/llama-b11804-bin-win-cuda-12.4-x64.zip",
+                  "size": 2, "sha256": "{SHA_A}", "min_driver": "551.61" }},
+                {{ "os": "windows", "arch": "x86_64", "variant": "cuda12",
+                  "url": "{prefix}b11804/cudart-llama-bin-win-cuda-12.4-x64.zip",
+                  "size": 3, "sha256": "{SHA_A}", "min_driver": "551.61" }}
+              ] }},
+              "models": [] }}"#,
+            prefix = LLAMA_ASSET_PREFIX,
+        );
+        let pin = parse_catalog(&text).expect("parse").llama_cpp;
+        assert_eq!(pin.assets_for("windows", "x86_64", "cuda12").len(), 2);
+        assert_eq!(pin.assets_for("windows", "x86_64", "cpu").len(), 1);
+        assert!(pin.assets_for("windows", "x86_64", "cuda11").is_empty());
+        assert!(pin.assets_for("linux", "x86_64", "cpu").is_empty());
+        assert_eq!(
+            pin.assets_for("windows", "x86_64", "cuda12")[0]
+                .min_driver
+                .as_deref(),
+            Some("551.61")
+        );
+    }
+
+    #[test]
     fn rejects_unknown_schema() {
         let text = catalog("attune-catalog/2", &[model("a", SHA_A)]);
         assert!(parse_catalog(&text).is_err());
@@ -630,5 +715,43 @@ mod tests {
         let err = two.find("qwen3-4b").expect_err("ambiguous").to_string();
         assert!(err.contains("qwen3-4b-instruct-2507"), "{err}");
         assert!(err.contains("qwen3-4b-thinking-2507"), "{err}");
+    }
+
+    #[test]
+    fn suggest_ids_ranks_exact_prefix_then_substring() {
+        let parsed = parse_catalog(&catalog(
+            SCHEMA,
+            &[
+                model("qwen3-4b-instruct-2507", SHA_A),
+                model("qwen3-4b-thinking-2507", SHA_A),
+                model("qwen3-4b", SHA_A),
+                model("qwen2.5-4b-instruct", SHA_A),
+                model("llama-3.1-8b", SHA_A),
+            ],
+        ))
+        .expect("parse");
+
+        // Exact, then (shorter) prefix.
+        assert_eq!(
+            parsed.suggest_ids("QWEN3-4B", 3),
+            vec![
+                "qwen3-4b",
+                "qwen3-4b-instruct-2507",
+                "qwen3-4b-thinking-2507"
+            ]
+        );
+        // Substring matches come last (shorter id first); the limit holds.
+        assert_eq!(
+            parsed.suggest_ids("4b", 2),
+            vec!["qwen3-4b", "qwen2.5-4b-instruct"]
+        );
+        assert_eq!(
+            parsed.suggest_ids("4b", 3),
+            vec!["qwen3-4b", "qwen2.5-4b-instruct", "qwen3-4b-instruct-2507"]
+        );
+        // No substring, no suggestion — the caller says so.
+        assert!(parsed.suggest_ids("not-a-model", 8).is_empty());
+        assert!(parsed.suggest_ids("   ", 8).is_empty());
+        assert!(parsed.suggest_ids("qwen", 0).is_empty());
     }
 }

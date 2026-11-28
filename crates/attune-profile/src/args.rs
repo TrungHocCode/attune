@@ -16,9 +16,22 @@ use crate::Profile;
 /// value may be either a mask or a range, and choosing between `--cpu-mask`
 /// and `--cpu-range` belongs to the M5 launcher that knows the semantics.
 pub fn to_llama_args(profile: &Profile) -> Vec<String> {
+    to_llama_args_with_device(profile, None)
+}
+
+/// Map a profile to llama.cpp load/runtime flags, resolving the GPU device id.
+///
+/// Identical to [`to_llama_args`] for CPU profiles (`n_gpu_layers == 0`): the
+/// GPU-only switches are never emitted, so their argv is unchanged. When
+/// `n_gpu_layers > 0` it appends `--fit off` (llama.cpp's auto-fit is 1.5-2x
+/// slower than an explicit placement), `-np 1` (one slot, so the KV cache is
+/// sized for one chat) and `-dev <id>` when `device_id` is known. The `-dev`
+/// id comes from the installed llama.cpp build at serve time because the
+/// Vulkan build lists the iGPU first.
+pub fn to_llama_args_with_device(profile: &Profile, device_id: Option<&str>) -> Vec<String> {
     let load = &profile.load_config;
     let compute = &profile.compute_config;
-    let mut args = Vec::with_capacity(24);
+    let mut args = Vec::with_capacity(28);
 
     push_pair(&mut args, "-m", &profile.model.path);
     push_pair(&mut args, "-c", load.n_ctx);
@@ -39,6 +52,14 @@ pub fn to_llama_args(profile: &Profile) -> Vec<String> {
         args.push("--mlock".to_string());
     }
     push_pair(&mut args, "-ngl", load.n_gpu_layers);
+
+    if load.n_gpu_layers > 0 {
+        push_pair(&mut args, "--fit", "off");
+        push_pair(&mut args, "-np", 1);
+        if let Some(device_id) = device_id {
+            push_pair(&mut args, "-dev", device_id);
+        }
+    }
 
     args
 }
@@ -72,6 +93,7 @@ mod tests {
                 cache_type_k: "q8_0".to_string(),
                 cache_type_v: "q8_0".to_string(),
                 numa: "local".to_string(),
+                gpu_name: Some("NVIDIA GeForce RTX 4050 Laptop GPU".to_string()),
             },
             compute_config: ComputeConfig {
                 n_threads: 8,
@@ -111,8 +133,68 @@ mod tests {
                 "--mlock",
                 "-ngl",
                 "8",
+                "--fit",
+                "off",
+                "-np",
+                "1",
             ]
         );
+    }
+
+    #[test]
+    fn cpu_args_match_the_established_golden_vector() {
+        let mut profile = best_config_profile();
+        profile.load_config.n_gpu_layers = 0;
+        profile.load_config.gpu_name = None;
+
+        assert_eq!(
+            to_llama_args(&profile),
+            vec![
+                "-m",
+                "models/tiny.gguf",
+                "-c",
+                "4096",
+                "-b",
+                "512",
+                "--ubatch-size",
+                "128",
+                "-t",
+                "8",
+                "-tb",
+                "8",
+                "--cache-type-k",
+                "q8_0",
+                "--cache-type-v",
+                "q8_0",
+                "--numa",
+                "local",
+                "-fa",
+                "--no-mmap",
+                "--mlock",
+                "-ngl",
+                "0",
+            ]
+        );
+    }
+
+    #[test]
+    fn gpu_args_resolve_the_device_id() {
+        let args = to_llama_args_with_device(&best_config_profile(), Some("Vulkan1"));
+        assert_eq!(
+            &args[args.len() - 8..],
+            ["-ngl", "8", "--fit", "off", "-np", "1", "-dev", "Vulkan1"]
+        );
+    }
+
+    #[test]
+    fn cpu_profile_ignores_a_device_id() {
+        let mut profile = best_config_profile();
+        profile.load_config.n_gpu_layers = 0;
+        assert_eq!(
+            to_llama_args_with_device(&profile, Some("Vulkan1")),
+            to_llama_args(&profile)
+        );
+        assert!(!to_llama_args(&profile).iter().any(|arg| arg == "--fit"));
     }
 
     #[test]

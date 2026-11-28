@@ -27,7 +27,7 @@ use attune_bench::llama::{is_readable_file, resolve_llama_cli};
 use attune_bench::BenchError;
 
 use crate::sweep::RankedConfig;
-use crate::{Objective, TuneConfig, TuneError};
+use crate::{Device, Objective, TuneConfig, TuneError};
 
 /// Smallest context llama.cpp accepts (same floor as
 /// [`E2eConfig::ctx_size`]).
@@ -79,6 +79,8 @@ pub fn e2e_config_for(
         cache_type_k: Some(config.cache_type_k.clone()),
         cache_type_v: Some(config.cache_type_v.clone()),
         flash_attn: config.flash_attn,
+        n_gpu_layers: None,
+        device: None,
     }
 }
 
@@ -133,17 +135,25 @@ pub fn rerank_with_e2e(
 
 /// Pick the configs [`run_verify_topk`] measures, best first.
 ///
+/// Only CPU configs are eligible: verification spawns the CPU `llama-cli`
+/// build, so a GPU config would be measured with the wrong backend. GPU
+/// candidates keep their estimate and are reported as skipped by the caller.
+///
 /// The roofline has no thread term, so whole blocks of the grid tie and grid
 /// order (threads outer) would hand every slot to one thread count. Configs
 /// tied with the best score are therefore taken round-robin over distinct
 /// `n_threads` (first of each thread count, then second, ...); the rest
 /// follow in rank order. An untied ranking selects exactly its top `top_k`.
 fn select_verify_candidates(ranked: &[RankedConfig], top_k: usize) -> Vec<&RankedConfig> {
-    let Some(best) = ranked.first() else {
+    let cpu: Vec<&RankedConfig> = ranked
+        .iter()
+        .filter(|entry| entry.device == Device::Cpu)
+        .collect();
+    let Some(best) = cpu.first() else {
         return Vec::new();
     };
     let tolerance = best.score.abs() * TIE_REL_EPS;
-    let tied = ranked
+    let tied = cpu
         .iter()
         .take_while(|entry| (best.score - entry.score).abs() <= tolerance)
         .count();
@@ -151,8 +161,8 @@ fn select_verify_candidates(ranked: &[RankedConfig], top_k: usize) -> Vec<&Ranke
     // Stable sort by "how many earlier tied entries share my thread count".
     let mut tied_order: Vec<usize> = (0..tied).collect();
     tied_order.sort_by_key(|&index| {
-        let threads = ranked[index].config.n_threads;
-        ranked[..index]
+        let threads = cpu[index].config.n_threads;
+        cpu[..index]
             .iter()
             .filter(|entry| entry.config.n_threads == threads)
             .count()
@@ -160,9 +170,9 @@ fn select_verify_candidates(ranked: &[RankedConfig], top_k: usize) -> Vec<&Ranke
 
     tied_order
         .into_iter()
-        .chain(tied..ranked.len())
+        .chain(tied..cpu.len())
         .take(top_k)
-        .map(|index| &ranked[index])
+        .map(|index| cpu[index])
         .collect()
 }
 
@@ -208,13 +218,26 @@ pub fn run_verify_topk(
             model_path.display()
         )));
     }
+    let candidates = select_verify_candidates(ranked, top_k);
+    let mut warnings = Vec::new();
+    if ranked.iter().any(|entry| entry.device == Device::Gpu) {
+        warnings.push("GPU configs are not verified yet".to_string());
+    }
+    // Nothing measurable (all candidates are GPU configs): skip the binary
+    // setup entirely and keep the estimate ranking untouched.
+    if candidates.is_empty() {
+        return Ok(VerifyOutcome {
+            configs: ranked.to_vec(),
+            warnings,
+            engine_version: None,
+        });
+    }
+
     let cli = resolve_llama_cli(llama_cli).map_err(|err| TuneError::Verify(error_chain(&err)))?;
     preflight(&cli, model_path).map_err(map_preflight)?;
 
     let engine_version = cli.display().to_string();
-    let candidates = select_verify_candidates(ranked, top_k);
     let mut measured = Vec::with_capacity(candidates.len());
-    let mut warnings = Vec::new();
 
     for entry in candidates {
         let mut config = e2e_config_for(&entry.config, model_path, prompt_tokens, gen_tokens);
@@ -308,12 +331,14 @@ fn config_label(config: &TuneConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Device;
     use attune_estimate::Quant;
     use std::path::PathBuf;
 
     fn ranked(config: TuneConfig, decode_tps: f64, ttft_ms: f64, score: f64) -> RankedConfig {
         RankedConfig {
             config,
+            device: Device::Cpu,
             decode_tps,
             ttft_ms,
             fits: true,
@@ -463,6 +488,23 @@ mod tests {
         assert_eq!(picked[0].config, tied[0].config);
         assert_eq!(picked[1].config, tied[4].config);
         assert_eq!(picked[2].config, tied[1].config);
+    }
+
+    #[test]
+    fn select_verify_candidates_skips_gpu_configs() {
+        let cpu_config = TuneConfig::new(Quant::Q4_K_M, 2_048, 4, 512, Quant::Fp16);
+        let gpu_config = TuneConfig {
+            n_gpu_layers: 18,
+            ..cpu_config.clone()
+        };
+        let mut gpu = ranked(gpu_config, 1_000.0, 10.0, 1_000.0);
+        gpu.device = Device::Gpu;
+        let cpu = ranked(cpu_config.clone(), 300.0, 100.0, 300.0);
+        let list = [gpu, cpu];
+
+        let picked = select_verify_candidates(&list, 2);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].config, cpu_config);
     }
 
     #[test]

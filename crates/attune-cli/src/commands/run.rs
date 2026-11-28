@@ -10,8 +10,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use attune_profile::Profile;
 use attune_serve::{profiles_dir, ChatClient};
 
+use super::tune::TuneDevice;
 use super::{chat, download, serve, setup, tune};
 
 /// Weight format used when `--quant` is omitted.
@@ -27,6 +29,7 @@ pub fn run(
     no_chat: bool,
     system: Option<&str>,
     llama_server: Option<&Path>,
+    device: TuneDevice,
     port: u16,
     listen: &str,
     listen_port: u16,
@@ -38,18 +41,28 @@ pub fn run(
     } else {
         quant
     };
-    let name = profile_name(model, quant);
+    let name = profile_name(model, quant, device);
     let path = profiles_dir()
         .map_err(|error| anyhow!("{error}"))?
         .join(format!("{name}.json"));
 
-    let current = tune::current_hardware_fingerprint();
-    let existing = existing_fingerprint(&path);
+    let existing = existing_profile(&path);
+    let current_cpu = tune::current_hardware_fingerprint();
+    let current_gpu = existing
+        .as_ref()
+        .filter(|profile| profile.device() == "gpu")
+        .and_then(|profile| machine_gpu_fingerprint(profile.load_config.gpu_name.as_deref()));
 
-    // Resolve/install llama-server before the profile work, as `setup` would.
-    setup::ensure_llama_server(llama_server, yes)?;
+    // Resolve/install the llama.cpp build(s) the chosen device needs, as
+    // `setup` would (the explicit `--llama-server` wins and installs nothing).
+    setup::ensure_llama_server_for(device, llama_server, yes)?;
 
-    if needs_tune(existing.as_deref(), &current, retune) {
+    if needs_tune(
+        existing.as_ref(),
+        &current_cpu,
+        current_gpu.as_deref(),
+        retune,
+    ) {
         tune::run(
             Some(model),
             None,
@@ -58,6 +71,7 @@ pub fn run(
             "balanced",
             None,
             None,
+            device,
             64,
             Some(&path),
             Some(&name),
@@ -89,6 +103,7 @@ pub fn run(
     let mut running = serve::launch_running(
         &path.display().to_string(),
         llama_server,
+        attune_serve::ServeDevice::Auto,
         "127.0.0.1",
         port,
         listen,
@@ -103,7 +118,16 @@ pub fn run(
         eprintln!("[attune] warning: {warning}");
     }
     let proxy_url = running.proxy_url().to_string();
-    println!("Starting {name} on {proxy_url} ...");
+    let ready = running.ready_report();
+    let placement = if ready.device == "gpu" {
+        ready
+            .gpu_name
+            .as_deref()
+            .map_or_else(|| "GPU".to_string(), |name| format!("GPU: {name}"))
+    } else {
+        "CPU".to_string()
+    };
+    println!("Starting {name} on {proxy_url} ({placement}) ...");
     std::io::stdout().flush()?;
 
     if no_chat {
@@ -144,14 +168,37 @@ pub fn run(
     }
 }
 
-/// A saved profile can be reused only when it is for this machine and the user
-/// did not ask for a fresh tune.
-pub fn needs_tune(existing_fingerprint: Option<&str>, current: &str, retune: bool) -> bool {
-    retune || existing_fingerprint.is_none_or(|fingerprint| fingerprint != current)
+/// A saved profile can be reused only when its fingerprint matches this
+/// machine, computed the same way the profile was made: GPU profiles
+/// (`n_gpu_layers > 0`) use the GPU-aware fingerprint, CPU profiles the CPU one.
+/// `retune` always forces a fresh tune.
+pub fn needs_tune(
+    existing: Option<&Profile>,
+    current_cpu: &str,
+    current_gpu: Option<&str>,
+    retune: bool,
+) -> bool {
+    if retune {
+        return true;
+    }
+    let Some(profile) = existing else {
+        return true;
+    };
+    let current = if profile.device() == "gpu" {
+        match current_gpu {
+            Some(fingerprint) => fingerprint,
+            None => return true,
+        }
+    } else {
+        current_cpu
+    };
+    profile.hardware_fingerprint != current
 }
 
-/// `<id>-<quant>` for a catalog id, or the file stem for a `.gguf` path.
-pub fn profile_name(model: &str, quant: &str) -> String {
+/// Profile name for a device: `<id>-<quant>` on the CPU (unchanged, so saved
+/// CPU profiles keep working), `-gpu` for `--device gpu` and `-auto` for
+/// `--device auto`. A `.gguf` source contributes its file stem.
+pub fn profile_name(model: &str, quant: &str, device: TuneDevice) -> String {
     let text = model.trim();
     let path = Path::new(text);
     let is_gguf = path
@@ -167,57 +214,105 @@ pub fn profile_name(model: &str, quant: &str) -> String {
     } else {
         format!("{text}-{quant}")
     };
-    name.replace(['/', '\\'], "-")
+    let suffix = match device {
+        TuneDevice::Cpu => "",
+        TuneDevice::Gpu => "-gpu",
+        TuneDevice::Auto => "-auto",
+    };
+    format!("{name}{suffix}").replace(['/', '\\'], "-")
 }
 
-/// The fingerprint recorded in an existing profile, or `None` when the file is
-/// missing or unreadable (either way a fresh tune is the safe answer).
-fn existing_fingerprint(path: &Path) -> Option<String> {
+/// The saved profile, or `None` when the file is missing or unreadable (either
+/// way a fresh tune is the safe answer).
+fn existing_profile(path: &Path) -> Option<Profile> {
     let text = std::fs::read_to_string(path).ok()?;
-    attune_profile::Profile::from_json_str(&text)
-        .ok()
-        .map(|profile| profile.hardware_fingerprint)
+    Profile::from_json_str(&text).ok()
+}
+
+/// The GPU-aware fingerprint for this machine, matching the profile's
+/// `gpu_name` when it is still present and otherwise the first NVIDIA/AMD
+/// adapter.
+fn machine_gpu_fingerprint(preferred: Option<&str>) -> Option<String> {
+    let devices = attune_hal::gpu::detect().devices;
+    let device = preferred
+        .and_then(|name| devices.iter().find(|device| device.name.as_str() == name))
+        .or_else(|| {
+            devices
+                .iter()
+                .find(|device| matches!(device.vendor.as_str(), "nvidia" | "amd"))
+        })?;
+    let vram = device
+        .vram_total_bytes
+        .or(device.vram_free_bytes)
+        .unwrap_or(0);
+    Some(tune::current_hardware_fingerprint_with_gpu(Some((
+        &device.name,
+        vram,
+    ))))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn needs_tune_for_missing_matching_mismatched_and_retune() {
-        assert!(needs_tune(None, "cpu|8|avx2|16000000000", false));
-        assert!(!needs_tune(
-            Some("cpu|8|avx2|16000000000"),
-            "cpu|8|avx2|16000000000",
-            false
-        ));
-        assert!(needs_tune(
-            Some("old-cpu|4|sse|8000000000"),
-            "cpu|8|avx2|16000000000",
-            false
-        ));
-        assert!(needs_tune(
-            Some("cpu|8|avx2|16000000000"),
-            "cpu|8|avx2|16000000000",
-            true
-        ));
+    fn profile_with(fingerprint: &str, gpu_layers: u32) -> Profile {
+        let mut profile = Profile {
+            hardware_fingerprint: fingerprint.to_string(),
+            ..Profile::default()
+        };
+        profile.load_config.n_gpu_layers = gpu_layers;
+        profile
     }
 
     #[test]
-    fn profile_name_is_id_quant_for_catalog_ids() {
-        assert_eq!(profile_name("qwen3-4b", "q4_k_m"), "qwen3-4b-q4_k_m");
-        assert_eq!(profile_name(" qwen3-4b ", "q8_0"), "qwen3-4b-q8_0");
+    fn needs_tune_compares_gpu_profiles_against_the_gpu_fingerprint() {
+        let cpu = "cpu|8|avx2|16000000000";
+        let gpu = "cpu|8|avx2|16000000000|NVIDIA GeForce RTX 4050|6";
+        let saved_cpu = profile_with(cpu, 0);
+        let saved_gpu = profile_with(gpu, 36);
+
+        assert!(!needs_tune(Some(&saved_cpu), cpu, Some(gpu), false));
+        assert!(needs_tune(Some(&saved_cpu), gpu, Some(gpu), false));
+        assert!(!needs_tune(Some(&saved_gpu), cpu, Some(gpu), false));
+        assert!(needs_tune(Some(&saved_gpu), cpu, Some(cpu), false));
+        assert!(needs_tune(Some(&saved_gpu), cpu, None, false));
+        assert!(needs_tune(None, cpu, Some(gpu), false));
+        assert!(needs_tune(Some(&saved_cpu), cpu, Some(gpu), true));
     }
 
     #[test]
-    fn profile_name_is_the_file_stem_for_gguf_paths() {
+    fn profile_name_suffix_follows_the_device() {
         assert_eq!(
-            profile_name("models/smollm2-Q4.gguf", "q4_k_m"),
+            profile_name("qwen3-4b", "q4_k_m", TuneDevice::Cpu),
+            "qwen3-4b-q4_k_m"
+        );
+        assert_eq!(
+            profile_name("qwen3-4b", "q4_k_m", TuneDevice::Gpu),
+            "qwen3-4b-q4_k_m-gpu"
+        );
+        assert_eq!(
+            profile_name("qwen3-4b", "q4_k_m", TuneDevice::Auto),
+            "qwen3-4b-q4_k_m-auto"
+        );
+        assert_eq!(
+            profile_name(" qwen3-4b ", "q8_0", TuneDevice::Cpu),
+            "qwen3-4b-q8_0"
+        );
+    }
+
+    #[test]
+    fn profile_name_is_the_file_stem_with_the_device_suffix_for_gguf_paths() {
+        assert_eq!(
+            profile_name("models/smollm2-Q4.gguf", "q4_k_m", TuneDevice::Cpu),
             "smollm2-Q4"
         );
         assert_eq!(
-            profile_name("C:\\models\\smollm2-Q4_K_M.GGUF", "q8_0"),
-            "smollm2-Q4_K_M"
+            profile_name("C:\\models\\smollm2-Q4_K_M.GGUF", "q8_0", TuneDevice::Gpu),
+            "smollm2-Q4_K_M-gpu"
+        );
+        assert_eq!(
+            profile_name("models/smollm2-Q4.gguf", "q4_k_m", TuneDevice::Auto),
+            "smollm2-Q4-auto"
         );
     }
 }

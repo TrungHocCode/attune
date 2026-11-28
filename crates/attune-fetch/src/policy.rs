@@ -43,11 +43,16 @@ impl HostPolicy {
             url: url.to_string(),
         };
         let (scheme, rest) = url.split_once("://").ok_or_else(denied)?;
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, "/"),
-        };
-        if authority.contains('@') {
+        // The authority ends at the first path, query or fragment delimiter.
+        // Splitting only at `/` would let `evil.example?x.hf.co` (or `#`) keep
+        // the allow-listed suffix in the authority and pass the check.
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
+        let path = rest
+            .get(authority_end..)
+            .filter(|tail| tail.starts_with('/'))
+            .unwrap_or("/");
+        if authority.contains('@') || authority.contains('\\') {
             return Err(denied());
         }
         let host = authority
@@ -87,6 +92,8 @@ mod tests {
             "https://release-assets.githubusercontent.com/github-production-release-asset/1",
             "https://objects.githubusercontent.com/github-production-release-asset-2e65be/1",
             "https://raw.githubusercontent.com/TrungHocCode/attune/catalog/catalog.json",
+            "https://huggingface.co?download=1",
+            "https://github.com/ggml-org/llama.cpp/releases/download/b1/a.zip?download=1",
         ] {
             assert!(policy.check(ok).is_ok(), "{ok}");
         }
@@ -98,6 +105,13 @@ mod tests {
             "https://huggingface.co.evil.example/x",
             "https://evilhuggingface.co/x",
             "http://127.0.0.1:8080/x",
+            // A query or fragment must not become part of the authority.
+            "https://evil.example?x.hf.co",
+            "https://evil.example#x.hf.co",
+            // Backslashes are never valid in an authority; browsers may treat
+            // them as separators, which would let a suffix slip through.
+            "https://evil.example\\@huggingface.co/x",
+            "https://evil.example\\.huggingface.co/x",
         ] {
             assert!(
                 matches!(policy.check(bad), Err(FetchError::HostNotAllowed { .. })),

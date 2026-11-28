@@ -65,6 +65,21 @@ fn migrate_object(object: &mut Map<String, Value>) {
         }
     }
 
+    // v3 adds `engine.variant`. Everything older is CPU-tuned, so record the
+    // build explicitly instead of relying on the serde default.
+    if version < 3 {
+        match object.get_mut("engine").and_then(Value::as_object_mut) {
+            Some(engine) => {
+                engine
+                    .entry("variant")
+                    .or_insert_with(|| Value::from("cpu"));
+            }
+            None => {
+                object.insert("engine".to_string(), json!({ "variant": "cpu" }));
+            }
+        }
+    }
+
     // `draft_model` is `Option` and already defaults to `None`; no key is
     // inserted so an upgraded v0 document keeps omitting it from JSON.
 }
@@ -155,15 +170,69 @@ mod tests {
     }
 
     #[test]
-    fn v1_profile_migrates_to_v2_without_source() {
+    fn v1_profile_migrates_through_v2_to_v3() {
         let v1 = json!({
             "profile_version": 1,
             "name": "old",
+            "engine": { "name": "llama.cpp", "version": "b4000" },
             "model": { "path": "F:/m.gguf", "quant": "q4_k_m", "size_bytes": 10 }
         });
         let profile = migrate_value(v1);
-        assert_eq!(profile.profile_version, 2);
+        assert_eq!(profile.profile_version, 3);
         assert_eq!(profile.model.path, "F:/m.gguf");
         assert!(profile.model.source.is_none());
+        assert_eq!(profile.engine.variant, "cpu");
+        assert_eq!(profile.device(), "cpu");
+    }
+
+    #[test]
+    fn v2_profile_gains_the_cpu_variant_and_keeps_its_fields() {
+        let v2 = json!({
+            "profile_version": 2,
+            "name": "v2-profile",
+            "engine": { "name": "llama.cpp", "version": "b4000" },
+            "model": {
+                "path": "~/.attune/models/a/b.gguf",
+                "quant": "q4_k_m",
+                "size_bytes": 10,
+                "source": {
+                    "repo": "Qwen/Qwen3-8B-GGUF",
+                    "file": "Qwen3-8B-Q4_K_M.gguf",
+                    "revision": "rev",
+                    "sha256": "d",
+                    "size": 10
+                }
+            },
+            "load_config": { "n_ctx": 4096, "n_gpu_layers": 0 }
+        });
+        let profile = migrate_value(v2);
+        assert_eq!(profile.profile_version, 3);
+        assert_eq!(profile.engine.variant, "cpu");
+        assert_eq!(profile.load_config.n_ctx, 4_096);
+        assert!(profile.model.source.is_some());
+        assert!(profile.load_config.gpu_name.is_none());
+        assert_eq!(profile.device(), "cpu");
+    }
+
+    #[test]
+    fn v3_gpu_profile_survives_the_upgrade_untouched() {
+        let mut original = Profile {
+            name: "gpu-profile".to_string(),
+            ..Profile::default()
+        };
+        original.load_config.n_gpu_layers = 99;
+        original.load_config.gpu_name = Some("NVIDIA GeForce RTX 4050 Laptop GPU".to_string());
+        original.engine.variant = "vulkan".to_string();
+
+        let value = serde_json::to_value(&original).expect("serialize v3 profile");
+        let migrated = migrate_value(value);
+        assert_eq!(migrated.profile_version, 3);
+        assert_eq!(migrated.engine.variant, "vulkan");
+        assert_eq!(
+            migrated.load_config.gpu_name.as_deref(),
+            Some("NVIDIA GeForce RTX 4050 Laptop GPU")
+        );
+        assert_eq!(migrated.device(), "gpu");
+        assert_eq!(migrated, original);
     }
 }

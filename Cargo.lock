@@ -72,9 +72,11 @@ checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
 
 [[package]]
 name = "attune-backend"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
+ "attune-estimate",
  "attune-fetch",
+ "attune-hal",
  "attune-profile",
  "serde",
  "thiserror",
@@ -84,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "attune-bench"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "attune-hal",
  "serde",
@@ -96,9 +98,10 @@ dependencies = [
 
 [[package]]
 name = "attune-cli"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
+ "attune-backend",
  "attune-bench",
  "attune-estimate",
  "attune-fetch",
@@ -112,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "attune-estimate"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "attune-bench",
  "attune-fetch",
@@ -124,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "attune-fetch"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "flate2",
  "sha2",
@@ -137,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "attune-hal"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "raw-cpuid",
  "serde",
@@ -148,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "attune-profile"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -157,12 +160,14 @@ dependencies = [
 
 [[package]]
 name = "attune-serve"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "attune-backend",
+ "attune-estimate",
  "attune-fetch",
  "attune-hal",
  "attune-profile",
+ "attune-tune",
  "ctrlc",
  "serde",
  "serde_json",
@@ -173,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "attune-tune"
-version = "0.5.0"
+version = "0.7.0"
 dependencies = [
  "attune-bench",
  "attune-estimate",

@@ -36,8 +36,9 @@ pub mod shutdown;
 
 pub use chat::{parse_sse_line, ChatClient, ChatDelta, ChatStats, Message, SseEvent};
 pub use launcher::{
-    fingerprint_of, launch, prepare_profile, resolve_model_file, DownloadConsent, PreparedProfile,
-    ReadyReport, ServeOptions, Serving,
+    fingerprint_of, fingerprint_of_gpu, launch, plan_serve, prepare_profile, resolve_model_file,
+    DownloadConsent, PreparedProfile, ReadyReport, ServeDevice, ServeOptions, ServePlan, Serving,
+    CPU_OVERRIDE_NOTE, CPU_PROFILE_ON_GPU, NO_GPU_BUILD,
 };
 pub use profiles::{profiles_dir, resolve_profile};
 pub use server::{check_listen, Proxy, ProxyConfig};

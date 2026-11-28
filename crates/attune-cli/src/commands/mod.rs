@@ -7,6 +7,7 @@ mod chat;
 mod detect;
 mod download;
 mod estimate;
+mod model;
 mod recommend;
 mod run;
 mod serve;
@@ -30,6 +31,10 @@ pub enum Command {
         /// Re-download the model catalog even if the cached copy is fresh
         #[arg(long)]
         refresh_catalog: bool,
+        /// Which llama.cpp build to install: auto (GPU build when a discrete
+        /// GPU is found), cpu, vulkan or cuda
+        #[arg(long, value_name = "BUILD", default_value = "auto")]
+        gpu: attune_backend::GpuRequest,
     },
     /// Show this machine's CPU, memory and GPU
     Detect {
@@ -74,6 +79,10 @@ pub enum Command {
         /// decide. Ignored unless `--model` is also passed.
         #[arg(long, value_name = "N", requires = "model")]
         threads: Option<u32>,
+        /// Device for the e2e run: `cpu` (default) or `gpu`. `gpu` runs all
+        /// layers on an installed Vulkan/CUDA build and requires `--model`.
+        #[arg(long, value_enum, default_value = "cpu", requires = "model")]
+        device: bench::BenchDevice,
     },
     /// Predict how fast a model will run on this machine
     #[command(group(
@@ -92,9 +101,9 @@ pub enum Command {
         /// `--model` for models outside the catalog.
         #[arg(long, value_name = "SIZE")]
         params: Option<String>,
-        /// Weight format(s): `fp16`, `q8_0`, `q4_0` or `q4_k_m`.
+        /// Weight format(s): `fp16`, `q8_0`, `q4_0` or `q4_k_m` (default).
         /// Comma-separate to compare configs, e.g. `fp16,q8_0,q4_k_m`
-        #[arg(long, value_name = "QUANT[,QUANT...]")]
+        #[arg(long, value_name = "QUANT[,QUANT...]", default_value = "q4_k_m")]
         quant: String,
         /// Override measured memory bandwidth (decimal GB/s); skips the bench
         #[arg(long, value_name = "GBPS")]
@@ -118,9 +127,10 @@ pub enum Command {
         /// Number of decode tokens to estimate (default 128)
         #[arg(long, value_name = "N", default_value_t = 128)]
         gen_tokens: u64,
-        /// Context window size used for KV-cache sizing. When omitted, a
-        /// built-in model uses its documented default (catalog/config.json),
-        /// otherwise 2048. An explicit value always wins.
+        /// Context window size used for KV-cache sizing. When omitted, the
+        /// model's documented maximum (catalog/config.json/GGUF) is capped at
+        /// 4096, the window `tune`/`run` plan for; 4096 when unknown. An
+        /// explicit value always wins.
         #[arg(long, value_name = "N")]
         ctx: Option<u32>,
         /// Saved `attune bench --json` report to calibrate against. Accepts
@@ -156,6 +166,9 @@ pub enum Command {
         /// Weight format to download and tune
         #[arg(long, value_name = "QUANT", default_value = "q4_k_m")]
         quant: String,
+        /// Where to run: auto (GPU when one is usable), cpu or gpu
+        #[arg(long, value_enum, default_value = "auto")]
+        device: tune::TuneDevice,
         /// Download the model and install llama.cpp without asking
         #[arg(long)]
         yes: bool,
@@ -196,9 +209,13 @@ pub enum Command {
         #[arg(long, value_name = "PATH_OR_NAME")]
         profile: String,
         /// Path to the llama.cpp `llama-server` binary (default:
-        /// $ATTUNE_LLAMA_SERVER, then a PATH search for `llama-server`)
+        /// $ATTUNE_LLAMA_SERVER, then the profile's installed build)
         #[arg(long, value_name = "PATH")]
         llama_server: Option<PathBuf>,
+        /// Where to run the profile: auto (the profile's own device), cpu or
+        /// gpu. `cpu` runs a GPU-tuned profile with no offloaded layers.
+        #[arg(long, value_enum, default_value_t = tune::TuneDevice::Auto)]
+        device: tune::TuneDevice,
         /// Interface llama-server (the upstream) binds to
         #[arg(long, value_name = "HOST", default_value = "127.0.0.1")]
         host: String,
@@ -248,6 +265,10 @@ pub enum Command {
         /// e.g. `4G` (keeps room for other apps)
         #[arg(long, value_name = "SIZE")]
         max_ram: Option<String>,
+        /// Where each model should run: auto (the best device for it), cpu or
+        /// gpu. `gpu` fails when no usable GPU is detected.
+        #[arg(long, value_enum, default_value = "auto")]
+        device: tune::TuneDevice,
         /// Show every catalog model and quant
         #[arg(long)]
         all: bool,
@@ -293,6 +314,9 @@ pub enum Command {
         /// Override the FP32 peak (decimal GFLOPS); skips the HAL estimate
         #[arg(long, value_name = "GFLOPS")]
         gflops: Option<f64>,
+        /// Where the model runs: auto (GPU when one is usable), cpu or gpu
+        #[arg(long, value_enum, default_value = "auto")]
+        device: tune::TuneDevice,
         /// Keep at most this many candidates after pruning (default 64)
         #[arg(long, value_name = "N", default_value_t = 64)]
         max_configs: usize,
@@ -373,7 +397,8 @@ pub fn dispatch(command: Command) -> Result<()> {
         Command::Setup {
             yes,
             refresh_catalog,
-        } => setup::run(yes, refresh_catalog),
+            gpu,
+        } => setup::run(yes, refresh_catalog, gpu),
         Command::Bench {
             quick,
             json,
@@ -384,6 +409,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             gen_tokens,
             ctx,
             threads,
+            device,
         } => bench::run(
             quick,
             json,
@@ -394,6 +420,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             gen_tokens,
             ctx,
             threads,
+            device,
         ),
         Command::Estimate {
             model,
@@ -431,6 +458,7 @@ pub fn dispatch(command: Command) -> Result<()> {
         Command::Serve {
             profile,
             llama_server,
+            device,
             host,
             port,
             listen,
@@ -443,6 +471,7 @@ pub fn dispatch(command: Command) -> Result<()> {
         } => serve::run(
             &profile,
             llama_server.as_deref(),
+            device.into(),
             &host,
             port,
             &listen,
@@ -461,6 +490,7 @@ pub fn dispatch(command: Command) -> Result<()> {
         Command::Run {
             model,
             quant,
+            device,
             yes,
             retune,
             no_chat,
@@ -479,6 +509,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             no_chat,
             system.as_deref(),
             llama_server.as_deref(),
+            device,
             port,
             &listen,
             listen_port,
@@ -487,10 +518,11 @@ pub fn dispatch(command: Command) -> Result<()> {
         ),
         Command::Recommend {
             max_ram,
+            device,
             all,
             refresh_catalog,
             json,
-        } => tune::run_recommend(max_ram.as_deref(), all, refresh_catalog, json),
+        } => tune::run_recommend(max_ram.as_deref(), all, refresh_catalog, device, json),
         Command::Tune {
             model,
             params,
@@ -499,6 +531,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             objective,
             bandwidth_gbps,
             gflops,
+            device,
             max_configs,
             save,
             name,
@@ -524,6 +557,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             &objective,
             bandwidth_gbps,
             gflops,
+            device,
             max_configs,
             save.as_deref(),
             name.as_deref(),
@@ -592,11 +626,13 @@ mod tests {
         match cli.command {
             Command::Recommend {
                 max_ram,
+                device,
                 all,
                 refresh_catalog,
                 json,
             } => {
                 assert_eq!(max_ram.as_deref(), Some("4G"));
+                assert_eq!(device, super::tune::TuneDevice::Auto);
                 assert!(all);
                 assert!(!refresh_catalog);
                 assert!(json);
@@ -633,6 +669,77 @@ mod tests {
                 assert!(!retune);
             }
             _ => panic!("expected the run subcommand"),
+        }
+    }
+
+    #[test]
+    fn run_parses_the_device_flag() {
+        let cli = crate::Cli::try_parse_from(["attune", "run", "qwen3-4b", "--device", "gpu"])
+            .expect("run should parse");
+        match cli.command {
+            Command::Run { device, .. } => {
+                assert_eq!(device, super::tune::TuneDevice::Gpu);
+            }
+            _ => panic!("expected the run subcommand"),
+        }
+
+        let cli = crate::Cli::try_parse_from(["attune", "run", "qwen3-4b"])
+            .expect("run should parse without --device");
+        match cli.command {
+            Command::Run { device, .. } => assert_eq!(device, super::tune::TuneDevice::Auto),
+            _ => panic!("expected the run subcommand"),
+        }
+    }
+
+    #[test]
+    fn tune_parses_the_device_flag() {
+        let cli = crate::Cli::try_parse_from(["attune", "tune", "--model", "x", "--device", "gpu"])
+            .expect("tune should parse");
+        match cli.command {
+            Command::Tune { device, .. } => {
+                assert_eq!(device, super::tune::TuneDevice::Gpu);
+            }
+            _ => panic!("expected the tune subcommand"),
+        }
+
+        let cli = crate::Cli::try_parse_from(["attune", "tune", "--model", "x"])
+            .expect("tune should parse without --device");
+        match cli.command {
+            Command::Tune { device, .. } => assert_eq!(device, super::tune::TuneDevice::Auto),
+            _ => panic!("expected the tune subcommand"),
+        }
+    }
+
+    #[test]
+    fn estimate_defaults_to_q4_k_m_and_keeps_comma_lists() {
+        let cli =
+            crate::Cli::try_parse_from(["attune", "estimate", "--model", "qwen3-4b-instruct-2507"])
+                .expect("estimate should parse without --quant");
+        match cli.command {
+            Command::Estimate { quant, ctx, .. } => {
+                assert_eq!(quant, "q4_k_m");
+                assert_eq!(ctx, None);
+            }
+            _ => panic!("expected the estimate subcommand"),
+        }
+
+        let cli = crate::Cli::try_parse_from([
+            "attune",
+            "estimate",
+            "--model",
+            "qwen3-4b",
+            "--quant",
+            "fp16,q8_0",
+            "--ctx",
+            "2048",
+        ])
+        .expect("comma list parses");
+        match cli.command {
+            Command::Estimate { quant, ctx, .. } => {
+                assert_eq!(quant, "fp16,q8_0");
+                assert_eq!(ctx, Some(2_048));
+            }
+            _ => panic!("expected the estimate subcommand"),
         }
     }
 

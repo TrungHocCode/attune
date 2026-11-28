@@ -17,6 +17,7 @@
 pub mod bandwidth;
 pub mod e2e;
 pub mod flops;
+pub mod gpu;
 pub mod int8;
 pub mod llama;
 pub mod monitor;
@@ -130,6 +131,10 @@ pub struct BenchReport {
     /// was passed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub e2e: Option<e2e::E2eResult>,
+    /// Full-offload GPU decode measurement. `None` unless
+    /// `attune bench --model --device gpu` ran; absent from every older JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<gpu::GpuE2eResult>,
 }
 
 /// Bandwidth kernel result. Untagged enum because the two variants have
@@ -184,6 +189,7 @@ pub fn run_quick() -> Result<BenchReport, BenchError> {
         int8: None,
         resources: None,
         e2e: None,
+        gpu: None,
     })
 }
 
@@ -229,6 +235,7 @@ pub fn run_full(
         int8: Some(int8_result),
         resources: bandwidth_result.resources,
         e2e,
+        gpu: None,
     })
 }
 
@@ -361,6 +368,7 @@ mod tests {
             int8: None,
             resources: None,
             e2e: None,
+            gpu: None,
         };
         let json = serde_json::to_string(&report).expect("serialize BenchReport");
         for key in ["schema", "mode", "bandwidth", "read_gbps", "buffer_mib"] {
@@ -383,6 +391,7 @@ mod tests {
             int8: None,
             resources: Some(sample_resources()),
             e2e: None,
+            gpu: None,
         };
         let json = serde_json::to_string(&report).expect("serialize BenchReport");
         for key in ["schema", "mode", "bandwidth", "flops", "resources"] {
@@ -405,6 +414,7 @@ mod tests {
             int8: None,
             resources: Some(sample_resources()),
             e2e: Some(sample_e2e()),
+            gpu: None,
         };
         let json = serde_json::to_string(&report).expect("serialize BenchReport");
         // Required keys per the spec — every required field on e2e lands in
@@ -432,6 +442,69 @@ mod tests {
     }
 
     #[test]
+    fn full_report_with_gpu_carries_the_gpu_block() {
+        let gpu = crate::gpu::GpuE2eResult {
+            device: "Vulkan1".into(),
+            device_name: Some("NVIDIA GeForce RTX 4050 Laptop GPU".into()),
+            build: "vulkan".into(),
+            decode_tps: 61.2,
+            prefill_tps: 1_850.0,
+            weight_bytes: 2_500_000_000,
+            effective_vram_gbps: 153.0,
+            theoretical_vram_gbps: Some(192.0),
+            eta_gpu: Some(0.80),
+        };
+        let report = BenchReport {
+            schema: SCHEMA.to_string(),
+            mode: "full".to_string(),
+            bandwidth: full_bandwidth_value(),
+            flops: Some(sample_flops()),
+            int8: None,
+            resources: Some(sample_resources()),
+            e2e: Some(sample_e2e()),
+            gpu: Some(gpu),
+        };
+        let json = serde_json::to_string(&report).expect("serialize BenchReport");
+        for key in [
+            "gpu",
+            "device",
+            "build",
+            "decode_tps",
+            "prefill_tps",
+            "weight_bytes",
+            "effective_vram_gbps",
+            "theoretical_vram_gbps",
+            "eta_gpu",
+        ] {
+            assert!(
+                json.contains(&format!("\"{key}\"")),
+                "missing {key}: {json}"
+            );
+        }
+        let back: BenchReport = serde_json::from_str(&json).expect("deserialize BenchReport");
+        assert_eq!(back, report);
+    }
+
+    #[test]
+    fn gpu_block_is_absent_when_none() {
+        let report = BenchReport {
+            schema: SCHEMA.to_string(),
+            mode: "full".to_string(),
+            bandwidth: full_bandwidth_value(),
+            flops: None,
+            int8: None,
+            resources: None,
+            e2e: None,
+            gpu: None,
+        };
+        let json = serde_json::to_string(&report).expect("serialize BenchReport");
+        assert!(
+            !json.contains("\"gpu\""),
+            "gpu key must be absent when None: {json}"
+        );
+    }
+
+    #[test]
     fn e2e_none_default_keeps_the_report_compact() {
         // Without `--model`, the e2e block is absent — `skip_serializing_if`
         // keeps it out of the JSON instead of emitting `"e2e": null`.
@@ -443,6 +516,7 @@ mod tests {
             int8: None,
             resources: None,
             e2e: None,
+            gpu: None,
         };
         let json = serde_json::to_string(&report).expect("serialize BenchReport");
         assert!(
@@ -496,5 +570,6 @@ mod tests {
         assert!(back.resources.is_none());
         // e2e was absent from the input — back-compat default is None.
         assert!(back.e2e.is_none());
+        assert!(back.gpu.is_none());
     }
 }

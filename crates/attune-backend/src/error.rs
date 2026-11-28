@@ -20,6 +20,14 @@ pub enum BackendError {
     /// A model file could not be downloaded or verified.
     #[error("model download failed: {detail}")]
     Download { detail: String },
+    /// A GPU device probe (`--list-devices`) could not run or timed out.
+    #[error("could not list GPU devices with `{binary}`: {detail}")]
+    GpuProbe {
+        /// The executable we probed.
+        binary: String,
+        /// Why the probe failed (exit status, stderr tail, or timeout).
+        detail: String,
+    },
     /// The child could not be started, or polling it failed.
     #[error("failed to run `{binary}`")]
     Spawn {

@@ -24,4 +24,9 @@ pub enum TuneError {
     /// failures are warnings, not this error.
     #[error("e2e verification setup failed: {0}")]
     Verify(String),
+    /// GPU tuning was requested but cannot be planned: no GPU was found, its
+    /// VRAM is unknown, the model's layer count is unknown, or even one layer
+    /// does not fit. The payload is the actionable reason.
+    #[error("GPU tuning unavailable: {0}")]
+    NoGpu(String),
 }

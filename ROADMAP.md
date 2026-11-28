@@ -122,7 +122,7 @@ bytes), #73, #74 (GGUF facts), #75 (profile metadata), #69 (prefill
 ceiling), #70 (bandwidth probe), then #78 re-validates M3/M4 on 4B+ models.
 The GPU work below builds on this math, so it lands first.
 
-## M6 — Recommend & downloads 🚧 (built; catalog freshness pending, v0.6.0 planned)
+## M6 — Recommend & downloads ✅ (v0.6.0)
 
 **Goal:** a new user who does not know model names gets a model that suits
 their machine running, with no manual downloads.
@@ -138,8 +138,8 @@ their machine running, with no manual downloads.
 - New leaf crate `attune-fetch` (home dir, resumable verified downloads).
 - Acceptance: zero manual downloads from binary to first reply; uncalibrated
   predicted decode within 25% on 3 catalog models of different tiers, and
-  every model marked as fitting loads and serves; 7 consecutive days of valid
-  catalogs; works offline; interrupted downloads resume and corrupted files
+  every model marked as fitting loads and serves; valid daily catalogs
+  (revised 2026-11-28 from "7 consecutive days", see below); works offline; interrupted downloads resume and corrupted files
   are rejected.
 - Design: [docs/superpowers/specs/2026-11-26-recommend-design.md](docs/superpowers/specs/2026-11-26-recommend-design.md).
 - Results 2026-11-27 (Windows 11, Core 5 210H, llama.cpp b11804 CPU, see
@@ -148,22 +148,61 @@ their machine running, with no manual downloads.
   of downloads (**met**); uncalibrated decode +5.1% (Qwen3 0.6B Q8_0), +9.5%
   (4B Q4_K_M), -2.4% (8B Q4_K_M) vs llama-bench (**met**), and the fitting
   pick served; offline recommend + serve (**met**); a download killed at 76 MB
-  resumed, a tampered SHA-256 was rejected (**met**). **Pending:** 7
-  consecutive daily catalog runs, which start once `catalog.yml` is on `main`.
+  resumed, a tampered SHA-256 was rejected (**met**).
+- Catalog freshness, revised 2026-11-28:
+  - The bar was 7 consecutive days, later cut to 2 scheduled runs, and finally closed on the verified manual run (2026-11-27, 66 models) plus monitoring of the scheduled runs.
+  - Why: users never depend on a fresh catalog, because loading falls back from a stale cache to the built-in snapshot (now 66 models).
+  - A failing daily run is a bug for a patch release, not a blocker.
+- Friendly path, added to M6 (design [2026-11-27-friendly-design.md](docs/superpowers/specs/2026-11-27-friendly-design.md)):
+  - One-line install and release binaries (#127).
+  - `attune recommend` (#121), `attune chat` (#122), and `attune run <model>` (#126).
+- Release acceptance 2026-11-28 (same machine, v0.6.0 from GitHub, empty `ATTUNE_HOME`):
+
+  | Step | Time |
+  |---|---|
+  | `irm …/install.ps1 \| iex` (PATH set, a new shell finds `attune 0.6.0`) | 6.9 s |
+  | `attune recommend` | 7.3 s |
+  | `attune run qwen3-0.6b --yes` (installs llama.cpp, tunes, downloads 0.4 GB, serves, streams the reply) | 55.6 s |
+  | **Total, install to first chat reply, downloads included** | **≈ 70 s** (target: < 5 min excluding the model download, **met**) |
+
+  - `/bye` left no llama-server running.
+  - The `release.yml` pipeline passed on its first real tag.
 - Found on the way: Windows power throttling slowed every in-process probe
   after the first (34.7 -> 12-17 GB/s), and `HTTP(S)_PROXY` broke `serve`'s
   localhost health check; both fixed. llama.cpp prefill reaches 0.40 of the
   unthrottled int8 peak (was assumed 0.9-0.95).
 
-## M7 — GPU (proposed)
+## M7 — GPU ✅ (v0.7.0)
 
-**Goal:** use the GPU the machine already has, and split the model across
-GPU + CPU when it does not fit in VRAM.
+**Goal:** use the GPU the machine already has, and split the model across GPU and CPU when it doesn't fit in VRAM. The user picks where it runs with `--device auto|cpu|gpu`.
 
-- Detect GPUs (vendor CLI, no SDK dependency), measure effective VRAM
-  bandwidth through llama.cpp, estimate full and partial offload with a VRAM
-  fit check, tune `n_gpu_layers`, serve with a GPU llama.cpp build.
-- Full plan, non-goals and proposed acceptance: [docs/gpu-plan.md](docs/gpu-plan.md).
+- **What shipped:**
+  - `detect` lists GPUs (`nvidia-smi`, plus Windows CIM) (#131).
+  - `setup --gpu auto|cpu|vulkan|cuda` installs the Vulkan or CUDA llama.cpp build beside the CPU one (#133).
+  - The split decode model and VRAM fit (#134, #140).
+  - `bench --device gpu` calibration (#135).
+  - Profile v3 (#136).
+  - `--device` on `tune` (#137), `recommend` (#138), `serve` (#139) and `run` (#141).
+- **Design:** [docs/superpowers/specs/2026-11-28-gpu-design.md](docs/superpowers/specs/2026-11-28-gpu-design.md). Measurement spike: [docs/benchmark-methodology.md](docs/benchmark-methodology.md#m7-gpu-spike-2026-11-28) (#132).
+- **Spike decisions:**
+  - Vulkan is the default GPU build: decode is within 5% of CUDA, at 37 MB instead of about 660 MB.
+  - attune chooses `-ngl` itself, because llama.cpp's auto-fit is 1.5–2.1× slower at the same context.
+- **Results, 2026-11-28** (RTX 4050 Laptop 6 GB + Core 5 210H, Windows 11, llama.cpp b11804 Vulkan):
+
+  | Acceptance item | Result |
+  |---|---|
+  | `detect` matches `nvidia-smi` | RTX 4050 Laptop, 6.0 GB, driver 561.00 (**met**) |
+  | `attune run qwen3-4b-instruct-2507 --yes`, empty home, no flags | Installs CPU + Vulkan, tunes on GPU 36/36, serves on the RTX 4050: 197 s including the 2.5 GB download; chat decode 48.7 tok/s, against 12.6 tok/s llama-bench CPU (3.9×) and 5.3 tok/s via `--device cpu` (**met**, target ≥3×) |
+  | Full-offload estimate | 4B: uncalibrated 63.2 against 55–56 tok/s llama-server (+13%, bar 25%); calibrated by `bench --device gpu` 57.2 (+2–4%, bar 12%) (**met**). 8B: predicted 30.7, measured 26.7 (−13%) |
+  | Partial offload against llama.cpp default | 14B Q4_K_M: attune 29/48 layers 7.2 tok/s (predicted 7.0), against auto-fit 4.9 tok/s: **1.47×** (**met**) |
+  | No VRAM OOM on exported profiles | 4B 36/36, 8B 36/36, 14B 29/48 all loaded and served (**met**) |
+  | CPU machines unchanged | CPU args byte-identical (golden test), CPU fingerprints unchanged, 690 tests green on Linux and Windows CI (**met**) |
+
+- **Found on the way:**
+  - Vulkan lists the Intel iGPU as `Vulkan0`, so attune passes `-dev` for the detected GPU.
+  - The first Vulkan run compiles shaders, so `bench --device gpu` warms up first.
+  - llama.cpp keeps token embeddings in host memory (about 8% of the file).
+  - CPU decode through `serve` on Windows is about 2× below llama-bench: open issue #142.
 
 ## Later
 

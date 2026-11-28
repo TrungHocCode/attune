@@ -107,6 +107,14 @@ pub struct E2eConfig {
     pub cache_type_v: Option<String>,
     /// Emit `--flash-attn on`. `false` = llama.cpp default (no flag).
     pub flash_attn: bool,
+    /// Offload all layers to the GPU (`-ngl N`). `None` keeps the portable
+    /// CPU-only command line; GPU benches set this to a layer count at or
+    /// above the model's total so every layer lands on the device.
+    pub n_gpu_layers: Option<u32>,
+    /// Pick a specific backend device (`-dev NAME`, e.g. `Vulkan1`). `None`
+    /// lets llama.cpp choose; on Vulkan builds it otherwise picks Vulkan0,
+    /// which can be an integrated GPU listed before the discrete one.
+    pub device: Option<String>,
 }
 
 impl E2eConfig {
@@ -123,6 +131,8 @@ impl E2eConfig {
             cache_type_k: None,
             cache_type_v: None,
             flash_attn: false,
+            n_gpu_layers: None,
+            device: None,
         }
     }
 
@@ -299,7 +309,9 @@ pub fn build_prompt(target_tokens: usize, max_chars: usize) -> String {
 ///
 /// The launch knobs (`-b`, `--ubatch-size`, `--cache-type-k/v`,
 /// `--flash-attn on`) are emitted only when set, so `attune bench --model`
-/// keeps the old-safe argv. `attune tune --verify` sets them to match what
+/// keeps the old-safe argv. The GPU knobs (`-ngl N`, `-dev NAME`) are likewise
+/// emitted only when set: a GPU run needs them, but an unknown `-dev` flag
+/// would break the portable CPU smoke test on older builds. `attune tune --verify` sets them to match what
 /// `attune serve` launches; keep the spelling in sync with
 /// `attune-profile`'s `to_llama_args` and the backend's `--flash-attn on`
 /// rewrite (this crate cannot depend on either).
@@ -345,6 +357,14 @@ pub fn build_e2e_args(cfg: &E2eConfig) -> Vec<String> {
     if cfg.flash_attn {
         args.push("--flash-attn".to_string());
         args.push("on".to_string());
+    }
+    if let Some(layers) = cfg.n_gpu_layers {
+        args.push("-ngl".to_string());
+        args.push(layers.to_string());
+    }
+    if let Some(device) = &cfg.device {
+        args.push("-dev".to_string());
+        args.push(device.clone());
     }
     args
 }
@@ -756,6 +776,24 @@ mod tests {
         ] {
             assert!(joined.contains(pair), "missing {pair}: {joined}");
         }
+    }
+
+    #[test]
+    fn build_e2e_args_omits_gpu_flags_by_default() {
+        let cfg = E2eConfig::new(PathBuf::from("/m.gguf"));
+        let joined = build_e2e_args(&cfg).join(" ");
+        assert!(!joined.contains("-ngl"), "no -ngl by default: {joined}");
+        assert!(!joined.contains("-dev"), "no -dev by default: {joined}");
+    }
+
+    #[test]
+    fn build_e2e_args_emits_gpu_offload_and_device_when_set() {
+        let mut cfg = E2eConfig::new(PathBuf::from("/m.gguf"));
+        cfg.n_gpu_layers = Some(999);
+        cfg.device = Some("Vulkan1".to_string());
+        let joined = build_e2e_args(&cfg).join(" ");
+        assert!(joined.contains("-ngl 999"), "{joined}");
+        assert!(joined.contains("-dev Vulkan1"), "{joined}");
     }
 
     #[test]

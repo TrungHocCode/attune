@@ -15,6 +15,7 @@
 pub mod bottleneck;
 pub mod calibrate;
 pub mod error;
+pub mod gpu;
 pub mod model;
 pub mod prefill;
 pub mod report;
@@ -26,6 +27,11 @@ pub use calibrate::{
     BenchCalibration, CalibratedInputs, MAX_ETA, MIN_ETA,
 };
 pub use error::EstimateError;
+pub use gpu::{
+    default_compute_buffer_bytes, gpu_bandwidth_gbps, host_resident_bytes, max_gpu_layers,
+    predict_split_decode_tps, vram_needed_bytes, SplitInputs, GPU_DECODE_EFFICIENCY,
+    GPU_RESIDENT_WEIGHT_FRACTION, VRAM_SAFETY_MARGIN_BYTES,
+};
 pub use model::{
     cache_is_fresh, cache_path, fetch_config, is_gguf_file, is_hf_id, kv_bytes_per_token,
     kv_elem_bytes, kv_filled_tokens, kv_total_bytes, parse_arch, parse_config_json, parse_model,

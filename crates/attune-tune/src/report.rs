@@ -78,12 +78,14 @@ impl TuneReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sweep::Device;
     use crate::TuneConfig;
     use attune_estimate::{CalibratedInputs, CalibrationReport, Quant};
 
     fn ranked(score: f64) -> RankedConfig {
         RankedConfig {
             config: TuneConfig::new(Quant::Q4_K_M, 2_048, 8, 512, Quant::Fp16),
+            device: Device::Cpu,
             decode_tps: 246.913_58,
             ttft_ms: 2_764.8,
             fits: true,
@@ -135,6 +137,7 @@ mod tests {
             "gflops",
             "avail_bytes",
             "configs",
+            "device",
             "score",
             "decode_tps",
             "ttft_ms",
@@ -160,6 +163,10 @@ mod tests {
             json.contains("\"objective\":\"throughput\""),
             "objective value pinned: {json}"
         );
+        assert!(
+            json.contains("\"device\":\"cpu\""),
+            "device value pinned: {json}"
+        );
 
         let back: TuneReport = serde_json::from_str(&json).expect("deserialize TuneReport");
         assert_eq!(back.schema, report.schema);
@@ -169,6 +176,7 @@ mod tests {
         assert_eq!(back.configs.len(), report.configs.len());
         for (back, original) in back.configs.iter().zip(report.configs.iter()) {
             assert_eq!(back.config, original.config);
+            assert_eq!(back.device, original.device);
             assert_eq!(back.fits, original.fits);
             // Float JSON roundtrips are compared with tolerance (AGENTS §6).
             assert!((back.decode_tps - original.decode_tps).abs() < 1e-9);

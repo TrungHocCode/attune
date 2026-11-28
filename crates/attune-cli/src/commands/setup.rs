@@ -1,137 +1,319 @@
-//! `attune setup`: install the catalog's pinned llama.cpp build (M6).
+//! `attune setup`: install the catalog's pinned llama.cpp builds (M6/M7).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
+use attune_backend::{choose_variants, GpuRequest, VariantPlan};
 use attune_estimate::model::registry::{load_catalog, LlamaAsset, LlamaPin};
 use attune_fetch::{
-    download, install_archive, install_dir, installed_binary, Download, HostPolicy,
+    download, install_archives, installed_variant_binary, variant_dir, Download, HostPolicy,
 };
+use attune_hal::GpuDevice;
 use attune_serve::DownloadConsent;
 
-/// What `setup` will do on this machine.
+use super::tune::TuneDevice;
+
+/// One archive of a variant's download.
 #[derive(Debug, Clone, PartialEq)]
-pub enum SetupPlan {
-    AlreadyInstalled(PathBuf),
+pub struct AssetDownload {
+    pub asset: LlamaAsset,
+    /// Where the archive is downloaded to.
+    pub archive: PathBuf,
+}
+
+/// What `setup` will do for one build variant on this machine.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VariantInstallPlan {
+    AlreadyInstalled {
+        variant: String,
+        server: PathBuf,
+    },
     Download {
-        asset: LlamaAsset,
-        /// Where the archive is downloaded to.
-        archive: PathBuf,
-        /// Where it is unpacked.
+        variant: String,
+        /// Every archive of this build (a CUDA build also ships a cudart
+        /// companion), in catalog order.
+        downloads: Vec<AssetDownload>,
+        /// Where the archives are unpacked.
         dest: PathBuf,
     },
 }
 
-/// Pick the CPU asset for `os`/`arch`, or report the existing install.
-pub fn plan_setup(home: &Path, pin: &LlamaPin, os: &str, arch: &str) -> Result<SetupPlan> {
-    if let Some(path) = installed_binary(home, &pin.tag, "llama-server") {
-        return Ok(SetupPlan::AlreadyInstalled(path));
-    }
-    let asset = pin
-        .assets
-        .iter()
-        .find(|a| a.os == os && a.arch == arch && a.variant == "cpu")
-        .ok_or_else(|| {
-            let have: Vec<String> = pin
-                .assets
-                .iter()
-                .map(|a| format!("{}/{}", a.os, a.arch))
-                .collect();
-            anyhow!(
-                "no llama.cpp {} build for {os}/{arch} (catalog has {}); install llama.cpp yourself and pass --llama-server",
-                pin.tag,
-                have.join(", ")
-            )
-        })?;
+/// Where `asset` is downloaded to under `<home>/downloads`.
+fn archive_path(home: &Path, asset: &LlamaAsset) -> Result<PathBuf> {
     let file_name = asset
         .url
         .rsplit('/')
         .next()
         .filter(|name| !name.is_empty())
         .ok_or_else(|| anyhow!("llama.cpp asset URL has no file name: {}", asset.url))?;
-    Ok(SetupPlan::Download {
-        asset: asset.clone(),
-        archive: home.join("downloads").join(file_name),
-        dest: install_dir(home, &pin.tag),
+    Ok(home.join("downloads").join(file_name))
+}
+
+/// Plan one build `variant` for `os`/`arch`, or report the existing install.
+pub fn plan_variant(
+    home: &Path,
+    pin: &LlamaPin,
+    os: &str,
+    arch: &str,
+    variant: &str,
+) -> Result<VariantInstallPlan> {
+    if let Some(server) = installed_variant_binary(home, &pin.tag, variant, "llama-server") {
+        return Ok(VariantInstallPlan::AlreadyInstalled {
+            variant: variant.to_string(),
+            server,
+        });
+    }
+    let assets = pin.assets_for(os, arch, variant);
+    if assets.is_empty() {
+        let have: Vec<String> = pin
+            .assets
+            .iter()
+            .map(|a| format!("{}/{}", a.os, a.arch))
+            .collect();
+        return Err(anyhow!(
+            "no llama.cpp {} {variant} build for {os}/{arch} (catalog has {}); install llama.cpp yourself and pass --llama-server",
+            pin.tag,
+            have.join(", ")
+        ));
+    }
+    let downloads = assets
+        .into_iter()
+        .map(|asset| {
+            Ok(AssetDownload {
+                asset: asset.clone(),
+                archive: archive_path(home, asset)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(VariantInstallPlan::Download {
+        variant: variant.to_string(),
+        downloads,
+        dest: variant_dir(home, &pin.tag, variant),
     })
 }
 
-/// `attune setup [--yes] [--refresh-catalog]`.
-pub fn run(yes: bool, refresh_catalog: bool) -> Result<()> {
-    install(yes, refresh_catalog).map(|_| ())
+/// Ask once for a whole download plan (`--yes` / non-TTY rules as before).
+fn confirm(yes: bool, total: u64, what: &str) -> Result<()> {
+    let allowed = match super::download::consent_for_stdin(yes) {
+        DownloadConsent::Yes => true,
+        DownloadConsent::Ask(ask) => ask(total, what),
+        DownloadConsent::No => return Err(anyhow!("pass --yes to download {what}")),
+    };
+    if !allowed {
+        return Err(anyhow!("download declined"));
+    }
+    Ok(())
 }
 
-/// Install the pinned llama.cpp build (or report the existing one) and return
-/// the `llama-server` path. Shares its output and consent rules with `setup`.
-pub fn install(yes: bool, refresh_catalog: bool) -> Result<PathBuf> {
+/// Download every archive and unpack them into `dest`.
+fn fetch_all(downloads: &[AssetDownload], dest: &Path) -> Result<()> {
+    let mut archives = Vec::with_capacity(downloads.len());
+    for item in downloads {
+        let request = Download {
+            url: item.asset.url.clone(),
+            dest: item.archive.clone(),
+            size: item.asset.size,
+            sha256: item.asset.sha256.clone(),
+        };
+        download(
+            &request,
+            &HostPolicy::production(),
+            &mut super::download::progress,
+        )
+        .map_err(|err| anyhow!("{err}"))?;
+        archives.push(item.archive.clone());
+    }
+    install_archives(&archives, dest).map_err(|err| anyhow!("{err}"))?;
+    for archive in &archives {
+        let _ = std::fs::remove_file(archive);
+    }
+    Ok(())
+}
+
+/// Which build variants `attune run --device` needs.
+///
+/// Pure over the detected GPUs and the catalog pin so tests can use fake
+/// lists. `auto` keeps the CPU build and adds Vulkan when a discrete GPU is
+/// found; `gpu` asks for the same plan but fails when it has no GPU build.
+pub fn run_build_plan(
+    device: TuneDevice,
+    gpus: &[GpuDevice],
+    pin: &LlamaPin,
+    os: &str,
+    arch: &str,
+) -> Result<VariantPlan> {
+    let request = match device {
+        TuneDevice::Cpu => GpuRequest::Cpu,
+        TuneDevice::Auto | TuneDevice::Gpu => GpuRequest::Auto,
+    };
+    let plan = choose_variants(request, gpus, pin, os, arch).map_err(|err| anyhow!("{err}"))?;
+    if device == TuneDevice::Gpu && plan.variants.iter().all(|variant| variant == "cpu") {
+        return Err(anyhow!("no usable GPU found; use --device cpu"));
+    }
+    Ok(plan)
+}
+
+/// `attune setup [--yes] [--refresh-catalog] [--gpu BUILD]`.
+pub fn run(yes: bool, refresh_catalog: bool, gpu: GpuRequest) -> Result<()> {
+    install_selected(yes, refresh_catalog, gpu).map(|_| ())
+}
+
+/// The `--gpu` plan: keep the CPU build, add a GPU build when chosen.
+fn install_selected(yes: bool, refresh_catalog: bool, gpu: GpuRequest) -> Result<()> {
     let loaded = load_catalog(refresh_catalog);
     for warning in &loaded.warnings {
         eprintln!("warning: {warning}");
     }
     let home = attune_fetch::home_dir().map_err(|err| anyhow!("{err}"))?;
     let pin = &loaded.catalog.llama_cpp;
-    let (asset, archive, dest) =
-        match plan_setup(&home, pin, std::env::consts::OS, std::env::consts::ARCH)? {
-            SetupPlan::AlreadyInstalled(path) => {
-                println!(
-                    "llama.cpp {} already installed: {}",
-                    pin.tag,
-                    path.display()
-                );
-                return Ok(path);
-            }
-            SetupPlan::Download {
-                asset,
-                archive,
-                dest,
-            } => (asset, archive, dest),
-        };
-    let what = format!("llama.cpp {} ({:.0} MB)", pin.tag, asset.size as f64 / 1e6);
-    let allowed = match super::download::consent_for_stdin(yes) {
-        DownloadConsent::Yes => true,
-        DownloadConsent::Ask(ask) => ask(asset.size, &what),
-        DownloadConsent::No => {
-            return Err(anyhow!("pass --yes to download {what}"));
-        }
-    };
-    if !allowed {
-        return Err(anyhow!("download declined"));
-    }
-    let request = Download {
-        url: asset.url.clone(),
-        dest: archive.clone(),
-        size: asset.size,
-        sha256: asset.sha256.clone(),
-    };
-    download(
-        &request,
-        &HostPolicy::production(),
-        &mut super::download::progress,
+    let gpus = attune_hal::gpu::detect().devices;
+    let selection = choose_variants(
+        gpu,
+        &gpus,
+        pin,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
     )
     .map_err(|err| anyhow!("{err}"))?;
-    install_archive(&archive, &dest).map_err(|err| anyhow!("{err}"))?;
-    let _ = std::fs::remove_file(&archive);
-    let server = installed_binary(&home, &pin.tag, "llama-server").ok_or_else(|| {
-        anyhow!(
-            "installed {} but found no llama-server in it",
-            dest.display()
-        )
-    })?;
-    println!("Installed llama.cpp {}: {}", pin.tag, server.display());
-    Ok(server)
+    if let Some(note) = &selection.note {
+        println!("{note}");
+    }
+    install_plan(
+        yes,
+        pin,
+        &home,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        &selection.variants,
+    )
+    .map(|_| ())
 }
 
-/// Make sure a usable `llama-server` exists, installing the pinned build with
-/// the same consent rules as `setup` when it does not. An explicit
-/// `--llama-server` path is returned untouched.
-pub fn ensure_llama_server(explicit: Option<&Path>, yes: bool) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return Ok(path.to_path_buf());
+/// Install `variants` (skipping ones already installed) behind one consent
+/// prompt, and return the preferred `llama-server` (the last variant, i.e. the
+/// GPU build when one is planned).
+fn install_plan(
+    yes: bool,
+    pin: &LlamaPin,
+    home: &Path,
+    os: &str,
+    arch: &str,
+    variants: &[String],
+) -> Result<PathBuf> {
+    let plans = variants
+        .iter()
+        .map(|variant| plan_variant(home, pin, os, arch, variant))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut pending = Vec::new();
+    let mut preferred = None;
+    for plan in &plans {
+        match plan {
+            VariantInstallPlan::AlreadyInstalled { variant, server } => {
+                println!(
+                    "llama.cpp {} ({variant}) already installed: {}",
+                    pin.tag,
+                    server.display()
+                );
+                preferred = Some(server.clone());
+            }
+            VariantInstallPlan::Download { .. } => pending.push(plan),
+        }
     }
-    if let Ok(path) = attune_serve::resolve_llama_server(None) {
-        return Ok(path);
+    if !pending.is_empty() {
+        let total: u64 = pending
+            .iter()
+            .map(|plan| match plan {
+                VariantInstallPlan::Download { downloads, .. } => {
+                    downloads.iter().map(|item| item.asset.size).sum()
+                }
+                VariantInstallPlan::AlreadyInstalled { .. } => 0,
+            })
+            .sum();
+        let each: Vec<String> = pending
+            .iter()
+            .filter_map(|plan| match plan {
+                VariantInstallPlan::Download {
+                    variant, downloads, ..
+                } => {
+                    let size: u64 = downloads.iter().map(|item| item.asset.size).sum();
+                    Some(format!("{variant} ({:.0} MB)", size as f64 / 1e6))
+                }
+                VariantInstallPlan::AlreadyInstalled { .. } => None,
+            })
+            .collect();
+        let what = format!(
+            "llama.cpp {} builds: {} - {:.0} MB total",
+            pin.tag,
+            each.join(", "),
+            total as f64 / 1e6
+        );
+        confirm(yes, total, &what)?;
+
+        for plan in pending {
+            if let VariantInstallPlan::Download {
+                variant,
+                downloads,
+                dest,
+            } = plan
+            {
+                fetch_all(downloads, dest)?;
+                let server = installed_variant_binary(home, &pin.tag, variant, "llama-server")
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "installed {} but found no llama-server in it",
+                            dest.display()
+                        )
+                    })?;
+                println!(
+                    "llama.cpp {} ({variant}) installed: {}",
+                    pin.tag,
+                    server.display()
+                );
+                preferred = Some(server);
+            }
+        }
     }
-    install(yes, false)
+    preferred.ok_or_else(|| anyhow!("the llama.cpp plan had no builds"))
+}
+
+/// Make sure the builds `attune run --device` needs are installed, with the
+/// same output and consent rules as `setup`. An explicit `--llama-server` wins
+/// and installs nothing.
+pub fn ensure_llama_server_for(
+    device: TuneDevice,
+    explicit: Option<&Path>,
+    yes: bool,
+) -> Result<()> {
+    if explicit.is_some() {
+        return Ok(());
+    }
+    let loaded = load_catalog(false);
+    for warning in &loaded.warnings {
+        eprintln!("warning: {warning}");
+    }
+    let home = attune_fetch::home_dir().map_err(|err| anyhow!("{err}"))?;
+    let pin = &loaded.catalog.llama_cpp;
+    let gpus = attune_hal::gpu::detect().devices;
+    let plan = run_build_plan(
+        device,
+        &gpus,
+        pin,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )?;
+    if let Some(note) = &plan.note {
+        println!("{note}");
+    }
+    install_plan(
+        yes,
+        pin,
+        &home,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        &plan.variants,
+    )
+    .map(|_| ())
 }
 
 /// The explicit `--llama-cli` path, else the `attune setup` install when
@@ -154,14 +336,52 @@ mod tests {
     fn pin() -> LlamaPin {
         LlamaPin {
             tag: "b11804".to_string(),
-            assets: vec![LlamaAsset {
-                os: "windows".to_string(),
-                arch: "x86_64".to_string(),
-                variant: "cpu".to_string(),
-                url: "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-cpu-x64.zip".to_string(),
-                size: 24_067_910,
-                sha256: "3".repeat(64),
-            }],
+            assets: vec![
+                LlamaAsset {
+                    os: "windows".to_string(),
+                    arch: "x86_64".to_string(),
+                    variant: "cpu".to_string(),
+                    url: "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-cpu-x64.zip".to_string(),
+                    size: 24_067_910,
+                    sha256: "3".repeat(64),
+                    min_driver: None,
+                },
+                LlamaAsset {
+                    os: "windows".to_string(),
+                    arch: "x86_64".to_string(),
+                    variant: "vulkan".to_string(),
+                    url: "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-vulkan-x64.zip".to_string(),
+                    size: 25_000_000,
+                    sha256: "5".repeat(64),
+                    min_driver: None,
+                },
+            ],
+        }
+    }
+
+    fn cuda_pin() -> LlamaPin {
+        LlamaPin {
+            tag: "b11804".to_string(),
+            assets: vec![
+                LlamaAsset {
+                    os: "windows".to_string(),
+                    arch: "x86_64".to_string(),
+                    variant: "cuda12".to_string(),
+                    url: "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-cuda-12.4-x64.zip".to_string(),
+                    size: 2,
+                    sha256: "3".repeat(64),
+                    min_driver: Some("551.61".to_string()),
+                },
+                LlamaAsset {
+                    os: "windows".to_string(),
+                    arch: "x86_64".to_string(),
+                    variant: "cuda12".to_string(),
+                    url: "https://github.com/ggml-org/llama.cpp/releases/download/b11804/cudart-llama-bin-win-cuda-12.4-x64.zip".to_string(),
+                    size: 3,
+                    sha256: "4".repeat(64),
+                    min_driver: Some("551.61".to_string()),
+                },
+            ],
         }
     }
 
@@ -172,14 +392,56 @@ mod tests {
         dir
     }
 
+    fn gpu_device(vendor: &str) -> GpuDevice {
+        GpuDevice {
+            vendor: vendor.to_string(),
+            name: format!("{vendor} card"),
+            vram_total_bytes: Some(6_000_000_000),
+            vram_free_bytes: Some(5_000_000_000),
+            driver: None,
+            source: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn run_device_plan_installs_a_gpu_build_only_when_usable() {
+        let nvidia = [gpu_device("nvidia")];
+        for device in [TuneDevice::Auto, TuneDevice::Gpu] {
+            let plan = run_build_plan(device, &nvidia, &pin(), "windows", "x86_64").expect("plan");
+            assert_eq!(plan.variants, vec!["cpu", "vulkan"], "{device:?}");
+        }
+
+        let cpu = run_build_plan(TuneDevice::Cpu, &nvidia, &pin(), "windows", "x86_64")
+            .expect("cpu never needs a GPU build");
+        assert_eq!(cpu.variants, vec!["cpu"]);
+
+        let auto = run_build_plan(TuneDevice::Auto, &[], &pin(), "windows", "x86_64")
+            .expect("auto falls back to cpu");
+        assert_eq!(auto.variants, vec!["cpu"]);
+
+        let err = run_build_plan(TuneDevice::Gpu, &[], &pin(), "windows", "x86_64")
+            .expect_err("gpu without a GPU must fail");
+        assert!(
+            err.to_string()
+                .contains("no usable GPU found; use --device cpu"),
+            "{err}"
+        );
+
+        let intel = [gpu_device("intel")];
+        assert!(run_build_plan(TuneDevice::Gpu, &intel, &pin(), "windows", "x86_64").is_err());
+    }
+
     #[test]
     fn setup_skips_when_already_installed() {
         let home = temp_home("installed");
-        let bin = install_dir(&home, "b11804");
+        let bin = variant_dir(&home, "b11804", "cpu");
         std::fs::create_dir_all(&bin).expect("mkdir");
         std::fs::write(bin.join("llama-server.exe"), b"MZ").expect("write");
-        match plan_setup(&home, &pin(), "windows", "x86_64").expect("plan") {
-            SetupPlan::AlreadyInstalled(path) => assert_eq!(path, bin.join("llama-server.exe")),
+        match plan_variant(&home, &pin(), "windows", "x86_64", "cpu").expect("plan") {
+            VariantInstallPlan::AlreadyInstalled { variant, server } => {
+                assert_eq!(variant, "cpu");
+                assert_eq!(server, bin.join("llama-server.exe"));
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -187,19 +449,49 @@ mod tests {
     #[test]
     fn setup_plans_the_matching_asset_download() {
         let home = temp_home("fresh");
-        match plan_setup(&home, &pin(), "windows", "x86_64").expect("plan") {
-            SetupPlan::Download {
-                asset,
-                archive,
+        match plan_variant(&home, &pin(), "windows", "x86_64", "cpu").expect("plan") {
+            VariantInstallPlan::Download {
+                variant,
+                downloads,
                 dest,
             } => {
-                assert_eq!(asset.size, 24_067_910);
+                assert_eq!(variant, "cpu");
+                assert_eq!(downloads.len(), 1);
+                assert_eq!(downloads[0].asset.size, 24_067_910);
                 assert_eq!(
-                    archive,
+                    downloads[0].archive,
                     home.join("downloads")
                         .join("llama-b11804-bin-win-cpu-x64.zip")
                 );
-                assert_eq!(dest, install_dir(&home, "b11804"));
+                assert_eq!(dest, variant_dir(&home, "b11804", "cpu"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn cuda_plan_downloads_both_archives_into_one_dir() {
+        let home = temp_home("cuda");
+        match plan_variant(&home, &cuda_pin(), "windows", "x86_64", "cuda12").expect("plan") {
+            VariantInstallPlan::Download {
+                variant,
+                downloads,
+                dest,
+            } => {
+                assert_eq!(variant, "cuda12");
+                assert_eq!(downloads.len(), 2);
+                assert_eq!(
+                    downloads[0].archive,
+                    home.join("downloads")
+                        .join("llama-b11804-bin-win-cuda-12.4-x64.zip")
+                );
+                assert_eq!(
+                    downloads[1].archive,
+                    home.join("downloads")
+                        .join("cudart-llama-bin-win-cuda-12.4-x64.zip")
+                );
+                assert_eq!(dest, variant_dir(&home, "b11804", "cuda12"));
+                assert_eq!(dest, home.join("llama.cpp").join("b11804-cuda12"));
             }
             other => panic!("{other:?}"),
         }
@@ -208,7 +500,7 @@ mod tests {
     #[test]
     fn unsupported_platform_names_what_exists() {
         let home = temp_home("mac");
-        let err = plan_setup(&home, &pin(), "macos", "aarch64")
+        let err = plan_variant(&home, &pin(), "macos", "aarch64", "cpu")
             .expect_err("no asset")
             .to_string();
         assert!(err.contains("windows/x86_64"), "{err}");

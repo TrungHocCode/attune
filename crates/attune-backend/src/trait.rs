@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use attune_profile::Profile;
 
-use crate::llama_subprocess::{health_wait, server_args, server_args_with_warnings, ServerGuard};
+use crate::llama_subprocess::{health_wait, server_args, server_args_with_device, ServerGuard};
 use crate::BackendError;
 
 /// External paths one launch needs.
@@ -68,6 +68,22 @@ pub trait Backend {
         port: u16,
     ) -> Result<ServerGuard, BackendError>;
 
+    /// Spawn the server, resolving the GPU device id for a GPU profile.
+    ///
+    /// The default ignores `device_id` and behaves like [`Backend::spawn`];
+    /// implementations that map a device id override it.
+    fn spawn_with_device(
+        &self,
+        profile: &Profile,
+        paths: &Paths,
+        host: &str,
+        port: u16,
+        device_id: Option<&str>,
+    ) -> Result<ServerGuard, BackendError> {
+        let _ = device_id;
+        self.spawn(profile, paths, host, port)
+    }
+
     /// Poll `url` until it reports healthy or `deadline` elapses, returning
     /// how long the wait took.
     fn health_wait(&self, url: &str, deadline: Duration) -> Result<Duration, BackendError>;
@@ -93,7 +109,18 @@ impl Backend for LlamaServerBackend {
         host: &str,
         port: u16,
     ) -> Result<ServerGuard, BackendError> {
-        let prepared = server_args_with_warnings(profile, host, port);
+        self.spawn_with_device(profile, paths, host, port, None)
+    }
+
+    fn spawn_with_device(
+        &self,
+        profile: &Profile,
+        paths: &Paths,
+        host: &str,
+        port: u16,
+        device_id: Option<&str>,
+    ) -> Result<ServerGuard, BackendError> {
+        let prepared = server_args_with_device(profile, host, port, device_id);
         ServerGuard::spawn_in(
             &paths.binary,
             &prepared.args,

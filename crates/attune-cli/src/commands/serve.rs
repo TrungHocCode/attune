@@ -14,8 +14,18 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use attune_serve::{
     check_listen, install_shutdown, launch, resolve_profile, Proxy, ProxyConfig, ReadyReport,
-    ServeError, ServeOptions, Serving, ShutdownSignal,
+    ServeDevice, ServeError, ServeOptions, Serving, ShutdownSignal,
 };
+
+impl From<super::tune::TuneDevice> for ServeDevice {
+    fn from(device: super::tune::TuneDevice) -> Self {
+        match device {
+            super::tune::TuneDevice::Auto => ServeDevice::Auto,
+            super::tune::TuneDevice::Cpu => ServeDevice::Cpu,
+            super::tune::TuneDevice::Gpu => ServeDevice::Gpu,
+        }
+    }
+}
 
 /// A launched upstream plus a bound proxy, ready to serve.
 ///
@@ -48,6 +58,11 @@ impl Running {
     /// Non-fatal warnings collected while preparing the launch.
     pub fn warnings(&self) -> &[String] {
         &self.serving.warnings
+    }
+
+    /// `CPU` or `GPU (<build>, <id> <name>)` for the human ready line.
+    pub fn device_label(&self) -> String {
+        self.serving.device_label()
     }
 
     /// The JSON shape printed by `serve --json`.
@@ -103,6 +118,7 @@ impl Running {
 pub fn launch_running(
     profile: &str,
     llama_server: Option<&Path>,
+    device: ServeDevice,
     host: &str,
     port: u16,
     listen: &str,
@@ -118,6 +134,7 @@ pub fn launch_running(
     let options = ServeOptions {
         profile,
         llama_server: llama_server.map(Path::to_path_buf),
+        device,
         host: host.to_string(),
         port,
         timeout: Duration::from_secs(timeout_s),
@@ -150,6 +167,7 @@ pub fn launch_running(
 pub fn run(
     profile: &str,
     llama_server: Option<&Path>,
+    device: ServeDevice,
     host: &str,
     port: u16,
     listen: &str,
@@ -164,6 +182,7 @@ pub fn run(
     let running = launch_running(
         profile,
         llama_server,
+        device,
         host,
         port,
         listen,
@@ -192,7 +211,8 @@ pub fn run(
         println!("{}", serde_json::to_string(&running.ready_report())?);
     } else {
         println!(
-            "Serving\u{2026} upstream {} health OK ({:.1}s)",
+            "Serving on {} \u{2026} upstream {} health OK ({:.1}s)",
+            running.device_label(),
             running.upstream(),
             running.health_elapsed().as_secs_f64()
         );

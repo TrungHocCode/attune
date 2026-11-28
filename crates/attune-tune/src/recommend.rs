@@ -3,11 +3,21 @@
 //! Pure: the same roofline maths as `tune`/`estimate`, applied to every
 //! catalog model × file instead of one model's config grid.
 
-use attune_estimate::model::registry::CatalogModel;
+use crate::sweep::{Device, GpuTarget};
+use attune_estimate::model::registry::{CatalogFile, CatalogModel};
 use attune_estimate::{
-    kv_bytes_per_token, kv_filled_tokens, predict_decode_tps_from_bytes, HwInputs, Quant,
+    default_compute_buffer_bytes, host_resident_bytes, kv_bytes_per_token, kv_filled_tokens,
+    max_gpu_layers, predict_decode_tps_from_bytes, predict_split_decode_tps, HwInputs, Quant,
+    SplitInputs,
 };
 use serde::Serialize;
+
+/// PCIe throughput assumed when the CPU-resident weights have to stream to a
+/// GPU-side compute buffer once per prompt batch (decimal GB/s, from the M7
+/// spike). Matches the `tune` GPU TTFT model.
+const GPU_PREFILL_PCIE_GBPS: f64 = 12e9;
+/// Prompt batch the GPU TTFT model assumes (llama.cpp's default `n_batch`).
+const GPU_PREFILL_BATCH: u64 = 512;
 
 /// A fitting row needs this much spare RAM to be ✅ rather than ⚠.
 pub const HEADROOM: f64 = 0.15;
@@ -60,6 +70,21 @@ pub enum Verdict {
     Tight,
     /// Does not fit; this many more bytes are needed.
     NeedsMore { short_bytes: u64 },
+    /// `--device gpu` asked for a GPU, but not even one layer fits in VRAM.
+    DoesNotFitVram,
+}
+
+impl Verdict {
+    /// Higher is better; used to decide whether a GPU estimate beats the CPU
+    /// one in `--device auto` mode.
+    fn rank(self) -> u8 {
+        match self {
+            Verdict::Fits => 3,
+            Verdict::Tight => 2,
+            Verdict::NeedsMore { .. } => 1,
+            Verdict::DoesNotFitVram => 0,
+        }
+    }
 }
 
 /// One catalog model × file, predicted on this machine.
@@ -78,10 +103,16 @@ pub struct RecommendRow {
     pub pick: bool,
     /// The overall recommendation (largest tier with a pick).
     pub star: bool,
+    /// Where this row runs: `cpu`, `gpu` (full offload) or `gpu+cpu` (split).
+    pub device: String,
+    /// Layers offloaded to the GPU, when this row uses one.
+    pub gpu_layers: Option<u32>,
+    /// The model's layer count, so a split row can be shown as `g/n`.
+    pub n_layers: Option<u32>,
 }
 
 /// Inputs that are not per model.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RecommendOptions {
     /// Available RAM, or the user's `--max-ram` budget.
     pub budget_bytes: f64,
@@ -89,10 +120,19 @@ pub struct RecommendOptions {
     pub n_ctx: u32,
     pub prompt_tokens: u64,
     pub gen_tokens: u64,
+    /// Which device each model should be judged on.
+    pub device: Device,
+    /// The GPU to plan against, when one is usable.
+    pub gpu: Option<GpuTarget>,
 }
 
 /// Rank every non-gated catalog model × file. Output order: the star, the
 /// other tier picks (large → tiny), then the rest by tier and decode speed.
+///
+/// Each row is judged on the device the caller asked for: `cpu` keeps the
+/// pre-M7 RAM roofline, `gpu` plans a full or partial offload and never falls
+/// back, and `auto` takes the GPU row only when it both fits and decodes
+/// faster than the CPU row.
 pub fn recommend(
     models: &[CatalogModel],
     hw: HwInputs,
@@ -103,37 +143,28 @@ pub fn recommend(
         let kv = kv_bytes_per_token(&model.arch.to_arch());
         let n_ctx = opts.n_ctx.min(model.ctx_default.max(1));
         for file in &model.files {
-            let decode_tps = predict_decode_tps_from_bytes(
-                file.size as f64,
-                hw.bw_gbps,
-                kv,
-                kv_filled_tokens(opts.prompt_tokens, opts.gen_tokens, n_ctx),
-            );
-            let ttft_ms = hw.predict_prefill_ms(
-                model.params,
-                opts.prompt_tokens.min(u64::from(n_ctx)),
-                file.quant,
-            );
-            let (Ok(decode_tps), Ok(ttft_ms)) = (decode_tps, ttft_ms) else {
+            let Some(cpu) = cpu_row(model, file, hw, opts, n_ctx, kv) else {
                 continue;
             };
-            let ram_bytes = file.size + (kv * f64::from(n_ctx)) as u64;
-            rows.push((
-                RecommendRow {
-                    model_id: model.id.clone(),
-                    display: model.display.clone(),
-                    quant: file.quant,
-                    download_bytes: file.size,
-                    ram_bytes,
-                    decode_tps,
-                    ttft_ms,
-                    verdict: verdict(ram_bytes as f64, opts.budget_bytes),
-                    tier: Tier::of(model.params),
-                    pick: false,
-                    star: false,
+            let gpu = if opts.device == Device::Cpu {
+                None
+            } else {
+                gpu_row(model, file, hw, opts, n_ctx, kv)
+            };
+            let row = match opts.device {
+                Device::Cpu => cpu,
+                Device::Gpu => gpu.unwrap_or_else(|| no_vram_row(&cpu, model)),
+                Device::Auto => match gpu {
+                    Some(gpu)
+                        if gpu.verdict.rank() >= cpu.verdict.rank()
+                            && gpu.decode_tps > cpu.decode_tps =>
+                    {
+                        gpu
+                    }
+                    _ => cpu,
                 },
-                model,
-            ));
+            };
+            rows.push((row, model));
         }
     }
     mark_picks(&mut rows);
@@ -147,6 +178,142 @@ pub fn recommend(
             .then(b.decode_tps.total_cmp(&a.decode_tps))
     });
     rows
+}
+
+/// The CPU roofline row: unchanged from before M7 (a `gpu` target is ignored).
+fn cpu_row(
+    model: &CatalogModel,
+    file: &CatalogFile,
+    hw: HwInputs,
+    opts: &RecommendOptions,
+    n_ctx: u32,
+    kv: f64,
+) -> Option<RecommendRow> {
+    let decode_tps = predict_decode_tps_from_bytes(
+        file.size as f64,
+        hw.bw_gbps,
+        kv,
+        kv_filled_tokens(opts.prompt_tokens, opts.gen_tokens, n_ctx),
+    )
+    .ok()?;
+    let ttft_ms = hw
+        .predict_prefill_ms(
+            model.params,
+            opts.prompt_tokens.min(u64::from(n_ctx)),
+            file.quant,
+        )
+        .ok()?;
+    let ram_bytes = file.size + (kv * f64::from(n_ctx)) as u64;
+    Some(RecommendRow {
+        model_id: model.id.clone(),
+        display: model.display.clone(),
+        quant: file.quant,
+        download_bytes: file.size,
+        ram_bytes,
+        decode_tps,
+        ttft_ms,
+        verdict: verdict(ram_bytes as f64, opts.budget_bytes),
+        tier: Tier::of(model.params),
+        pick: false,
+        star: false,
+        device: "cpu".to_string(),
+        gpu_layers: None,
+        n_layers: Some(model.arch.n_layer),
+    })
+}
+
+/// The GPU row for a full or partial offload, or `None` when nothing fits in
+/// VRAM (or the GPU/layer data is unusable).
+fn gpu_row(
+    model: &CatalogModel,
+    file: &CatalogFile,
+    hw: HwInputs,
+    opts: &RecommendOptions,
+    n_ctx: u32,
+    kv: f64,
+) -> Option<RecommendRow> {
+    let gpu = opts.gpu.as_ref()?;
+    let n_layers = model.arch.n_layer;
+    if n_layers == 0 {
+        return None;
+    }
+    if !gpu.vram_gbps.is_finite() || gpu.vram_gbps <= 0.0 {
+        return None;
+    }
+    if !gpu.prefill_tflops.is_finite() || gpu.prefill_tflops <= 0.0 {
+        return None;
+    }
+    let kv_total = kv * f64::from(n_ctx);
+    let gpu_layers = max_gpu_layers(
+        file.size as f64,
+        n_layers,
+        kv_total,
+        default_compute_buffer_bytes(n_ctx),
+        gpu.vram_free_bytes,
+    );
+    if gpu_layers == 0 {
+        return None;
+    }
+    let frac = f64::from(gpu_layers.min(n_layers)) / f64::from(n_layers);
+    let decode_tps = predict_split_decode_tps(&SplitInputs {
+        weight_bytes: file.size as f64,
+        n_layers,
+        gpu_layers,
+        kv_bytes: kv * f64::from(kv_filled_tokens(opts.prompt_tokens, opts.gen_tokens, n_ctx)),
+        vram_gbps: gpu.vram_gbps,
+        ram_gbps: hw.bw_gbps,
+    })
+    .ok()?;
+
+    // Prefill: GPU layers compute at `prefill_tflops`; the CPU-resident weights
+    // stream over PCIe once per prompt batch (same model as `tune`).
+    let prompt = opts.prompt_tokens.min(u64::from(n_ctx));
+    let cpu_bytes = file.size as f64 * (1.0 - frac);
+    let prefill_secs = 2.0 * model.params as f64 * prompt as f64 / (gpu.prefill_tflops * 1e12)
+        + cpu_bytes / GPU_PREFILL_PCIE_GBPS * (prompt as f64 / GPU_PREFILL_BATCH as f64).ceil();
+    let ttft_ms = prefill_secs * 1000.0;
+    if !ttft_ms.is_finite() {
+        return None;
+    }
+
+    // Only the host-resident share of weights and KV stays in system RAM:
+    // the embedding table plus the CPU layers, and the un-offloaded KV.
+    let ram_bytes =
+        host_resident_bytes(file.size as f64, n_layers, gpu_layers, kv_total).round() as u64;
+    Some(RecommendRow {
+        model_id: model.id.clone(),
+        display: model.display.clone(),
+        quant: file.quant,
+        download_bytes: file.size,
+        ram_bytes,
+        decode_tps,
+        ttft_ms,
+        verdict: verdict(ram_bytes as f64, opts.budget_bytes),
+        tier: Tier::of(model.params),
+        pick: false,
+        star: false,
+        device: if gpu_layers >= n_layers {
+            "gpu".to_string()
+        } else {
+            "gpu+cpu".to_string()
+        },
+        gpu_layers: Some(gpu_layers),
+        n_layers: Some(n_layers),
+    })
+}
+
+/// `--device gpu` row for a model that cannot place even one layer in VRAM.
+fn no_vram_row(cpu: &RecommendRow, model: &CatalogModel) -> RecommendRow {
+    RecommendRow {
+        ram_bytes: cpu.ram_bytes,
+        decode_tps: 0.0,
+        ttft_ms: 0.0,
+        verdict: Verdict::DoesNotFitVram,
+        device: "gpu".to_string(),
+        gpu_layers: None,
+        n_layers: Some(model.arch.n_layer),
+        ..cpu.to_owned()
+    }
 }
 
 fn verdict(ram: f64, budget: f64) -> Verdict {
@@ -262,13 +429,63 @@ mod tests {
         }
     }
 
-    fn opts(budget: f64) -> RecommendOptions {
+    fn opts_for(
+        device: Device,
+        gpu: Option<GpuTarget>,
+        budget: f64,
+        n_ctx: u32,
+    ) -> RecommendOptions {
         RecommendOptions {
             budget_bytes: budget,
-            n_ctx: 4096,
+            n_ctx,
             prompt_tokens: 512,
             gen_tokens: 128,
+            device,
+            gpu,
         }
+    }
+
+    fn opts(budget: f64) -> RecommendOptions {
+        opts_for(Device::Cpu, None, budget, 4096)
+    }
+
+    fn rtx_4050() -> GpuTarget {
+        GpuTarget {
+            name: "RTX 4050 Laptop".to_string(),
+            vram_free_bytes: 5_921 * 1024 * 1024,
+            vram_gbps: 163.0,
+            prefill_tflops: 15.0,
+        }
+    }
+
+    fn qwen3_8b() -> CatalogModel {
+        let mut m = model(
+            "qwen3-8b",
+            8_190_735_360,
+            None,
+            vec![file(Quant::Q4_K_M, 5_027_783_488)],
+        );
+        m.arch = CatalogArch {
+            n_layer: 36,
+            n_kv_heads: 8,
+            head_dim: 128,
+        };
+        m
+    }
+
+    fn qwen25_14b() -> CatalogModel {
+        let mut m = model(
+            "qwen2.5-14b",
+            14_000_000_000,
+            None,
+            vec![file(Quant::Q4_K_M, 8_988_110_976)],
+        );
+        m.arch = CatalogArch {
+            n_layer: 48,
+            n_kv_heads: 8,
+            head_dim: 128,
+        };
+        m
     }
 
     fn row<'a>(rows: &'a [RecommendRow], id: &str) -> &'a RecommendRow {
@@ -472,5 +689,136 @@ mod tests {
             .expect("ttft");
         assert!((r.decode_tps - decode).abs() < 1e-9);
         assert!((r.ttft_ms - ttft).abs() < 1e-9);
+    }
+
+    #[test]
+    fn qwen3_8b_fully_offloads_when_it_fits_and_beats_the_cpu_by_3x() {
+        let m = qwen3_8b();
+        let cpu = recommend(
+            std::slice::from_ref(&m),
+            hw(),
+            &opts_for(Device::Cpu, None, 6e9, 1024),
+        );
+        let gpu = recommend(
+            std::slice::from_ref(&m),
+            hw(),
+            &opts_for(Device::Auto, Some(rtx_4050()), 6e9, 1024),
+        );
+        assert_eq!(gpu[0].device, "gpu", "{:?}", gpu[0]);
+        assert_eq!(gpu[0].gpu_layers, Some(36));
+        assert!(
+            gpu[0].decode_tps > 3.0 * cpu[0].decode_tps,
+            "GPU {:.1} tok/s must beat CPU {:.1} tok/s by 3x",
+            gpu[0].decode_tps,
+            cpu[0].decode_tps
+        );
+    }
+
+    #[test]
+    fn qwen3_8b_at_the_default_context_still_fully_offloads_and_beats_the_cpu_by_3x() {
+        // At 4096 tokens the smaller compute buffer and host-resident
+        // embeddings leave room for all 36 layers.
+        let m = qwen3_8b();
+        let cpu = recommend(
+            std::slice::from_ref(&m),
+            hw(),
+            &opts_for(Device::Cpu, None, 6e9, 4096),
+        );
+        let gpu = recommend(
+            std::slice::from_ref(&m),
+            hw(),
+            &opts_for(Device::Auto, Some(rtx_4050()), 6e9, 4096),
+        );
+        assert_eq!(gpu[0].device, "gpu", "{:?}", gpu[0]);
+        assert_eq!(gpu[0].gpu_layers, Some(36));
+        assert!(
+            gpu[0].decode_tps > 3.0 * cpu[0].decode_tps,
+            "GPU {:.1} tok/s must beat CPU {:.1} tok/s by 3x",
+            gpu[0].decode_tps,
+            cpu[0].decode_tps
+        );
+    }
+
+    #[test]
+    fn full_gpu_rows_report_the_host_resident_ram() {
+        // A fully offloaded model still needs RAM for the token-embedding
+        // table left on the host: ~8% of the file, not 0.
+        let m = qwen3_8b();
+        let rows = recommend(
+            std::slice::from_ref(&m),
+            hw(),
+            &opts_for(Device::Gpu, Some(rtx_4050()), 6e9, 4096),
+        );
+        assert_eq!(rows[0].device, "gpu", "{:?}", rows[0]);
+        assert_eq!(rows[0].gpu_layers, Some(36));
+        let expected = (5_027_783_488.0 * (1.0 - attune_estimate::GPU_RESIDENT_WEIGHT_FRACTION))
+            .round() as u64;
+        assert_eq!(rows[0].ram_bytes, expected);
+        assert!(rows[0].ram_bytes > 0);
+    }
+
+    #[test]
+    fn a_14b_q4_only_partially_fits_the_gpu() {
+        let rows = recommend(
+            &[qwen25_14b()],
+            hw(),
+            &opts_for(Device::Auto, Some(rtx_4050()), 6e9, 4096),
+        );
+        assert_eq!(rows[0].device, "gpu+cpu", "{:?}", rows[0]);
+        let layers = rows[0].gpu_layers.expect("split offload");
+        assert!((1..48).contains(&layers), "{layers}");
+        assert_eq!(rows[0].verdict, Verdict::Fits);
+    }
+
+    #[test]
+    fn cpu_device_rows_are_unchanged_by_a_gpu_target() {
+        let m = qwen3_8b();
+        let without = recommend(
+            std::slice::from_ref(&m),
+            hw(),
+            &opts_for(Device::Cpu, None, 6e9, 4096),
+        );
+        let with = recommend(
+            std::slice::from_ref(&m),
+            hw(),
+            &opts_for(Device::Cpu, Some(rtx_4050()), 6e9, 4096),
+        );
+        assert_eq!(without, with);
+        assert_eq!(with[0].device, "cpu");
+        assert_eq!(with[0].gpu_layers, None);
+    }
+
+    #[test]
+    fn gpu_device_without_a_fit_is_marked_and_never_picked() {
+        // No GPU at all: only the "does not fit in VRAM" rows are emitted.
+        let rows = recommend(&[qwen3_8b()], hw(), &opts_for(Device::Gpu, None, 6e9, 4096));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].verdict, Verdict::DoesNotFitVram);
+        assert_eq!(rows[0].device, "gpu");
+        assert_eq!(rows[0].gpu_layers, None);
+        assert!(!rows[0].pick && !rows[0].star);
+
+        // A model too large for any layer gets the same marker.
+        let mut huge = qwen3_8b();
+        huge.files[0].size = 400_000_000_000;
+        let rows = recommend(
+            &[huge],
+            hw(),
+            &opts_for(Device::Gpu, Some(rtx_4050()), 6e9, 4096),
+        );
+        assert_eq!(rows[0].verdict, Verdict::DoesNotFitVram);
+    }
+
+    #[test]
+    fn gpu_fields_serialize_additively() {
+        let rows = recommend(
+            &[qwen3_8b()],
+            hw(),
+            &opts_for(Device::Auto, Some(rtx_4050()), 6e9, 1024),
+        );
+        let json = serde_json::to_value(&rows[0]).expect("serialize");
+        assert_eq!(json["device"], "gpu");
+        assert_eq!(json["gpu_layers"], 36);
+        assert_eq!(json["n_layers"], 36);
     }
 }

@@ -33,12 +33,30 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use attune_bench::bandwidth::{FullBandwidthResult, ReadResult};
-use attune_bench::e2e::{preflight, E2eConfig, E2eResult};
+use attune_bench::e2e::{preflight, run_e2e, E2eConfig, E2eResult};
 use attune_bench::flops::{FlopsResult, WARMUP_PASSES as FLOPS_WARMUP_PASSES};
+use attune_bench::gpu::{list_devices, pick_device, GpuE2eResult};
 use attune_bench::llama::{probe_model, resolve_llama_cli, LlamaProbeReport, LOAD_TIMEOUT};
 use attune_bench::monitor::ResourceStats;
 use attune_bench::{run_full, run_quick, BandwidthReport, BenchReport};
 use attune_hal::HardwareInfo;
+
+/// Which device `attune bench --model` runs the e2e decode on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum BenchDevice {
+    /// Today's portable CPU-only llama.cpp run.
+    Cpu,
+    /// All layers on a discrete GPU from an installed Vulkan/CUDA build.
+    Gpu,
+}
+
+/// Everything the GPU path needs to launch and describe its e2e run.
+struct GpuBench {
+    cli: PathBuf,
+    build: String,
+    cfg: E2eConfig,
+    device_name: Option<String>,
+}
 
 fn print_pretty_quick(result: &ReadResult) {
     println!(
@@ -219,6 +237,29 @@ fn print_pretty_e2e(e2e: &E2eResult) {
     );
 }
 
+/// One line for the GPU full-offload measurement. The eta suffix only appears
+/// when the theoretical VRAM bandwidth is known for this GPU.
+fn print_pretty_gpu(gpu: &GpuE2eResult) {
+    let name = match gpu.device_name.as_deref() {
+        Some(name) => format!(" {name}"),
+        None => String::new(),
+    };
+    let eta = match (gpu.eta_gpu, gpu.theoretical_vram_gbps) {
+        (Some(eta), Some(theoretical)) => format!(" (eta {eta:.2} of {theoretical:.0})"),
+        _ => String::new(),
+    };
+    println!(
+        "GPU e2e ({}, {}{}): decode {:.1} tok/s, prefill {:.0} tok/s -> effective VRAM {:.0} GB/s{}",
+        gpu.build,
+        gpu.device,
+        name,
+        gpu.decode_tps,
+        gpu.prefill_tps,
+        gpu.effective_vram_gbps,
+        eta,
+    );
+}
+
 /// Resolve `llama-cli` and load `model` through it (the slice-5 smoke
 /// test). Quick mode only: full mode lets the e2e run prove the load.
 fn probe_llama(llama_cli: Option<&Path>, model: &Path) -> Result<LlamaProbeReport> {
@@ -282,6 +323,62 @@ fn make_e2e_config(
     cfg
 }
 
+/// Resolve the installed GPU llama.cpp build, pick a device, and build the
+/// all-layers-offloaded e2e config.
+///
+/// The Vulkan build can list an integrated GPU as `Vulkan0` and the discrete
+/// card as `Vulkan1`, so the device is always chosen explicitly and passed
+/// through `-dev`.
+fn prepare_gpu_bench(
+    model: Option<&Path>,
+    prompt_tokens: Option<usize>,
+    gen_tokens: Option<u32>,
+    ctx_size: Option<u32>,
+    threads: Option<u32>,
+) -> Result<GpuBench> {
+    let model = model.ok_or_else(|| anyhow::anyhow!("--device gpu requires --model <gguf>"))?;
+    let home = attune_fetch::home_dir().context("failed to locate the attune home directory")?;
+    let found = attune_fetch::find_installed_variant(&home, "llama-cli", "vulkan")
+        .map(|cli| ("vulkan", cli))
+        .or_else(|| {
+            attune_fetch::find_installed_variant(&home, "llama-cli", "cuda12")
+                .map(|cli| ("cuda12", cli))
+        });
+    let Some((build, cli)) = found else {
+        anyhow::bail!("no GPU llama.cpp build installed; run `attune setup --gpu auto`");
+    };
+
+    let hw = HardwareInfo::detect()?;
+    let preferred = hw
+        .gpu
+        .devices
+        .iter()
+        .find(|device| device.vendor == "nvidia" || device.vendor == "amd")
+        .map(|device| device.name.clone());
+    let devices = list_devices(&cli)
+        .with_context(|| format!("failed to list GPU devices from {}", cli.display()))?;
+    let Some(device) = pick_device(&devices, preferred.as_deref()) else {
+        anyhow::bail!(
+            "{} reported no usable GPU device (is a GPU driver installed?)",
+            cli.display()
+        );
+    };
+    let device_name = devices
+        .iter()
+        .find(|(id, _, _)| id == &device)
+        .map(|(_, name, _)| name.clone());
+
+    let mut cfg = make_e2e_config(model, prompt_tokens, gen_tokens, ctx_size, threads);
+    cfg.n_gpu_layers = Some(999);
+    cfg.device = Some(device);
+    Ok(GpuBench {
+        cli,
+        build: build.to_string(),
+        cfg,
+        device_name,
+    })
+}
+
 // ---- JSON output ---------------------------------------------------------
 
 /// Build the JSON envelope printed by `--model --json` and saved by
@@ -319,6 +416,9 @@ fn json_envelope_with_model(
     }
     if let Some(e2e_block) = report.e2e.as_ref() {
         bench.insert("e2e".to_string(), serde_json::to_value(e2e_block)?);
+    }
+    if let Some(gpu_block) = report.gpu.as_ref() {
+        bench.insert("gpu".to_string(), serde_json::to_value(gpu_block)?);
     }
     Ok(serde_json::json!({
         "llama": probe,
@@ -382,7 +482,22 @@ pub fn run(
     gen_tokens: Option<u32>,
     ctx_size: Option<u32>,
     threads: Option<u32>,
+    device: BenchDevice,
 ) -> Result<()> {
+    if device == BenchDevice::Gpu && quick {
+        anyhow::bail!("--device gpu measures a full llama.cpp run; drop --quick");
+    }
+    let gpu = match device {
+        BenchDevice::Gpu => Some(prepare_gpu_bench(
+            model,
+            prompt_tokens,
+            gen_tokens,
+            ctx_size,
+            threads,
+        )?),
+        BenchDevice::Cpu => None,
+    };
+
     // Quick mode keeps the 1-token load probe: it is the only llama.cpp step
     // there.
     let probe = match (quick, model) {
@@ -393,16 +508,23 @@ pub fn run(
     // Full mode skips the probe, because the e2e run loads the model itself
     // (#31). The millisecond pre-flight (llama-cli resolves, model readable,
     // version parses) still runs before the kernels, so a bad setup fails
-    // fast without loading the model twice.
-    let e2e_cli = match model {
-        Some(model_path) if !quick => {
-            let cli = resolve_e2e_cli(llama_cli)?;
-            preflight(&cli, model_path)?;
-            Some(cli)
-        }
-        _ => None,
+    // fast without loading the model twice. The GPU path already resolved its
+    // own llama-cli when it picked the device.
+    let e2e_cli = match &gpu {
+        Some(gpu) => Some(gpu.cli.clone()),
+        None => match model {
+            Some(model_path) if !quick => {
+                let cli = resolve_e2e_cli(llama_cli)?;
+                preflight(&cli, model_path)?;
+                Some(cli)
+            }
+            _ => None,
+        },
     };
-    let e2e_cfg = model.map(|m| make_e2e_config(m, prompt_tokens, gen_tokens, ctx_size, threads));
+    let e2e_cfg = match &gpu {
+        Some(gpu) => Some(gpu.cfg.clone()),
+        None => model.map(|m| make_e2e_config(m, prompt_tokens, gen_tokens, ctx_size, threads)),
+    };
 
     if quick {
         let report = run_quick()?;
@@ -433,8 +555,36 @@ pub fn run(
     }
 
     // Full mode.
+    // The first Vulkan run compiles shaders, so a cold run underreports
+    // decode throughput; warm the cache once and discard those numbers.
+    if let Some(gpu) = &gpu {
+        if !json {
+            eprintln!("GPU warm-up (shader compile)...");
+        }
+        let mut warmup = gpu.cfg.clone();
+        warmup.prompt_tokens = 32;
+        warmup.gen_tokens = 8;
+        run_e2e(&gpu.cli, &warmup)?;
+    }
     let hw = HardwareInfo::detect()?;
-    let report = run_full(&hw, e2e_cfg.as_ref(), e2e_cli.as_deref())?;
+    let mut report = run_full(&hw, e2e_cfg.as_ref(), e2e_cli.as_deref())?;
+    if let (Some(gpu), Some(e2e_block), Some(model_path)) = (&gpu, report.e2e.as_ref(), model) {
+        let weight_bytes = std::fs::metadata(model_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let theoretical_vram_gbps = gpu
+            .device_name
+            .as_deref()
+            .and_then(attune_estimate::gpu_bandwidth_gbps);
+        report.gpu = Some(GpuE2eResult::from_e2e(
+            e2e_block,
+            gpu.cfg.device.clone().unwrap_or_default(),
+            gpu.device_name.clone(),
+            &gpu.build,
+            weight_bytes,
+            theoretical_vram_gbps,
+        ));
+    }
     let bw_value = bandwidth_value(&report.bandwidth, &report.flops);
     // The e2e run stands in for the probe, so the `--model` JSON keeps its
     // `{ "llama": …, "bench": … }` envelope.
@@ -452,6 +602,9 @@ pub fn run(
         print_report_pretty(&report, &hw);
         if let Some(e2e_block) = report.e2e.as_ref() {
             print_pretty_e2e(e2e_block);
+        }
+        if let Some(gpu_block) = report.gpu.as_ref() {
+            print_pretty_gpu(gpu_block);
         }
     }
     if let Some(path) = save {

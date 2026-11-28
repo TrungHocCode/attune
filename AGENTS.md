@@ -14,8 +14,8 @@ crates/
   attune-estimate/  # roofline + calibrate + bottleneck — depends on attune-bench
   attune-tune/      # sweep + score — depends on estimate/bench
   attune-profile/   # schema/validate/migrate — depends on NOTHING (keep it pure)
-  attune-backend/   # Backend trait + llama_subprocess (FFI later)
-  attune-serve/     # launcher/health/proxy
+  attune-backend/   # Backend trait + llama_subprocess, llama.cpp build choice (setup --gpu) and GPU device pick; uses hal + estimate
+  attune-serve/     # launcher/health/proxy, chat client, profiles by name; uses tune for GPU fingerprints
   attune-cli/       # thin CLI, depends on all, no logic here
 catalog/   # publishers allow-list + built-in snapshot of the model catalog
 docs/ profiles/ models/ tests/ benches/
@@ -49,10 +49,10 @@ cargo audit   # when Cargo.lock changes; CI runs it on every PR
 
 ## 4. Phase Discipline (do NOT jump ahead)
 
-Current phase: **PHASE 6 — RECOMMEND & DOWNLOADS (M6)**.
-- M1 (detect), M2 (bench), M3 (estimate), M4 (tune), M5 (serve) are done and tagged v0.1.0–v0.5.0. M4's target was revised in #103 (no regression vs defaults + calibrated prediction within 15%).
-- M6 design approved 2026-11-26: `docs/superpowers/specs/2026-11-26-recommend-design.md` (`tune` without `--model` recommends, daily catalog, `attune setup`, profile `source` + download on `serve`, new `attune-fetch` crate). Plan slices just before starting.
-- M7 GPU (`docs/gpu-plan.md`) comes after M6; do not start it yet.
+Current phase: **post-M7 — no milestone in progress**. Next candidates are in ROADMAP "Later" plus open issues (e.g. #142); plan a design spec before starting one.
+- M1 (detect), M2 (bench), M3 (estimate), M4 (tune), M5 (serve), M6 (recommend & downloads, plus `run`/`chat`/one-line install) and M7 (GPU, `--device`) are done and tagged v0.1.0–v0.7.0. M4's target was revised in #103 (no regression vs defaults + calibrated prediction within 15%).
+- M6 designs: `docs/superpowers/specs/2026-11-26-recommend-design.md` and `docs/superpowers/specs/2026-11-27-friendly-design.md`.
+- M7 design: `docs/superpowers/specs/2026-11-28-gpu-design.md` (results in ROADMAP M7).
 - Each task must meet its Acceptance column in plan §8 before marking done.
 
 **Phase-close checklist (mandatory when a milestone finishes):**

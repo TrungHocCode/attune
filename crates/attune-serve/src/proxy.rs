@@ -35,6 +35,10 @@ use crate::server::Route;
 /// is set because an SSE stream can legitimately stay open for minutes.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Upper bound for a forwarded request body. A completion request is normally
+/// a few KiB; anything near this is an attempt to exhaust proxy memory.
+pub(crate) const MAX_REQUEST_BODY: usize = 32 * 1024 * 1024;
+
 /// Headers that describe this hop only and must not be copied to the client.
 /// `Content-Length` is recomputed by `tiny_http`.
 const HOP_BY_HOP: &[&str] = &[
@@ -133,13 +137,29 @@ fn forward_request(mut request: Request, route: Route, state: &ProxyState) {
     };
     let mut body = Vec::new();
     if route.is_post() {
-        if let Err(error) = request.as_reader().read_to_end(&mut body) {
+        let declared =
+            header_value(&request, "Content-Length").and_then(|value| value.parse::<u64>().ok());
+        if declared.is_some_and(|length| length > MAX_REQUEST_BODY as u64) {
+            respond_too_large(request);
+            return;
+        }
+        let read = {
+            // Read at most one byte past the cap so a chunked body cannot grow
+            // without bound before we notice.
+            let mut limited = request.as_reader().take(MAX_REQUEST_BODY as u64 + 1);
+            limited.read_to_end(&mut body)
+        };
+        if let Err(error) = read {
             respond_error(
                 request,
                 400,
                 "invalid_request",
                 &format!("failed to read request body: {error}"),
             );
+            return;
+        }
+        if body.len() > MAX_REQUEST_BODY {
+            respond_too_large(request);
             return;
         }
     }
@@ -177,6 +197,18 @@ fn forward_request(mut request: Request, route: Route, state: &ProxyState) {
             &format!("upstream request failed: {error}"),
         ),
     }
+}
+
+fn respond_too_large(request: Request) {
+    respond_error(
+        request,
+        413,
+        "payload_too_large",
+        &format!(
+            "request body exceeds the {} MiB proxy limit",
+            MAX_REQUEST_BODY / (1024 * 1024)
+        ),
+    );
 }
 
 /// Write an OpenAI-shaped error envelope (`{"error":{...}}`).
@@ -437,7 +469,7 @@ fn is_hop_by_hop(name: &str) -> bool {
     HOP_BY_HOP.iter().any(|hop| name.eq_ignore_ascii_case(hop))
 }
 
-fn header_value(request: &Request, name: &'static str) -> Option<String> {
+pub(crate) fn header_value(request: &Request, name: &'static str) -> Option<String> {
     request
         .headers()
         .iter()
