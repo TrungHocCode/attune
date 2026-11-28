@@ -58,6 +58,7 @@ pub fn run(
             "balanced",
             None,
             None,
+            tune::TuneDevice::Auto,
             64,
             Some(&path),
             Some(&name),

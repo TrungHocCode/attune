@@ -22,22 +22,54 @@ use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
 use attune_bench::e2e::{DEFAULT_GEN_TOKENS, DEFAULT_PROMPT_TOKENS};
+use attune_bench::gpu::GpuE2eResult;
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
 use attune_estimate::model::registry::{load_catalog, CatalogModel};
 use attune_estimate::{
-    is_gguf_file, is_hf_id, kv_bytes_per_token, parse_arch, parse_bench_report, parse_model,
-    parse_params, parse_quants, probe_gguf_file, resolve_hf_model, weight_bytes_for, Arch,
-    BenchCalibration, HwInputs, Quant,
+    gpu_bandwidth_gbps, is_gguf_file, is_hf_id, kv_bytes_per_token, parse_arch, parse_bench_report,
+    parse_model, parse_params, parse_quants, probe_gguf_file, resolve_hf_model, weight_bytes_for,
+    Arch, BenchCalibration, HwInputs, Quant, GPU_DECODE_EFFICIENCY,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
-use attune_hal::HardwareInfo;
+use attune_hal::{GpuDevice, HardwareInfo};
 use attune_profile::{ModelSource, Profile};
+use attune_tune::export::hardware_fingerprint_with_gpu;
 use attune_tune::ProfileInputs;
 use attune_tune::{
-    calibrate_ranked, expand_full_grid_with_quants, from_best, hardware_fingerprint, prune,
-    rank_by_estimate, run_verify_topk, stars, Objective, PruneReason, RankedConfig, TuneConfig,
-    TuneError, TuneModel, TuneReport,
+    calibrate_ranked, expand_full_grid_with_quants, from_best, prune, rank_by_estimate,
+    run_verify_topk, select_configs, stars, Device, GpuTarget, Objective, PruneReason,
+    RankedConfig, TuneConfig, TuneError, TuneModel, TuneReport,
 };
+
+/// Which device `attune tune` should plan for.
+///
+/// A CLI-side mirror of [`Device`] because clap's `ValueEnum` derive must not
+/// leak into `attune-tune` (the library owns the sweep, not argument parsing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum TuneDevice {
+    /// CPU configs plus GPU configs when a GPU is usable.
+    Auto,
+    /// CPU-only configs.
+    Cpu,
+    /// GPU configs only.
+    Gpu,
+}
+
+impl From<TuneDevice> for Device {
+    fn from(device: TuneDevice) -> Self {
+        match device {
+            TuneDevice::Auto => Device::Auto,
+            TuneDevice::Cpu => Device::Cpu,
+            TuneDevice::Gpu => Device::Gpu,
+        }
+    }
+}
+
+/// Effective prefill throughput assumed for a GPU target (decimal TFLOP/s).
+/// Measured at ~15 TFLOP/s effective on an RTX 4050 Laptop Vulkan build; low
+/// confidence on other GPUs, so treat this as a rough constant until a GPU
+/// prefill calibration exists.
+const GPU_PREFILL_TFLOPS: f64 = 15.0;
 
 /// `engine.version` when no llama.cpp build was observed (no `--verify`, or
 /// every verification run failed), so the field says so instead of guessing.
@@ -293,6 +325,8 @@ struct HardwareResolution {
     avail_bytes: Option<f64>,
     total_bytes: Option<f64>,
     physical_cores: u32,
+    /// Detected adapters, empty when the caller only plans for the CPU.
+    gpu_devices: Vec<GpuDevice>,
 }
 
 /// Resolve the FP32 peak, memory limits and physical core count in one pass.
@@ -300,19 +334,26 @@ struct HardwareResolution {
 /// An explicit `--gflops` skips the CPU peak probe but still reads memory and
 /// the physical core count (needed to build and prune the grid). Otherwise
 /// [`HardwareInfo::detect`] supplies all of them, so the CLI never detects the
-/// same hardware twice.
-fn resolve_hardware(gflops: Option<f64>) -> Result<HardwareResolution> {
+/// same hardware twice. `detect_gpu` is false for `--device cpu`, which skips
+/// the (possibly slow) GPU probe entirely.
+fn resolve_hardware(gflops: Option<f64>, detect_gpu: bool) -> Result<HardwareResolution> {
     if let Some(value) = gflops {
         if !value.is_finite() || value <= 0.0 {
             return Err(anyhow!("--gflops must be a finite number > 0"));
         }
         let (avail_bytes, total_bytes) = detect_memory_limits();
+        let gpu_devices = if detect_gpu {
+            attune_hal::gpu::detect().devices
+        } else {
+            Vec::new()
+        };
         return Ok(HardwareResolution {
             gflops: value,
             clock_fallback: false,
             avail_bytes,
             total_bytes,
             physical_cores: detect_physical_cores(),
+            gpu_devices,
         });
     }
 
@@ -322,6 +363,11 @@ fn resolve_hardware(gflops: Option<f64>) -> Result<HardwareResolution> {
     let total = hw.memory.total_bytes as f64;
     let total_bytes = (total.is_finite() && total > 0.0).then_some(total);
     let physical_cores = hw.cpu.physical_cores.max(1);
+    let gpu_devices = if detect_gpu {
+        hw.gpu.devices.clone()
+    } else {
+        Vec::new()
+    };
 
     let theoretical = hw.cpu.theoretical_fp32_gflops;
     if theoretical.is_finite() && theoretical > 0.0 {
@@ -331,6 +377,7 @@ fn resolve_hardware(gflops: Option<f64>) -> Result<HardwareResolution> {
             avail_bytes,
             total_bytes,
             physical_cores,
+            gpu_devices,
         });
     }
 
@@ -346,6 +393,7 @@ fn resolve_hardware(gflops: Option<f64>) -> Result<HardwareResolution> {
             avail_bytes,
             total_bytes,
             physical_cores,
+            gpu_devices,
         });
     }
 
@@ -390,12 +438,105 @@ fn detect_physical_cores() -> u32 {
         .unwrap_or(1)
 }
 
+/// A detected GPU that the sweep can plan a layer split against.
+struct GpuPlan {
+    target: GpuTarget,
+    /// Physical VRAM, recorded in the profile fingerprint.
+    vram_total_bytes: u64,
+}
+
+/// Outcome of looking for a usable GPU for this run.
+struct GpuSelection {
+    plan: Option<GpuPlan>,
+    /// Set when a discrete GPU exists but its bandwidth is neither in the
+    /// table nor in `--bench-json`, so no target can be planned.
+    unknown_bandwidth: Option<String>,
+}
+
+impl GpuSelection {
+    fn none() -> Self {
+        Self {
+            plan: None,
+            unknown_bandwidth: None,
+        }
+    }
+}
+
+/// Pick the first NVIDIA/AMD adapter with known free VRAM and derive its
+/// effective bandwidth.
+///
+/// A `--bench-json` GPU block is a direct measurement of the effective VRAM
+/// bandwidth and wins over the name table. The table value is multiplied by
+/// [`GPU_DECODE_EFFICIENCY`] because the roofline wants effective GB/s, not
+/// the marketing number. An unknown name with no measurement leaves the plan
+/// empty and names the GPU in `unknown_bandwidth`.
+fn select_gpu(devices: &[GpuDevice], bench: Option<&GpuE2eResult>) -> GpuSelection {
+    let Some(device) = devices.iter().find(|device| {
+        matches!(device.vendor.as_str(), "nvidia" | "amd") && device.vram_free_bytes.is_some()
+    }) else {
+        return GpuSelection::none();
+    };
+    let Some(vram_free_bytes) = device.vram_free_bytes else {
+        return GpuSelection::none();
+    };
+    let vram_gbps = bench
+        .map(|gpu| gpu.effective_vram_gbps)
+        .filter(|gbps| gbps.is_finite() && *gbps > 0.0)
+        .or_else(|| {
+            gpu_bandwidth_gbps(&device.name).map(|theoretical| theoretical * GPU_DECODE_EFFICIENCY)
+        });
+    let Some(vram_gbps) = vram_gbps else {
+        return GpuSelection {
+            plan: None,
+            unknown_bandwidth: Some(device.name.clone()),
+        };
+    };
+    GpuSelection {
+        plan: Some(GpuPlan {
+            target: GpuTarget {
+                name: device.name.clone(),
+                vram_free_bytes,
+                vram_gbps,
+                prefill_tflops: GPU_PREFILL_TFLOPS,
+            },
+            vram_total_bytes: device.vram_total_bytes.unwrap_or(vram_free_bytes),
+        }),
+        unknown_bandwidth: None,
+    }
+}
+
+/// Actionable hint appended to every `--device gpu` planning failure.
+const GPU_FIX_HINT: &str = "fix: `attune setup --gpu auto`, or use --device cpu";
+
+/// The GPU llama.cpp build a saved GPU profile should be served with.
+///
+/// Vulkan wins when installed, then CUDA 12; a machine with neither still
+/// records `vulkan` (the portable default) rather than inventing a build.
+fn gpu_engine_variant() -> &'static str {
+    let Ok(home) = attune_fetch::home_dir() else {
+        return "vulkan";
+    };
+    if attune_fetch::find_installed_variant(&home, "llama-server", "vulkan").is_some() {
+        "vulkan"
+    } else if attune_fetch::find_installed_variant(&home, "llama-server", "cuda12").is_some() {
+        "cuda12"
+    } else {
+        "vulkan"
+    }
+}
+
 /// Readable fingerprint for the machine this profile is being saved on.
 ///
 /// Only called when `--save` (or `attune run`) needs it, so the normal estimate
 /// path never pays for a second HAL detection. Detection failures degrade to
 /// the same `unknown|0|unknown|0` marker rather than blocking the save.
 pub fn current_hardware_fingerprint() -> String {
+    current_hardware_fingerprint_with_gpu(None)
+}
+
+/// Same as [`current_hardware_fingerprint`], but appends the GPU name and
+/// rounded VRAM when a GPU profile is being saved.
+fn current_hardware_fingerprint_with_gpu(gpu: Option<(&str, u64)>) -> String {
     let cpu = attune_hal::cpu::detect();
     let memory = attune_hal::memory::detect();
     let brand = cpu
@@ -408,7 +549,7 @@ pub fn current_hardware_fingerprint() -> String {
         .map(|cpu| cpu.simd.as_str())
         .unwrap_or("unknown");
     let total_ram = memory.as_ref().map_or(0, |memory| memory.total_bytes);
-    hardware_fingerprint(brand, cores, simd, total_ram)
+    hardware_fingerprint_with_gpu(brand, cores, simd, total_ram, gpu)
 }
 
 /// Compact parameter label (`135M`, `8.00B`, ...).
@@ -419,6 +560,16 @@ fn format_params(params: u64) -> String {
         format!("{:.0}M", params as f64 / 1_000_000.0)
     } else {
         params.to_string()
+    }
+}
+
+/// GPU-column value: `<n_gpu_layers>/<n_layers>` for GPU rows, `-` for CPU.
+fn gpu_layers_cell(ranked: &RankedConfig, n_layers: Option<u32>) -> String {
+    if ranked.device == Device::Gpu {
+        let layers = n_layers.map_or_else(|| "?".to_string(), |layers| layers.to_string());
+        format!("{}/{}", ranked.config.n_gpu_layers, layers)
+    } else {
+        "-".to_string()
     }
 }
 
@@ -435,6 +586,8 @@ fn render_table(
     report: &TuneReport,
     resolution: &ModelResolution,
     total_ram_fallback: bool,
+    gpu: Option<&GpuTarget>,
+    n_layers: Option<u32>,
     estimates: Option<&[RankedConfig]>,
     verbose: bool,
 ) -> String {
@@ -465,6 +618,15 @@ fn render_table(
         (None, _) => {
             let _ = writeln!(out, "RAM:    unknown (fit check skipped)");
         }
+    }
+    if let Some(gpu) = gpu.filter(|_| report.configs.iter().any(|r| r.device == Device::Gpu)) {
+        let _ = writeln!(
+            out,
+            "GPU:    {} ({:.1} GB free, {:.0} GB/s effective)",
+            gpu.name,
+            gpu.vram_free_bytes as f64 / 1e9,
+            gpu.vram_gbps,
+        );
     }
     // One eta pair was fitted once and applied to every config, so the first
     // calibrated entry describes the whole sweep.
@@ -497,13 +659,14 @@ fn render_table(
         (true, true) => {
             let _ = writeln!(
                 out,
-                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<14} {:<14} {:<8} {:<5} {:<6} Score",
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<8} {:<14} {:<14} {:<14} {:<14} {:<8} {:<5} {:<6} Score",
                 "Rank",
                 "Quant",
                 "Ctx",
                 "Threads",
                 "Batch",
                 "KV",
+                "GPU",
                 "Est. tok/s",
                 "Est. TTFT ms",
                 "E2E tok/s",
@@ -516,13 +679,14 @@ fn render_table(
         (true, false) => {
             let _ = writeln!(
                 out,
-                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<14} {:<14} {:<8} {:<5} {:<6}",
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<8} {:<14} {:<14} {:<14} {:<14} {:<8} {:<5} {:<6}",
                 "Rank",
                 "Quant",
                 "Ctx",
                 "Threads",
                 "Batch",
                 "KV",
+                "GPU",
                 "Est. tok/s",
                 "Est. TTFT ms",
                 "E2E tok/s",
@@ -535,13 +699,14 @@ fn render_table(
         (false, true) => {
             let _ = writeln!(
                 out,
-                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<5} {:<6} Score",
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<8} {:<14} {:<14} {:<5} {:<6} Score",
                 "Rank",
                 "Quant",
                 "Ctx",
                 "Threads",
                 "Batch",
                 "KV",
+                "GPU",
                 "Decode tok/s",
                 "TTFT ms",
                 "Fit",
@@ -551,13 +716,14 @@ fn render_table(
         (false, false) => {
             let _ = writeln!(
                 out,
-                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14} {:<14} {:<5} {:<6}",
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<8} {:<14} {:<14} {:<5} {:<6}",
                 "Rank",
                 "Quant",
                 "Ctx",
                 "Threads",
                 "Batch",
                 "KV",
+                "GPU",
                 "Decode tok/s",
                 "TTFT ms",
                 "Fit",
@@ -572,6 +738,7 @@ fn render_table(
             "-inf".to_string()
         };
         let star_marks = "*".repeat(usize::from(stars(index, total)));
+        let gpu_cell = gpu_layers_cell(ranked, n_layers);
         if show_verify {
             let estimate = estimates
                 .and_then(|list| list.iter().find(|item| item.config == ranked.config))
@@ -587,13 +754,14 @@ fn render_table(
             if verbose {
                 let _ = writeln!(
                     out,
-                    "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<14} {:<14} {:<8} {:<5} {:<6} {}",
+                    "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<8} {:<14.1} {:<14.1} {:<14} {:<14} {:<8} {:<5} {:<6} {}",
                     index + 1,
                     ranked.config.quant.as_str(),
                     ranked.config.n_ctx,
                     ranked.config.n_threads,
                     ranked.config.n_batch,
                     ranked.config.cache_kv.as_str(),
+                    gpu_cell,
                     estimate.decode_tps,
                     estimate.ttft_ms,
                     e2e_tps,
@@ -606,13 +774,14 @@ fn render_table(
             } else {
                 let _ = writeln!(
                     out,
-                    "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<14} {:<14} {:<8} {:<5} {:<6}",
+                    "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<8} {:<14.1} {:<14.1} {:<14} {:<14} {:<8} {:<5} {:<6}",
                     index + 1,
                     ranked.config.quant.as_str(),
                     ranked.config.n_ctx,
                     ranked.config.n_threads,
                     ranked.config.n_batch,
                     ranked.config.cache_kv.as_str(),
+                    gpu_cell,
                     estimate.decode_tps,
                     estimate.ttft_ms,
                     e2e_tps,
@@ -625,13 +794,14 @@ fn render_table(
         } else if verbose {
             let _ = writeln!(
                 out,
-                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<5} {:<6} {}",
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<8} {:<14.1} {:<14.1} {:<5} {:<6} {}",
                 index + 1,
                 ranked.config.quant.as_str(),
                 ranked.config.n_ctx,
                 ranked.config.n_threads,
                 ranked.config.n_batch,
                 ranked.config.cache_kv.as_str(),
+                gpu_cell,
                 ranked.decode_tps,
                 ranked.ttft_ms,
                 if ranked.fits { "yes" } else { "OOM" },
@@ -641,13 +811,14 @@ fn render_table(
         } else {
             let _ = writeln!(
                 out,
-                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<14.1} {:<14.1} {:<5} {:<6}",
+                "{:<5} {:<8} {:<6} {:<8} {:<7} {:<6} {:<8} {:<14.1} {:<14.1} {:<5} {:<6}",
                 index + 1,
                 ranked.config.quant.as_str(),
                 ranked.config.n_ctx,
                 ranked.config.n_threads,
                 ranked.config.n_batch,
                 ranked.config.cache_kv.as_str(),
+                gpu_cell,
                 ranked.decode_tps,
                 ranked.ttft_ms,
                 if ranked.fits { "yes" } else { "OOM" },
@@ -713,10 +884,13 @@ fn render_pruned_line(pruned: &[(TuneConfig, PruneReason)], cap_from_expand: usi
 
 /// Everything the human `tune` output prints, built in one place so tests can
 /// assert what a newcomer sees. The prune line is verbose-only.
+#[allow(clippy::too_many_arguments)]
 fn render_human(
     report: &TuneReport,
     resolution: &ModelResolution,
     total_ram_fallback: bool,
+    gpu: Option<&GpuTarget>,
+    n_layers: Option<u32>,
     estimates: Option<&[RankedConfig]>,
     pruned: &[(TuneConfig, PruneReason)],
     cap_from_expand: usize,
@@ -730,6 +904,8 @@ fn render_human(
         report,
         resolution,
         total_ram_fallback,
+        gpu,
+        n_layers,
         estimates,
         verbose,
     ));
@@ -750,12 +926,27 @@ fn default_profile_name(label: &str, objective: Objective) -> String {
     format!("{model}-{objective}").replace(['/', '\\'], "-")
 }
 
+/// GPU identity a saved profile records when the winning config is a GPU one.
+struct ProfileGpu<'a> {
+    /// Adapter name, e.g. `NVIDIA GeForce RTX 4050 Laptop GPU`.
+    name: &'a str,
+    /// Physical VRAM, appended to the hardware fingerprint.
+    vram_total_bytes: u64,
+    /// Installed llama.cpp build (`vulkan`/`cuda12`).
+    engine_variant: &'a str,
+}
+
 /// Build the versioned profile for the highest-ranked config.
+///
+/// `gpu` is `Some` only when the winning config is a GPU one; CPU profiles pass
+/// `None` and keep exactly the pre-M7 fields (variant `cpu`, no `gpu_name`,
+/// four-part fingerprint).
 fn build_profile(
     report: &TuneReport,
     resolution: &ModelResolution,
     name: &str,
     engine_version: Option<&str>,
+    gpu: Option<ProfileGpu<'_>>,
 ) -> Result<Profile> {
     let best = report
         .configs
@@ -763,7 +954,10 @@ fn build_profile(
         .ok_or_else(|| anyhow!("cannot save a profile without a ranked config"))?;
     let quant = best.config.quant;
     let size_bytes = weight_bytes_for(report.params, quant, resolution.weight_bytes).round() as u64;
-    let fingerprint = current_hardware_fingerprint();
+    let fingerprint = match gpu.as_ref() {
+        Some(gpu) => current_hardware_fingerprint_with_gpu(Some((gpu.name, gpu.vram_total_bytes))),
+        None => current_hardware_fingerprint(),
+    };
     let inputs = ProfileInputs {
         name,
         fingerprint: &fingerprint,
@@ -778,12 +972,12 @@ fn build_profile(
         confidence: ESTIMATE_ONLY_CONFIDENCE,
         source: resolution.source.clone(),
     };
-    Ok(from_best(
-        &best.config,
-        best.decode_tps,
-        best.ttft_ms,
-        &inputs,
-    ))
+    let mut profile = from_best(&best.config, best.decode_tps, best.ttft_ms, &inputs);
+    if let Some(gpu) = gpu {
+        profile.engine.variant = gpu.engine_variant.to_string();
+        profile.load_config.gpu_name = Some(gpu.name.to_string());
+    }
+    Ok(profile)
 }
 
 /// One-line summary of the winner, printed before the save path.
@@ -838,6 +1032,7 @@ pub fn run_recommend(
         RECOMMEND_OBJECTIVE,
         None,
         None,
+        TuneDevice::Auto,
         RECOMMEND_MAX_CONFIGS,
         None,
         None,
@@ -872,6 +1067,7 @@ pub fn run(
     objective: &str,
     bandwidth_gbps: Option<f64>,
     gflops: Option<f64>,
+    device: TuneDevice,
     max_configs: usize,
     save: Option<&Path>,
     name: Option<&str>,
@@ -970,11 +1166,12 @@ pub fn run(
         }
     }
 
+    let device: Device = device.into();
     // Sequential on purpose: run concurrently, HAL detection competed with
     // the bandwidth kernel and the probe read 13-36 GB/s on one machine
     // (34.5 standalone). `resolve_hardware` reuses a single HAL detection for
     // the FP32 peak, available RAM and physical core count.
-    let hardware = resolve_hardware(gflops)?;
+    let hardware = resolve_hardware(gflops, device != Device::Cpu)?;
     let bw_gbps = resolve_bandwidth(bandwidth_gbps)?;
     let HardwareResolution {
         gflops,
@@ -982,6 +1179,7 @@ pub fn run(
         avail_bytes,
         total_bytes,
         physical_cores,
+        gpu_devices,
     } = hardware;
     // Sequential with the bandwidth probe above so the two never compete.
     let int8_gops = if explicit_gflops {
@@ -1005,6 +1203,42 @@ pub fn run(
         );
     };
 
+    // Resolve the GPU target (auto/gpu only) and build the candidate set for
+    // the requested device. A GPU with no known bandwidth is left unusable:
+    // auto stays CPU-only with a note, `--device gpu` fails with a fix hint.
+    let GpuSelection {
+        plan,
+        unknown_bandwidth,
+    } = select_gpu(
+        &gpu_devices,
+        bench.as_ref().and_then(|bench| bench.gpu.as_ref()),
+    );
+    let mut gpu_note: Option<String> = None;
+    let gpu_plan = match device {
+        Device::Cpu => None,
+        Device::Gpu => match plan {
+            Some(plan) => Some(plan),
+            None => {
+                let reason = unknown_bandwidth.map_or_else(
+                    || "no GPU detected".to_string(),
+                    |name| format!("GPU {name}: bandwidth unknown"),
+                );
+                return Err(anyhow!("{reason}\n{GPU_FIX_HINT}"));
+            }
+        },
+        Device::Auto => {
+            if plan.is_none() {
+                if let Some(name) = unknown_bandwidth.as_deref() {
+                    gpu_note = Some(format!(
+                        "GPU {name}: bandwidth unknown, CPU only (run `attune bench --model <file> --device gpu` to calibrate)"
+                    ));
+                }
+            }
+            plan
+        }
+    };
+    let gpu_target = gpu_plan.as_ref().map(|plan| &plan.target);
+
     // Full slice-2 grid (threads/ctx/batch/KV) restricted to the requested
     // formats, then prune by OOM, context fit, thread count and the cap.
     let model = TuneModel {
@@ -1013,7 +1247,16 @@ pub fn run(
         kv_f16_per_token: resolution.arch.as_ref().map_or(0.0, kv_bytes_per_token),
         n_layers: resolution.arch.as_ref().map(|arch| arch.n_layer),
     };
-    let (grid, cap_from_expand) = expand_full_grid_with_quants(physical_cores, &quants);
+    let (cpu_grid, cap_from_expand) = expand_full_grid_with_quants(physical_cores, &quants);
+    let grid =
+        select_configs(device, cpu_grid, &model, gpu_target, physical_cores).map_err(|err| {
+            match err {
+                TuneError::NoGpu(reason) => {
+                    anyhow!("GPU tuning unavailable: {reason}\n{GPU_FIX_HINT}")
+                }
+                other => anyhow!("{other}"),
+            }
+        })?;
     let (mut kept, mut pruned) = prune(
         &grid,
         &model,
@@ -1060,7 +1303,7 @@ pub fn run(
     let mut ranked = rank_by_estimate(
         &kept,
         &model,
-        None,
+        gpu_target,
         hw,
         effective_avail.unwrap_or(0.0),
         objective,
@@ -1108,6 +1351,9 @@ pub fn run(
     if total_ram_fallback {
         warnings.push(TOTAL_RAM_FALLBACK_WARNING.to_string());
     }
+    if let Some(note) = gpu_note {
+        warnings.push(note);
+    }
     warnings.extend(calibration_warnings);
     // Opt-in slice 4: measure the top-K estimate configs and re-score them.
     // Setup errors fail here; a single bad run becomes a warning and keeps
@@ -1139,6 +1385,19 @@ pub fn run(
     )
     .with_warnings(warnings);
 
+    let best_is_gpu = report
+        .configs
+        .first()
+        .is_some_and(|best| best.device == Device::Gpu);
+    let profile_gpu = if best_is_gpu {
+        gpu_plan.as_ref().map(|plan| ProfileGpu {
+            name: &plan.target.name,
+            vram_total_bytes: plan.vram_total_bytes,
+            engine_variant: gpu_engine_variant(),
+        })
+    } else {
+        None
+    };
     let profile = match save {
         Some(path) => {
             let default_name = default_profile_name(&resolution.label, objective);
@@ -1148,6 +1407,7 @@ pub fn run(
                 &resolution,
                 profile_name,
                 observed_engine_version.as_deref(),
+                profile_gpu,
             )?;
             let document = profile.to_json_string()?;
             std::fs::write(path, document)
@@ -1199,6 +1459,8 @@ pub fn run(
             &report,
             &resolution,
             total_ram_fallback,
+            gpu_target,
+            model.n_layers,
             estimate_snapshot.as_deref(),
             &pruned,
             cap_from_expand,
@@ -1259,6 +1521,68 @@ mod tests {
         }
     }
 
+    fn gpu_device(
+        vendor: &str,
+        name: &str,
+        vram_free_bytes: Option<u64>,
+        vram_total_bytes: Option<u64>,
+    ) -> GpuDevice {
+        GpuDevice {
+            vendor: vendor.to_string(),
+            name: name.to_string(),
+            vram_total_bytes,
+            vram_free_bytes,
+            driver: None,
+            source: "test".to_string(),
+        }
+    }
+
+    fn gpu_bench(effective_vram_gbps: f64) -> GpuE2eResult {
+        GpuE2eResult {
+            device: "Vulkan1".to_string(),
+            device_name: Some("NVIDIA GeForce RTX 4050 Laptop GPU".to_string()),
+            build: "vulkan".to_string(),
+            decode_tps: 34.6,
+            prefill_tps: 500.0,
+            weight_bytes: 5_027_783_488,
+            effective_vram_gbps,
+            theoretical_vram_gbps: Some(192.0),
+            eta_gpu: Some(effective_vram_gbps / 192.0),
+        }
+    }
+
+    fn gpu_report_for(label: &str) -> TuneReport {
+        let config = TuneConfig {
+            n_gpu_layers: 24,
+            ..TuneConfig::new(Quant::Q4_K_M, 2_048, 4, 512, Quant::Fp16)
+        };
+        let ranked = RankedConfig {
+            config,
+            device: Device::Gpu,
+            decode_tps: 300.0,
+            ttft_ms: 40.0,
+            fits: true,
+            score: 3.0,
+            verified: false,
+            measured: None,
+            calibration: None,
+            grid_index: 0,
+        };
+        let hw = HwInputs {
+            bw_gbps: 20.0,
+            flops_gflops: 100.0,
+            int8_gops: None,
+        };
+        TuneReport::new(
+            label,
+            135_000_000,
+            Objective::Throughput,
+            hw,
+            None,
+            vec![ranked],
+        )
+    }
+
     #[test]
     fn gguf_default_name_is_the_file_stem_plus_objective() {
         let dir = std::env::temp_dir().join("attune-tune-name-test");
@@ -1284,9 +1608,9 @@ mod tests {
     fn profile_uses_observed_engine_version_else_estimate_only() {
         let report = report_for("m");
         let res = resolution("m", None);
-        let observed = build_profile(&report, &res, "n", Some("0.7.0-dev")).expect("profile");
+        let observed = build_profile(&report, &res, "n", Some("0.7.0-dev"), None).expect("profile");
         assert_eq!(observed.engine.version, "0.7.0-dev");
-        let estimate = build_profile(&report, &res, "n", None).expect("profile");
+        let estimate = build_profile(&report, &res, "n", None, None).expect("profile");
         assert_eq!(estimate.engine.version, ENGINE_VERSION_ESTIMATE_ONLY);
     }
 
@@ -1294,9 +1618,135 @@ mod tests {
     fn profile_size_bytes_is_the_gguf_file_size() {
         let report = report_for("m");
         let res = resolution("m", Some(105_454_432));
-        let profile = build_profile(&report, &res, "n", None).expect("profile");
+        let profile = build_profile(&report, &res, "n", None, None).expect("profile");
         assert_eq!(profile.model.size_bytes, 105_454_432);
         assert_eq!(profile.model.path, "m");
+    }
+
+    #[test]
+    fn gpu_best_profile_sets_variant_gpu_name_and_fingerprint() {
+        let report = gpu_report_for("m");
+        let res = resolution("m", None);
+        let gpu = ProfileGpu {
+            name: "NVIDIA GeForce RTX 4050 Laptop GPU",
+            vram_total_bytes: 6_442_450_944,
+            engine_variant: "vulkan",
+        };
+        let profile = build_profile(&report, &res, "n", None, Some(gpu)).expect("profile");
+        assert_eq!(profile.engine.variant, "vulkan");
+        assert_eq!(
+            profile.load_config.gpu_name.as_deref(),
+            Some("NVIDIA GeForce RTX 4050 Laptop GPU")
+        );
+        assert_eq!(profile.device(), "gpu");
+        assert!(
+            profile
+                .hardware_fingerprint
+                .ends_with("|NVIDIA GeForce RTX 4050 Laptop GPU|6"),
+            "{}",
+            profile.hardware_fingerprint
+        );
+    }
+
+    #[test]
+    fn cpu_best_profile_keeps_cpu_defaults() {
+        let report = report_for("m");
+        let res = resolution("m", None);
+        let profile = build_profile(&report, &res, "n", None, None).expect("profile");
+        assert_eq!(profile.engine.variant, "cpu");
+        assert!(profile.load_config.gpu_name.is_none());
+        assert_eq!(profile.device(), "cpu");
+        assert_eq!(profile.hardware_fingerprint.split('|').count(), 4);
+    }
+
+    #[test]
+    fn gpu_table_shows_layers_over_total_and_the_gpu_header() {
+        let report = gpu_report_for("m");
+        let res = resolution("m", None);
+        let gpu = GpuTarget {
+            name: "NVIDIA GeForce RTX 4050 Laptop GPU".to_string(),
+            vram_free_bytes: 6_200_000_000,
+            vram_gbps: 163.2,
+            prefill_tflops: GPU_PREFILL_TFLOPS,
+        };
+        let text = render_human(
+            &report,
+            &res,
+            false,
+            Some(&gpu),
+            Some(36),
+            None,
+            &[],
+            0,
+            false,
+        );
+        assert!(
+            text.contains(
+                "GPU:    NVIDIA GeForce RTX 4050 Laptop GPU (6.2 GB free, 163 GB/s effective)"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("24/36"), "{text}");
+    }
+
+    #[test]
+    fn select_gpu_builds_a_target_from_an_nvidia_device() {
+        let devices = [gpu_device(
+            "nvidia",
+            "NVIDIA GeForce RTX 4050 Laptop GPU",
+            Some(6_200_000_000),
+            Some(6_442_450_944),
+        )];
+        let selection = select_gpu(&devices, None);
+        let plan = selection.plan.expect("nvidia target");
+        assert_eq!(plan.target.name, "NVIDIA GeForce RTX 4050 Laptop GPU");
+        assert_eq!(plan.target.vram_free_bytes, 6_200_000_000);
+        assert!(
+            (plan.target.vram_gbps - 192.0 * GPU_DECODE_EFFICIENCY).abs() < 1e-9,
+            "{}",
+            plan.target.vram_gbps
+        );
+        assert_eq!(plan.target.prefill_tflops, GPU_PREFILL_TFLOPS);
+        assert_eq!(plan.vram_total_bytes, 6_442_450_944);
+        assert!(selection.unknown_bandwidth.is_none());
+    }
+
+    #[test]
+    fn select_gpu_ignores_an_intel_only_machine() {
+        let devices = [gpu_device("intel", "Intel UHD Graphics", Some(1), Some(1))];
+        let selection = select_gpu(&devices, None);
+        assert!(selection.plan.is_none());
+        assert!(selection.unknown_bandwidth.is_none());
+    }
+
+    #[test]
+    fn select_gpu_marks_an_unknown_name_without_a_bench_as_unavailable() {
+        let devices = [gpu_device(
+            "nvidia",
+            "Mystery GPU 9000",
+            Some(8_000_000_000),
+            Some(9_000_000_000),
+        )];
+        let selection = select_gpu(&devices, None);
+        assert!(selection.plan.is_none());
+        assert_eq!(
+            selection.unknown_bandwidth.as_deref(),
+            Some("Mystery GPU 9000")
+        );
+    }
+
+    #[test]
+    fn select_gpu_prefers_the_bench_gpu_block_over_the_name_table() {
+        let devices = [gpu_device(
+            "nvidia",
+            "NVIDIA GeForce RTX 4050 Laptop GPU",
+            Some(6_200_000_000),
+            Some(6_442_450_944),
+        )];
+        let bench = gpu_bench(123.4);
+        let selection = select_gpu(&devices, Some(&bench));
+        let plan = selection.plan.expect("target from bench");
+        assert!((plan.target.vram_gbps - 123.4).abs() < 1e-9);
     }
 
     #[test]
@@ -1372,7 +1822,7 @@ mod tests {
     fn default_table_hides_score_and_prune_line_and_caps_rows() {
         let report = report_with(7);
         let res = resolution("m", None);
-        let text = render_human(&report, &res, false, None, &[], 0, false);
+        let text = render_human(&report, &res, false, None, None, None, &[], 0, false);
         assert!(!text.contains(" Score"), "{text}");
         assert!(!text.contains("pruned"), "{text}");
         assert_eq!(row_count(&text), TOP_CONFIGS, "{text}");
@@ -1387,7 +1837,7 @@ mod tests {
             TuneConfig::new(Quant::Q4_K_M, 2048, 4, 512, Quant::Fp16),
             PruneReason::Oom,
         )];
-        let text = render_human(&report, &res, false, None, &pruned, 2, true);
+        let text = render_human(&report, &res, false, None, None, None, &pruned, 2, true);
         assert!(text.contains(" Score"), "{text}");
         assert!(text.contains("pruned 3 (1 OOM"), "{text}");
         assert_eq!(row_count(&text), 7, "{text}");
