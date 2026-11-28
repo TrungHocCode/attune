@@ -164,6 +164,9 @@ pub enum Command {
         /// Weight format to download and tune
         #[arg(long, value_name = "QUANT", default_value = "q4_k_m")]
         quant: String,
+        /// Where to run: auto (GPU when one is usable), cpu or gpu
+        #[arg(long, value_enum, default_value = "auto")]
+        device: tune::TuneDevice,
         /// Download the model and install llama.cpp without asking
         #[arg(long)]
         yes: bool,
@@ -485,6 +488,7 @@ pub fn dispatch(command: Command) -> Result<()> {
         Command::Run {
             model,
             quant,
+            device,
             yes,
             retune,
             no_chat,
@@ -503,6 +507,7 @@ pub fn dispatch(command: Command) -> Result<()> {
             no_chat,
             system.as_deref(),
             llama_server.as_deref(),
+            device,
             port,
             &listen,
             listen_port,
@@ -661,6 +666,25 @@ mod tests {
                 assert!(no_chat);
                 assert!(!retune);
             }
+            _ => panic!("expected the run subcommand"),
+        }
+    }
+
+    #[test]
+    fn run_parses_the_device_flag() {
+        let cli = crate::Cli::try_parse_from(["attune", "run", "qwen3-4b", "--device", "gpu"])
+            .expect("run should parse");
+        match cli.command {
+            Command::Run { device, .. } => {
+                assert_eq!(device, super::tune::TuneDevice::Gpu);
+            }
+            _ => panic!("expected the run subcommand"),
+        }
+
+        let cli = crate::Cli::try_parse_from(["attune", "run", "qwen3-4b"])
+            .expect("run should parse without --device");
+        match cli.command {
+            Command::Run { device, .. } => assert_eq!(device, super::tune::TuneDevice::Auto),
             _ => panic!("expected the run subcommand"),
         }
     }

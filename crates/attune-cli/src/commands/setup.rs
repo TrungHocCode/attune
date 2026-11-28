@@ -3,12 +3,15 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
-use attune_backend::{choose_variants, GpuRequest};
+use attune_backend::{choose_variants, GpuRequest, VariantPlan};
 use attune_estimate::model::registry::{load_catalog, LlamaAsset, LlamaPin};
 use attune_fetch::{
     download, install_archives, installed_variant_binary, variant_dir, Download, HostPolicy,
 };
+use attune_hal::GpuDevice;
 use attune_serve::DownloadConsent;
+
+use super::tune::TuneDevice;
 
 /// One archive of a variant's download.
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +130,29 @@ fn fetch_all(downloads: &[AssetDownload], dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Which build variants `attune run --device` needs.
+///
+/// Pure over the detected GPUs and the catalog pin so tests can use fake
+/// lists. `auto` keeps the CPU build and adds Vulkan when a discrete GPU is
+/// found; `gpu` asks for the same plan but fails when it has no GPU build.
+pub fn run_build_plan(
+    device: TuneDevice,
+    gpus: &[GpuDevice],
+    pin: &LlamaPin,
+    os: &str,
+    arch: &str,
+) -> Result<VariantPlan> {
+    let request = match device {
+        TuneDevice::Cpu => GpuRequest::Cpu,
+        TuneDevice::Auto | TuneDevice::Gpu => GpuRequest::Auto,
+    };
+    let plan = choose_variants(request, gpus, pin, os, arch).map_err(|err| anyhow!("{err}"))?;
+    if device == TuneDevice::Gpu && plan.variants.iter().all(|variant| variant == "cpu") {
+        return Err(anyhow!("no usable GPU found; use --device cpu"));
+    }
+    Ok(plan)
+}
+
 /// `attune setup [--yes] [--refresh-catalog] [--gpu BUILD]`.
 pub fn run(yes: bool, refresh_catalog: bool, gpu: GpuRequest) -> Result<()> {
     install_selected(yes, refresh_catalog, gpu).map(|_| ())
@@ -152,21 +178,35 @@ fn install_selected(yes: bool, refresh_catalog: bool, gpu: GpuRequest) -> Result
     if let Some(note) = &selection.note {
         println!("{note}");
     }
-    let plans = selection
-        .variants
+    install_plan(
+        yes,
+        pin,
+        &home,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        &selection.variants,
+    )
+    .map(|_| ())
+}
+
+/// Install `variants` (skipping ones already installed) behind one consent
+/// prompt, and return the preferred `llama-server` (the last variant, i.e. the
+/// GPU build when one is planned).
+fn install_plan(
+    yes: bool,
+    pin: &LlamaPin,
+    home: &Path,
+    os: &str,
+    arch: &str,
+    variants: &[String],
+) -> Result<PathBuf> {
+    let plans = variants
         .iter()
-        .map(|variant| {
-            plan_variant(
-                &home,
-                pin,
-                std::env::consts::OS,
-                std::env::consts::ARCH,
-                variant,
-            )
-        })
+        .map(|variant| plan_variant(home, pin, os, arch, variant))
         .collect::<Result<Vec<_>>>()?;
 
     let mut pending = Vec::new();
+    let mut preferred = None;
     for plan in &plans {
         match plan {
             VariantInstallPlan::AlreadyInstalled { variant, server } => {
@@ -175,130 +215,105 @@ fn install_selected(yes: bool, refresh_catalog: bool, gpu: GpuRequest) -> Result
                     pin.tag,
                     server.display()
                 );
+                preferred = Some(server.clone());
             }
             VariantInstallPlan::Download { .. } => pending.push(plan),
         }
     }
-    if pending.is_empty() {
-        return Ok(());
-    }
+    if !pending.is_empty() {
+        let total: u64 = pending
+            .iter()
+            .map(|plan| match plan {
+                VariantInstallPlan::Download { downloads, .. } => {
+                    downloads.iter().map(|item| item.asset.size).sum()
+                }
+                VariantInstallPlan::AlreadyInstalled { .. } => 0,
+            })
+            .sum();
+        let each: Vec<String> = pending
+            .iter()
+            .filter_map(|plan| match plan {
+                VariantInstallPlan::Download {
+                    variant, downloads, ..
+                } => {
+                    let size: u64 = downloads.iter().map(|item| item.asset.size).sum();
+                    Some(format!("{variant} ({:.0} MB)", size as f64 / 1e6))
+                }
+                VariantInstallPlan::AlreadyInstalled { .. } => None,
+            })
+            .collect();
+        let what = format!(
+            "llama.cpp {} builds: {} - {:.0} MB total",
+            pin.tag,
+            each.join(", "),
+            total as f64 / 1e6
+        );
+        confirm(yes, total, &what)?;
 
-    let total: u64 = pending
-        .iter()
-        .map(|plan| match plan {
-            VariantInstallPlan::Download { downloads, .. } => {
-                downloads.iter().map(|item| item.asset.size).sum()
+        for plan in pending {
+            if let VariantInstallPlan::Download {
+                variant,
+                downloads,
+                dest,
+            } = plan
+            {
+                fetch_all(downloads, dest)?;
+                let server = installed_variant_binary(home, &pin.tag, variant, "llama-server")
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "installed {} but found no llama-server in it",
+                            dest.display()
+                        )
+                    })?;
+                println!(
+                    "llama.cpp {} ({variant}) installed: {}",
+                    pin.tag,
+                    server.display()
+                );
+                preferred = Some(server);
             }
-            VariantInstallPlan::AlreadyInstalled { .. } => 0,
-        })
-        .sum();
-    let each: Vec<String> = pending
-        .iter()
-        .filter_map(|plan| match plan {
-            VariantInstallPlan::Download {
-                variant, downloads, ..
-            } => {
-                let size: u64 = downloads.iter().map(|item| item.asset.size).sum();
-                Some(format!("{variant} ({:.0} MB)", size as f64 / 1e6))
-            }
-            VariantInstallPlan::AlreadyInstalled { .. } => None,
-        })
-        .collect();
-    let what = format!(
-        "llama.cpp {} builds: {} - {:.0} MB total",
-        pin.tag,
-        each.join(", "),
-        total as f64 / 1e6
-    );
-    confirm(yes, total, &what)?;
-
-    for plan in pending {
-        if let VariantInstallPlan::Download {
-            variant,
-            downloads,
-            dest,
-        } = plan
-        {
-            fetch_all(downloads, dest)?;
-            let server = installed_variant_binary(&home, &pin.tag, variant, "llama-server")
-                .ok_or_else(|| {
-                    anyhow!(
-                        "installed {} but found no llama-server in it",
-                        dest.display()
-                    )
-                })?;
-            println!(
-                "llama.cpp {} ({variant}) installed: {}",
-                pin.tag,
-                server.display()
-            );
         }
     }
-    Ok(())
+    preferred.ok_or_else(|| anyhow!("the llama.cpp plan had no builds"))
 }
 
-/// Install the CPU pin (or report the existing one) and return the
-/// `llama-server` path. Shares its output and consent rules with `setup`;
-/// `attune run` keeps using this CPU-only path.
-pub fn install(yes: bool, refresh_catalog: bool) -> Result<PathBuf> {
-    let loaded = load_catalog(refresh_catalog);
+/// Make sure the builds `attune run --device` needs are installed, with the
+/// same output and consent rules as `setup`. An explicit `--llama-server` wins
+/// and installs nothing.
+pub fn ensure_llama_server_for(
+    device: TuneDevice,
+    explicit: Option<&Path>,
+    yes: bool,
+) -> Result<()> {
+    if explicit.is_some() {
+        return Ok(());
+    }
+    let loaded = load_catalog(false);
     for warning in &loaded.warnings {
         eprintln!("warning: {warning}");
     }
     let home = attune_fetch::home_dir().map_err(|err| anyhow!("{err}"))?;
     let pin = &loaded.catalog.llama_cpp;
-    let plan = plan_variant(
-        &home,
+    let gpus = attune_hal::gpu::detect().devices;
+    let plan = run_build_plan(
+        device,
+        &gpus,
         pin,
         std::env::consts::OS,
         std::env::consts::ARCH,
-        "cpu",
     )?;
-    let (downloads, dest) = match plan {
-        VariantInstallPlan::AlreadyInstalled { server, .. } => {
-            println!(
-                "llama.cpp {} already installed: {}",
-                pin.tag,
-                server.display()
-            );
-            return Ok(server);
-        }
-        VariantInstallPlan::Download {
-            downloads, dest, ..
-        } => (downloads, dest),
-    };
-    let asset = downloads
-        .first()
-        .ok_or_else(|| anyhow!("no CPU asset for llama.cpp {}", pin.tag))?;
-    let what = format!(
-        "llama.cpp {} ({:.0} MB)",
-        pin.tag,
-        asset.asset.size as f64 / 1e6
-    );
-    confirm(yes, asset.asset.size, &what)?;
-    fetch_all(&downloads, &dest)?;
-    let server =
-        installed_variant_binary(&home, &pin.tag, "cpu", "llama-server").ok_or_else(|| {
-            anyhow!(
-                "installed {} but found no llama-server in it",
-                dest.display()
-            )
-        })?;
-    println!("Installed llama.cpp {}: {}", pin.tag, server.display());
-    Ok(server)
-}
-
-/// Make sure a usable `llama-server` exists, installing the pinned build with
-/// the same consent rules as `setup` when it does not. An explicit
-/// `--llama-server` path is returned untouched.
-pub fn ensure_llama_server(explicit: Option<&Path>, yes: bool) -> Result<PathBuf> {
-    if let Some(path) = explicit {
-        return Ok(path.to_path_buf());
+    if let Some(note) = &plan.note {
+        println!("{note}");
     }
-    if let Ok(path) = attune_serve::resolve_llama_server(None) {
-        return Ok(path);
-    }
-    install(yes, false)
+    install_plan(
+        yes,
+        pin,
+        &home,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        &plan.variants,
+    )
+    .map(|_| ())
 }
 
 /// The explicit `--llama-cli` path, else the `attune setup` install when
@@ -321,15 +336,26 @@ mod tests {
     fn pin() -> LlamaPin {
         LlamaPin {
             tag: "b11804".to_string(),
-            assets: vec![LlamaAsset {
-                os: "windows".to_string(),
-                arch: "x86_64".to_string(),
-                variant: "cpu".to_string(),
-                url: "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-cpu-x64.zip".to_string(),
-                size: 24_067_910,
-                sha256: "3".repeat(64),
-                min_driver: None,
-            }],
+            assets: vec![
+                LlamaAsset {
+                    os: "windows".to_string(),
+                    arch: "x86_64".to_string(),
+                    variant: "cpu".to_string(),
+                    url: "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-cpu-x64.zip".to_string(),
+                    size: 24_067_910,
+                    sha256: "3".repeat(64),
+                    min_driver: None,
+                },
+                LlamaAsset {
+                    os: "windows".to_string(),
+                    arch: "x86_64".to_string(),
+                    variant: "vulkan".to_string(),
+                    url: "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-vulkan-x64.zip".to_string(),
+                    size: 25_000_000,
+                    sha256: "5".repeat(64),
+                    min_driver: None,
+                },
+            ],
         }
     }
 
@@ -364,6 +390,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         dir
+    }
+
+    fn gpu_device(vendor: &str) -> GpuDevice {
+        GpuDevice {
+            vendor: vendor.to_string(),
+            name: format!("{vendor} card"),
+            vram_total_bytes: Some(6_000_000_000),
+            vram_free_bytes: Some(5_000_000_000),
+            driver: None,
+            source: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn run_device_plan_installs_a_gpu_build_only_when_usable() {
+        let nvidia = [gpu_device("nvidia")];
+        for device in [TuneDevice::Auto, TuneDevice::Gpu] {
+            let plan = run_build_plan(device, &nvidia, &pin(), "windows", "x86_64").expect("plan");
+            assert_eq!(plan.variants, vec!["cpu", "vulkan"], "{device:?}");
+        }
+
+        let cpu = run_build_plan(TuneDevice::Cpu, &nvidia, &pin(), "windows", "x86_64")
+            .expect("cpu never needs a GPU build");
+        assert_eq!(cpu.variants, vec!["cpu"]);
+
+        let auto = run_build_plan(TuneDevice::Auto, &[], &pin(), "windows", "x86_64")
+            .expect("auto falls back to cpu");
+        assert_eq!(auto.variants, vec!["cpu"]);
+
+        let err = run_build_plan(TuneDevice::Gpu, &[], &pin(), "windows", "x86_64")
+            .expect_err("gpu without a GPU must fail");
+        assert!(
+            err.to_string()
+                .contains("no usable GPU found; use --device cpu"),
+            "{err}"
+        );
+
+        let intel = [gpu_device("intel")];
+        assert!(run_build_plan(TuneDevice::Gpu, &intel, &pin(), "windows", "x86_64").is_err());
     }
 
     #[test]
