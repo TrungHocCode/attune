@@ -20,7 +20,7 @@ pub mod validate;
 
 use thiserror::Error;
 
-pub use args::to_llama_args;
+pub use args::{to_llama_args, to_llama_args_with_device};
 pub use migrate::migrate_value;
 pub use schema::{
     expand_home, now_unix, ComputeConfig, DraftConfig, Engine, ExpectedPerformance, Fallbacks,
@@ -34,8 +34,9 @@ pub use validate::{validate, ProfileWarning, WarningKind, WarningSeverity};
 /// Bump it only together with a `migrate` step that upgrades the old shape;
 /// `serde(default)` on every field keeps older documents parseable in the
 /// meantime.
-/// v2 adds the optional `model.source` (M6).
-pub const PROFILE_VERSION: u32 = 2;
+/// v2 adds the optional `model.source` (M6); v3 adds `engine.variant` and
+/// `load_config.gpu_name` (M7).
+pub const PROFILE_VERSION: u32 = 3;
 
 /// Errors from parsing or serializing a profile.
 #[derive(Debug, Error)]

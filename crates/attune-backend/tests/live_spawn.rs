@@ -52,6 +52,7 @@ fn test_profile(model: &str) -> Profile {
             // The M4 profile default. It is normalized to "omit --numa"
             // because `--numa local` is not a llama-server value.
             numa: "local".to_string(),
+            gpu_name: None,
         },
         compute_config: ComputeConfig {
             n_threads: 2,
