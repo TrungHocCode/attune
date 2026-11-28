@@ -10,11 +10,9 @@
 //! `--bench-json`/`--bench-quant`/`--calibrate`: one eta pair is fitted from
 //! the saved bench and applied to every ranked config.
 //!
-//! Model resolution mirrors `attune estimate` (GGUF file -> `org/model`
-//! fetch/cache -> catalog name -> manual `--params`/`--arch`). The resolver is
-//! deliberately duplicated from `commands/estimate.rs` for this slice; see the
-//! TODO on [`resolve_model`] — promoting it to one shared helper is a
-//! follow-up, not part of M4 slice 1.
+//! Model resolution is shared with `attune estimate` (see
+//! [`super::model::resolve_model`]): GGUF file -> `org/model` fetch/cache ->
+//! live catalog id -> built-in registry -> manual `--params`/`--arch`.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -24,15 +22,13 @@ use anyhow::{anyhow, Context, Result};
 use attune_bench::e2e::{DEFAULT_GEN_TOKENS, DEFAULT_PROMPT_TOKENS};
 use attune_bench::gpu::GpuE2eResult;
 use attune_bench::{run_quick, BandwidthReport, BenchReport};
-use attune_estimate::model::registry::{load_catalog, CatalogModel};
 use attune_estimate::{
-    gpu_bandwidth_gbps, is_gguf_file, is_hf_id, kv_bytes_per_token, parse_arch, parse_bench_report,
-    parse_model, parse_params, parse_quants, probe_gguf_file, resolve_hf_model, weight_bytes_for,
-    Arch, BenchCalibration, HwInputs, Quant, GPU_DECODE_EFFICIENCY,
+    gpu_bandwidth_gbps, kv_bytes_per_token, parse_bench_report, parse_quants, weight_bytes_for,
+    BenchCalibration, HwInputs, Quant, GPU_DECODE_EFFICIENCY,
 };
 use attune_hal::cpu::{theoretical_fp32_gflops, BASELINE_CLOCK_GHZ};
 use attune_hal::{GpuDevice, HardwareInfo};
-use attune_profile::{ModelSource, Profile};
+use attune_profile::Profile;
 use attune_tune::export::hardware_fingerprint_with_gpu;
 use attune_tune::ProfileInputs;
 use attune_tune::{
@@ -40,6 +36,8 @@ use attune_tune::{
     run_verify_topk, select_configs, stars, Device, GpuTarget, Objective, PruneReason,
     RankedConfig, TuneConfig, TuneError, TuneModel, TuneReport,
 };
+
+use super::model::{as_gguf_path, resolve_model, ModelResolution};
 
 /// Which device `attune tune` should plan for.
 ///
@@ -129,164 +127,9 @@ pub struct RecommendArgs<'a> {
     pub refresh_catalog: bool,
 }
 
-/// Model inputs resolved from GGUF, fetch/cache, catalog or manual flags.
-struct ModelResolution {
-    /// Report label: catalog name, GGUF path or the literal `--params` text.
-    label: String,
-    /// Human-readable source label for the pretty `Model:` line.
-    display: String,
-    /// Parameter count used for the weight footprint.
-    params: u64,
-    /// Resolved KV shape, when the source had one (display only in slice 1).
-    arch: Option<Arch>,
-    /// GGUF file size; the real weight footprint when the source is a file.
-    weight_bytes: Option<u64>,
-    /// Every non-fatal notice from resolution.
-    warnings: Vec<String>,
-    /// `model.path` for a saved profile when it differs from `label` (a
-    /// catalog model's portable `~/.attune/models/...` path).
-    model_path: Option<String>,
-    /// Download source for a catalog model (profile v2).
-    source: Option<ModelSource>,
-}
-
-/// The path when `--model` is an existing GGUF file (`.gguf` extension or
-/// `GGUF` magic), which is probed instead of being looked up as a catalog name.
-fn as_gguf_path(value: &str) -> Option<&Path> {
-    let path = Path::new(value.trim());
-    is_gguf_file(path).then_some(path)
-}
-
-/// Resolve model facts with the same priority order as `attune estimate`:
-/// existing `.gguf` file, `org/model` fetch/cache, catalog name, then manual
-/// `--params` + optional `--arch`.
-// TODO(m4): promote `commands/estimate.rs::resolve_model` to a shared helper
-// and delete this duplicate. It is copied here on purpose so slice 1 does not
-// refactor the estimate command.
-fn resolve_model(
-    model: Option<&str>,
-    params: Option<&str>,
-    arch: Option<&str>,
-    quant: Quant,
-) -> Result<ModelResolution> {
-    if let Some(name) = model {
-        if let Some(path) = as_gguf_path(name) {
-            let probe = probe_gguf_file(path)
-                .map_err(|err| anyhow!("failed to probe {}: {err}", path.display()))?;
-            let params = probe.params().ok_or_else(|| {
-                anyhow!(
-                    "{} has no general.parameter_count and no catalog match; use --params <SIZE> --arch <NAME> instead of --model",
-                    path.display()
-                )
-            })?;
-            let weight_bytes = fs::metadata(path)
-                .map_err(|err| anyhow!("failed to stat {}: {err}", path.display()))?
-                .len();
-            let mut warnings = Vec::new();
-            if let Some(warning) = probe.warning.clone() {
-                warnings.push(warning);
-            }
-            return Ok(ModelResolution {
-                label: name.to_string(),
-                display: name.to_string(),
-                params,
-                arch: probe.arch,
-                weight_bytes: Some(weight_bytes),
-                warnings,
-                model_path: None,
-                source: None,
-            });
-        }
-
-        if is_hf_id(name) {
-            let resolved = resolve_hf_model(name, false).map_err(|err| anyhow!("{err}"))?;
-            return Ok(ModelResolution {
-                label: resolved.label.clone(),
-                display: resolved.label,
-                params: resolved.params,
-                arch: Some(resolved.arch),
-                weight_bytes: None,
-                warnings: resolved.warnings,
-                model_path: None,
-                source: None,
-            });
-        }
-
-        // Downloadable catalog first (it pins files), then the estimate-only
-        // names such as `llama-3.1-8b`.
-        let loaded = load_catalog(false);
-        let catalog_err = match loaded.catalog.find(name) {
-            Ok(model) => {
-                let mut resolution = resolve_catalog_model(model, quant)?;
-                resolution.warnings.extend(loaded.warnings);
-                return Ok(resolution);
-            }
-            Err(err) => err,
-        };
-        let entry = parse_model(name).map_err(|_| {
-            anyhow!(
-                "{catalog_err}; run `attune tune` without --model to list models, or pass --params <SIZE> --arch <NAME>"
-            )
-        })?;
-        return Ok(ModelResolution {
-            label: entry.name.to_string(),
-            display: format!("{}/{}", entry.provider, entry.name),
-            params: entry.params,
-            arch: Some(entry.arch),
-            weight_bytes: None,
-            warnings: Vec::new(),
-            model_path: None,
-            source: None,
-        });
-    }
-
-    let params = params.ok_or_else(|| anyhow!("pass --model <NAME_OR_PATH> or --params <SIZE>"))?;
-    let arch = match arch {
-        Some(name) => Some(*parse_arch(name)?),
-        None => None,
-    };
-    Ok(ModelResolution {
-        label: params.trim().to_string(),
-        display: params.trim().to_string(),
-        params: parse_params(params)?,
-        arch,
-        weight_bytes: None,
-        warnings: Vec::new(),
-        model_path: None,
-        source: None,
-    })
-}
-
-/// Facts and download source for one catalog model at `quant`. The file
-/// does not need to exist: the catalog pins its exact size and shape.
-fn resolve_catalog_model(model: &CatalogModel, quant: Quant) -> Result<ModelResolution> {
-    let file = model.file_for(quant).ok_or_else(|| {
-        let have: Vec<&str> = model.files.iter().map(|f| f.quant.as_str()).collect();
-        anyhow!(
-            "{} has no {} file in the catalog; available: {}",
-            model.id,
-            quant.as_str(),
-            have.join(", ")
-        )
-    })?;
-    let source = ModelSource {
-        repo: file.repo.clone(),
-        file: file.file.clone(),
-        revision: file.revision.clone(),
-        sha256: file.sha256.clone(),
-        size: file.size,
-    };
-    Ok(ModelResolution {
-        label: model.id.clone(),
-        display: format!("{}/{}", model.publisher, model.display),
-        params: model.params,
-        arch: Some(model.arch.to_arch()),
-        weight_bytes: Some(file.size),
-        warnings: Vec::new(),
-        model_path: Some(source.home_path()),
-        source: Some(source),
-    })
-}
+// Model resolution (`--model` / `--params`) is shared with `attune estimate`;
+// see `super::model` for the priority order and the one place that decides
+// where facts come from.
 
 /// Resolve bandwidth: explicit override first, then the M2 quick probe.
 fn resolve_bandwidth(bandwidth_gbps: Option<f64>) -> Result<f64> {
@@ -1157,7 +1000,7 @@ pub fn run(
     let resolution = if recommend_mode {
         None
     } else {
-        Some(resolve_model(model, params, arch, quants[0])?)
+        Some(resolve_model(model, params, arch, false, Some(quants[0]))?)
     };
     if verify.enabled && verify_model.is_none() {
         let Some(source) = resolution.as_ref().and_then(|r| r.source.as_ref()) else {
@@ -1517,6 +1360,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::model::resolve_catalog_model;
     use attune_tune::Device;
 
     fn report_for(label: &str) -> TuneReport {
@@ -1554,6 +1398,10 @@ mod tests {
             display: label.to_string(),
             params: 135_000_000,
             arch: None,
+            kv_per_token: 0.0,
+            ctx_default: None,
+            provenance: crate::commands::model::ModelProvenance::Manual,
+            gguf: None,
             weight_bytes,
             warnings: Vec::new(),
             model_path: None,
@@ -1840,7 +1688,7 @@ mod tests {
         use attune_estimate::model::registry::{parse_catalog, SNAPSHOT};
         let catalog = parse_catalog(SNAPSHOT).expect("snapshot");
         let model = catalog.find("qwen3-4b-instruct-2507").expect("id");
-        let resolution = resolve_catalog_model(model, Quant::Q4_K_M).expect("resolve");
+        let resolution = resolve_catalog_model(model, Some(Quant::Q4_K_M)).expect("resolve");
         let file = model.file_for(Quant::Q4_K_M).expect("file");
         assert_eq!(resolution.weight_bytes, Some(file.size));
         assert_eq!(resolution.params, model.params);
@@ -1864,9 +1712,8 @@ mod tests {
             model.files.iter().any(|file| file.quant == Quant::Q8_0),
             "the snapshot must keep a q8_0 file for this test"
         );
-        let err = resolve_catalog_model(&model, Quant::Q4_K_M)
-            .err()
-            .expect("no q4_k_m file")
+        let err = resolve_catalog_model(&model, Some(Quant::Q4_K_M))
+            .expect_err("no q4_k_m file")
             .to_string();
         assert!(err.contains("q8_0"), "{err}");
     }
