@@ -89,6 +89,16 @@ The JSON output of `estimate`, `tune` and `recommend` gains a `device` field per
   - **Recorded:** decode, prefill, and peak VRAM from `nvidia-smi`.
   - **Output:** the two decisions above, written into this spec before slice 2.
 
+### Slice 1 results (2026-11-28)
+
+See `docs/benchmark-methodology.md`, "M7 GPU spike".
+
+- **(a) Vulkan is the default GPU build.** Decode is within 5% of CUDA everywhere; CUDA prefill is 1.3–1.5× faster. CUDA stays available through `--gpu cuda`.
+- **(b) attune does its own split.** At ctx 4096, the best `-ngl` that fits beats llama.cpp auto-fit by 2.1× (8B) and 1.5× (14B) decode.
+  - Serve and verify with `--fit off -np 1` and an explicit `-ngl`.
+  - Keep a VRAM safety margin of 512 MiB on top of what the desktop already uses.
+- Vulkan enumerates the iGPU first. attune must pass `-dev` for the chosen GPU, matched by name from `detect`.
+
 ### Slice 2: install the right build (`attune-fetch`, catalog, `setup`)
 
 - **Catalog:**

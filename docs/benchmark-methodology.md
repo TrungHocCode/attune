@@ -410,3 +410,48 @@ These are real failure modes the bench will not catch:
   FLOPS kernels fall back to scalar + platform-default thread count;
   monitoring returns `power_avg_watts: null`. M3 or later will gate
   ARM NEON paths.
+
+## M7 GPU spike (2026-11-28)
+
+This measurement settles the two open decisions in
+`docs/superpowers/specs/2026-11-28-gpu-design.md`.
+
+**Setup:**
+- Machine: RTX 4050 Laptop 6 GB (driver 561.00, about 5.9 GB free) + Core 5 210H, Windows 11.
+- llama.cpp b11804 in three builds: CPU, `win-vulkan-x64` (37 MB), and `win-cuda-12.4-x64` plus cudart (about 660 MB).
+- Vulkan lists the Intel iGPU as `Vulkan0` and the RTX 4050 as `Vulkan1`, so runs pass `-dev Vulkan1`.
+- Models: Qwen3 4B Instruct 2507, Qwen3 8B and Qwen2.5 14B Instruct, all Q4_K_M.
+
+**1. Build choice (`llama-bench -p 512 -n 128 -r 2`, decode tok/s; prefill in brackets):**
+
+| Model | `-ngl` | CPU | Vulkan | CUDA 12.4 |
+|---|---|---|---|---|
+| 4B | 99 | 12.6 (76) | 61.5 (1883) | 61.4 (2673) |
+| 8B | 36 | 6.5 (40) | 27.0 (916) | 28.4 (1403) |
+| 8B | 28 | | 17.0 | 17.6 |
+| 14B | 28 | 4.0 (21) | 7.3 (376) | 7.4 (500) |
+| 14B | 20 | | 4.9 | 4.9 |
+
+- Decode is memory-bound: Vulkan is within 5% of CUDA at every point.
+- CUDA prefill is 1.3–1.5× faster.
+- Flash-attention on CUDA 4B: prefill +2%, decode −1%.
+- **Decision (a): Vulkan is the default GPU build.** CUDA isn't >15% faster at decode, and Vulkan is 18× smaller and runs on any vendor. CUDA stays available through `setup --gpu cuda`, for prefill-heavy use.
+
+**2. llama.cpp auto-fit vs a chosen `-ngl`.**
+
+Auto-fit means `llama-server` defaults: `-ngl auto --fit on` and 4 slots. A chosen `-ngl` uses `-c 4096 -np 1 --fit off`. Decode is from one 128-token completion; VRAM is used memory, including about 220 MB for the desktop.
+
+| Model | Build | Auto-fit | Chosen `-ngl` (VRAM used) |
+|---|---|---|---|
+| 8B | CUDA | 16.7 tok/s (4.1 GB) | 37 → **34.6** (5.4 GB) · 36 → 30.1 · 34 → 25.6 · 32 → 22.2 |
+| 8B | Vulkan | 13.9 tok/s (4.0 GB) | 37 → **34.0** (5.4 GB) |
+| 14B | CUDA | 4.9 tok/s (4.0 GB) | 30 → 7.9 (5.9 GB, only ~280 MB left) · 28 → **7.4** (5.5 GB) · 26 → 6.8 |
+| 14B | Vulkan | 4.5 tok/s (4.1 GB) | 28 → **7.0** (5.4 GB) |
+
+- Auto-fit keeps a 1 GiB margin per device and sizes the KV cache for 4 slots, so it leaves 1–1.5 GB of VRAM unused.
+- At the same context, the best `-ngl` that fits gives 2.1× (8B) and 1.5× (14B) faster decode.
+- **Decision (b): attune does its own split**, the "own split model" approach in the design: choose `n_gpu_layers`, pass `--fit off -np 1`, and keep a VRAM safety margin.
+  - The 14B run at 30 layers left only about 280 MB free. A margin of about 512 MiB above the desktop's own use picks 28 layers there: 7.4 tok/s, 1.5× auto-fit.
+- Decode speed versus layers on the GPU is close to linear in bytes (8B: 22.2 → 34.6 tok/s from 32 → 37 layers). That supports the planned `t ≈ bytes_gpu/BW_vram + bytes_cpu/BW_ram` model.
+
+**Full offload compared with the CPU** (4B: 61 vs 12.6 tok/s; 8B: 34.6 vs 6.5): 4.9–5.3× decode and 25–35× prefill.
