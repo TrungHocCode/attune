@@ -144,6 +144,44 @@ impl CatalogModel {
 }
 
 impl Catalog {
+    /// Up to `limit` ids that look like `query`, closest first.
+    ///
+    /// Matching is case-insensitive: an exact id wins, then ids that start
+    /// with the query, then ids that contain it. Ties are broken by id length
+    /// (shorter is closer) and then alphabetically, so the list is stable.
+    /// Meant for unknown-model errors: the caller names what the catalog does
+    /// have instead of dumping all of it.
+    pub fn suggest_ids(&self, query: &str, limit: usize) -> Vec<&str> {
+        let query = query.trim().to_ascii_lowercase();
+        if query.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let mut matches: Vec<(u8, &str)> = self
+            .models
+            .iter()
+            .filter_map(|model| {
+                let id = model.id.as_str();
+                let lower = id.to_ascii_lowercase();
+                let rank = if lower == query {
+                    0
+                } else if lower.starts_with(&query) {
+                    1
+                } else if lower.contains(&query) {
+                    2
+                } else {
+                    return None;
+                };
+                Some((rank, id))
+            })
+            .collect();
+        matches.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.len().cmp(&b.1.len()))
+                .then(a.1.cmp(b.1))
+        });
+        matches.into_iter().take(limit).map(|(_, id)| id).collect()
+    }
+
     /// Exact id (case-insensitive), else a unique id prefix.
     pub fn find(&self, query: &str) -> Result<&CatalogModel, EstimateError> {
         let query = query.trim().to_ascii_lowercase();
@@ -677,5 +715,43 @@ mod tests {
         let err = two.find("qwen3-4b").expect_err("ambiguous").to_string();
         assert!(err.contains("qwen3-4b-instruct-2507"), "{err}");
         assert!(err.contains("qwen3-4b-thinking-2507"), "{err}");
+    }
+
+    #[test]
+    fn suggest_ids_ranks_exact_prefix_then_substring() {
+        let parsed = parse_catalog(&catalog(
+            SCHEMA,
+            &[
+                model("qwen3-4b-instruct-2507", SHA_A),
+                model("qwen3-4b-thinking-2507", SHA_A),
+                model("qwen3-4b", SHA_A),
+                model("qwen2.5-4b-instruct", SHA_A),
+                model("llama-3.1-8b", SHA_A),
+            ],
+        ))
+        .expect("parse");
+
+        // Exact, then (shorter) prefix.
+        assert_eq!(
+            parsed.suggest_ids("QWEN3-4B", 3),
+            vec![
+                "qwen3-4b",
+                "qwen3-4b-instruct-2507",
+                "qwen3-4b-thinking-2507"
+            ]
+        );
+        // Substring matches come last (shorter id first); the limit holds.
+        assert_eq!(
+            parsed.suggest_ids("4b", 2),
+            vec!["qwen3-4b", "qwen2.5-4b-instruct"]
+        );
+        assert_eq!(
+            parsed.suggest_ids("4b", 3),
+            vec!["qwen3-4b", "qwen2.5-4b-instruct", "qwen3-4b-instruct-2507"]
+        );
+        // No substring, no suggestion — the caller says so.
+        assert!(parsed.suggest_ids("not-a-model", 8).is_empty());
+        assert!(parsed.suggest_ids("   ", 8).is_empty());
+        assert!(parsed.suggest_ids("qwen", 0).is_empty());
     }
 }

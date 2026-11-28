@@ -176,10 +176,15 @@ pub struct EstimateInputs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<String>,
     /// Context length used for KV sizing after resolution: explicit `--ctx`,
-    /// else the source's documented default, else 2048. `None` only in older
-    /// JSON documents (and hand-built reports).
+    /// else the source's documented maximum capped at 4096, else 4096.
+    /// `None` only in older JSON documents (and hand-built reports).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx: Option<u32>,
+    /// Documented maximum context of the model source, when it had one, so a
+    /// consumer can see what `ctx` was capped from. Additive field: older
+    /// documents parse with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_max: Option<u32>,
     /// Measured int8 GOPS used as the prefill ceiling for quantized formats
     /// (issue #69). `None` when `gflops` was an explicit override or the probe
     /// was unavailable.
@@ -504,6 +509,7 @@ mod tests {
                 clock_ghz: 4.0,
                 arch: Some("llama-3.1-8b".to_string()),
                 ctx: Some(2048),
+                ctx_max: Some(131_072),
                 int8_gops: None,
             })
             .with_prefill_ms(2764.8)
@@ -575,6 +581,7 @@ mod tests {
                 clock_ghz: 4.0,
                 arch: Some("llama-3.1-8b".to_string()),
                 ctx: Some(2048),
+                ctx_max: Some(131_072),
                 int8_gops: None,
             })
             .with_prefill_ms(2764.8)
@@ -590,6 +597,7 @@ mod tests {
             "clock_ghz",
             "arch",
             "ctx",
+            "ctx_max",
         ] {
             assert!(
                 json.contains(&format!("\"{key}\"")),
@@ -650,6 +658,7 @@ mod tests {
         // must keep parsing with both absent.
         assert_eq!(inputs.arch, None);
         assert_eq!(inputs.ctx, None);
+        assert_eq!(inputs.ctx_max, None);
     }
 
     #[test]

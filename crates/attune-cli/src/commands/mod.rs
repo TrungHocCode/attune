@@ -7,6 +7,7 @@ mod chat;
 mod detect;
 mod download;
 mod estimate;
+mod model;
 mod recommend;
 mod run;
 mod serve;
@@ -100,9 +101,9 @@ pub enum Command {
         /// `--model` for models outside the catalog.
         #[arg(long, value_name = "SIZE")]
         params: Option<String>,
-        /// Weight format(s): `fp16`, `q8_0`, `q4_0` or `q4_k_m`.
+        /// Weight format(s): `fp16`, `q8_0`, `q4_0` or `q4_k_m` (default).
         /// Comma-separate to compare configs, e.g. `fp16,q8_0,q4_k_m`
-        #[arg(long, value_name = "QUANT[,QUANT...]")]
+        #[arg(long, value_name = "QUANT[,QUANT...]", default_value = "q4_k_m")]
         quant: String,
         /// Override measured memory bandwidth (decimal GB/s); skips the bench
         #[arg(long, value_name = "GBPS")]
@@ -126,9 +127,10 @@ pub enum Command {
         /// Number of decode tokens to estimate (default 128)
         #[arg(long, value_name = "N", default_value_t = 128)]
         gen_tokens: u64,
-        /// Context window size used for KV-cache sizing. When omitted, a
-        /// built-in model uses its documented default (catalog/config.json),
-        /// otherwise 2048. An explicit value always wins.
+        /// Context window size used for KV-cache sizing. When omitted, the
+        /// model's documented maximum (catalog/config.json/GGUF) is capped at
+        /// 4096, the window `tune`/`run` plan for; 4096 when unknown. An
+        /// explicit value always wins.
         #[arg(long, value_name = "N")]
         ctx: Option<u32>,
         /// Saved `attune bench --json` report to calibrate against. Accepts
@@ -705,6 +707,39 @@ mod tests {
         match cli.command {
             Command::Tune { device, .. } => assert_eq!(device, super::tune::TuneDevice::Auto),
             _ => panic!("expected the tune subcommand"),
+        }
+    }
+
+    #[test]
+    fn estimate_defaults_to_q4_k_m_and_keeps_comma_lists() {
+        let cli =
+            crate::Cli::try_parse_from(["attune", "estimate", "--model", "qwen3-4b-instruct-2507"])
+                .expect("estimate should parse without --quant");
+        match cli.command {
+            Command::Estimate { quant, ctx, .. } => {
+                assert_eq!(quant, "q4_k_m");
+                assert_eq!(ctx, None);
+            }
+            _ => panic!("expected the estimate subcommand"),
+        }
+
+        let cli = crate::Cli::try_parse_from([
+            "attune",
+            "estimate",
+            "--model",
+            "qwen3-4b",
+            "--quant",
+            "fp16,q8_0",
+            "--ctx",
+            "2048",
+        ])
+        .expect("comma list parses");
+        match cli.command {
+            Command::Estimate { quant, ctx, .. } => {
+                assert_eq!(quant, "fp16,q8_0");
+                assert_eq!(ctx, Some(2_048));
+            }
+            _ => panic!("expected the estimate subcommand"),
         }
     }
 
