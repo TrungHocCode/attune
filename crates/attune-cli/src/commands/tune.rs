@@ -439,6 +439,7 @@ fn detect_physical_cores() -> u32 {
 }
 
 /// A detected GPU that the sweep can plan a layer split against.
+#[derive(Debug)]
 struct GpuPlan {
     target: GpuTarget,
     /// Physical VRAM, recorded in the profile fingerprint.
@@ -507,6 +508,25 @@ fn select_gpu(devices: &[GpuDevice], bench: Option<&GpuE2eResult>) -> GpuSelecti
 
 /// Actionable hint appended to every `--device gpu` planning failure.
 const GPU_FIX_HINT: &str = "fix: `attune setup --gpu auto`, or use --device cpu";
+
+/// Decide the GPU for recommend mode from a [`GpuSelection`].
+///
+/// `cpu` never plans one, `gpu` fails with [`GPU_FIX_HINT`] when none is
+/// usable, and `auto` quietly falls back to the CPU (the caller renders CPU
+/// rows and never names a GPU in the header).
+fn recommend_gpu_plan(device: Device, selection: GpuSelection) -> Result<Option<GpuPlan>> {
+    match device {
+        Device::Cpu => Ok(None),
+        Device::Gpu => selection.plan.map(Some).ok_or_else(|| {
+            let reason = selection.unknown_bandwidth.map_or_else(
+                || "no GPU detected".to_string(),
+                |name| format!("GPU {name}: bandwidth unknown"),
+            );
+            anyhow!("{reason}\n{GPU_FIX_HINT}")
+        }),
+        Device::Auto => Ok(selection.plan),
+    }
+}
 
 /// The GPU llama.cpp build a saved GPU profile should be served with.
 ///
@@ -1022,6 +1042,7 @@ pub fn run_recommend(
     max_ram: Option<&str>,
     all: bool,
     refresh_catalog: bool,
+    device: TuneDevice,
     json: bool,
 ) -> Result<()> {
     run(
@@ -1032,7 +1053,7 @@ pub fn run_recommend(
         RECOMMEND_OBJECTIVE,
         None,
         None,
-        TuneDevice::Auto,
+        device,
         RECOMMEND_MAX_CONFIGS,
         None,
         None,
@@ -1193,6 +1214,12 @@ pub fn run(
         int8_gops,
     };
     let Some(resolution) = resolution else {
+        let selection = select_gpu(
+            &gpu_devices,
+            bench.as_ref().and_then(|bench| bench.gpu.as_ref()),
+        );
+        let gpu_plan = recommend_gpu_plan(device, selection)?;
+        let gpu_target = gpu_plan.as_ref().map(|plan| &plan.target);
         return super::recommend::run(
             hw,
             avail_bytes.or(total_bytes).unwrap_or(0.0),
@@ -1200,6 +1227,8 @@ pub fn run(
             recommend_args.all,
             recommend_args.refresh_catalog,
             json,
+            device,
+            gpu_target,
         );
     };
 
@@ -1747,6 +1776,43 @@ mod tests {
         let selection = select_gpu(&devices, Some(&bench));
         let plan = selection.plan.expect("target from bench");
         assert!((plan.target.vram_gbps - 123.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn recommend_device_gpu_errors_without_one_but_auto_falls_back() {
+        let devices = [gpu_device(
+            "nvidia",
+            "NVIDIA GeForce RTX 4050 Laptop GPU",
+            Some(6_200_000_000),
+            Some(6_442_450_944),
+        )];
+        assert!(recommend_gpu_plan(Device::Gpu, select_gpu(&devices, None))
+            .expect("gpu is usable")
+            .is_some());
+
+        let err = recommend_gpu_plan(Device::Gpu, select_gpu(&[], None))
+            .expect_err("gpu without a GPU must fail");
+        let text = err.to_string();
+        assert!(text.contains("no GPU detected"), "{text}");
+        assert!(text.contains("attune setup --gpu auto"), "{text}");
+        assert!(text.contains("--device cpu"), "{text}");
+
+        assert!(recommend_gpu_plan(Device::Auto, select_gpu(&[], None))
+            .expect("auto falls back")
+            .is_none());
+        assert!(recommend_gpu_plan(Device::Cpu, select_gpu(&devices, None))
+            .expect("cpu never needs a GPU")
+            .is_none());
+
+        let unknown = [gpu_device(
+            "nvidia",
+            "Mystery GPU 9000",
+            Some(8_000_000_000),
+            Some(9_000_000_000),
+        )];
+        let err = recommend_gpu_plan(Device::Gpu, select_gpu(&unknown, None))
+            .expect_err("unknown bandwidth is unusable");
+        assert!(err.to_string().contains("Mystery GPU 9000"), "{err}");
     }
 
     #[test]

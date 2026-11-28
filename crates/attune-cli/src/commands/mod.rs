@@ -256,6 +256,10 @@ pub enum Command {
         /// e.g. `4G` (keeps room for other apps)
         #[arg(long, value_name = "SIZE")]
         max_ram: Option<String>,
+        /// Where each model should run: auto (the best device for it), cpu or
+        /// gpu. `gpu` fails when no usable GPU is detected.
+        #[arg(long, value_enum, default_value = "auto")]
+        device: tune::TuneDevice,
         /// Show every catalog model and quant
         #[arg(long)]
         all: bool,
@@ -501,10 +505,11 @@ pub fn dispatch(command: Command) -> Result<()> {
         ),
         Command::Recommend {
             max_ram,
+            device,
             all,
             refresh_catalog,
             json,
-        } => tune::run_recommend(max_ram.as_deref(), all, refresh_catalog, json),
+        } => tune::run_recommend(max_ram.as_deref(), all, refresh_catalog, device, json),
         Command::Tune {
             model,
             params,
@@ -608,11 +613,13 @@ mod tests {
         match cli.command {
             Command::Recommend {
                 max_ram,
+                device,
                 all,
                 refresh_catalog,
                 json,
             } => {
                 assert_eq!(max_ram.as_deref(), Some("4G"));
+                assert_eq!(device, super::tune::TuneDevice::Auto);
                 assert!(all);
                 assert!(!refresh_catalog);
                 assert!(json);
