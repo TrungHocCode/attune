@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [0.6.0] - DATE
+## [0.6.0] - 2026-11-28
 
 M6 (recommend and downloads) plus the friendly path for new users. You install with one line, see which models suit the machine, and go from a model id to a chat in one command. This is the first release with prebuilt binaries.
 
