@@ -172,15 +172,37 @@ their machine running, with no manual downloads.
   localhost health check; both fixed. llama.cpp prefill reaches 0.40 of the
   unthrottled int8 peak (was assumed 0.9-0.95).
 
-## M7 — GPU (proposed)
+## M7 — GPU ✅ (v0.7.0)
 
-**Goal:** use the GPU the machine already has, and split the model across
-GPU + CPU when it does not fit in VRAM.
+**Goal:** use the GPU the machine already has, and split the model across GPU and CPU when it doesn't fit in VRAM. The user picks where it runs with `--device auto|cpu|gpu`.
 
-- Detect GPUs (vendor CLI, no SDK dependency), measure effective VRAM
-  bandwidth through llama.cpp, estimate full and partial offload with a VRAM
-  fit check, tune `n_gpu_layers`, serve with a GPU llama.cpp build.
-- Full plan, non-goals and proposed acceptance: [docs/gpu-plan.md](docs/gpu-plan.md).
+- **What shipped:**
+  - `detect` lists GPUs (`nvidia-smi`, plus Windows CIM) (#131).
+  - `setup --gpu auto|cpu|vulkan|cuda` installs the Vulkan or CUDA llama.cpp build beside the CPU one (#133).
+  - The split decode model and VRAM fit (#134, #140).
+  - `bench --device gpu` calibration (#135).
+  - Profile v3 (#136).
+  - `--device` on `tune` (#137), `recommend` (#138), `serve` (#139) and `run` (#141).
+- **Design:** [docs/superpowers/specs/2026-11-28-gpu-design.md](docs/superpowers/specs/2026-11-28-gpu-design.md). Measurement spike: [docs/benchmark-methodology.md](docs/benchmark-methodology.md#m7-gpu-spike-2026-11-28) (#132).
+- **Spike decisions:**
+  - Vulkan is the default GPU build: decode is within 5% of CUDA, at 37 MB instead of about 660 MB.
+  - attune chooses `-ngl` itself, because llama.cpp's auto-fit is 1.5–2.1× slower at the same context.
+- **Results, 2026-11-28** (RTX 4050 Laptop 6 GB + Core 5 210H, Windows 11, llama.cpp b11804 Vulkan):
+
+  | Acceptance item | Result |
+  |---|---|
+  | `detect` matches `nvidia-smi` | RTX 4050 Laptop, 6.0 GB, driver 561.00 (**met**) |
+  | `attune run qwen3-4b-instruct-2507 --yes`, empty home, no flags | Installs CPU + Vulkan, tunes on GPU 36/36, serves on the RTX 4050: 197 s including the 2.5 GB download; chat decode 48.7 tok/s, against 12.6 tok/s llama-bench CPU (3.9×) and 5.3 tok/s via `--device cpu` (**met**, target ≥3×) |
+  | Full-offload estimate | 4B: uncalibrated 63.2 against 55–56 tok/s llama-server (+13%, bar 25%); calibrated by `bench --device gpu` 57.2 (+2–4%, bar 12%) (**met**). 8B: predicted 30.7, measured 26.7 (−13%) |
+  | Partial offload against llama.cpp default | 14B Q4_K_M: attune 29/48 layers 7.2 tok/s (predicted 7.0), against auto-fit 4.9 tok/s: **1.47×** (**met**) |
+  | No VRAM OOM on exported profiles | 4B 36/36, 8B 36/36, 14B 29/48 all loaded and served (**met**) |
+  | CPU machines unchanged | CPU args byte-identical (golden test), CPU fingerprints unchanged, 690 tests green on Linux and Windows CI (**met**) |
+
+- **Found on the way:**
+  - Vulkan lists the Intel iGPU as `Vulkan0`, so attune passes `-dev` for the detected GPU.
+  - The first Vulkan run compiles shaders, so `bench --device gpu` warms up first.
+  - llama.cpp keeps token embeddings in host memory (about 8% of the file).
+  - CPU decode through `serve` on Windows is about 2× below llama-bench: open issue #142.
 
 ## Later
 

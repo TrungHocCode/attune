@@ -1,6 +1,6 @@
 {
   "schema": "attune-catalog/1",
-  "generated_at": "2026-11-27T08:25:03Z",
+  "generated_at": "2026-11-28T08:24:59Z",
   "llama_cpp": {
     "tag": "b11804",
     "assets": [
@@ -10,7 +10,8 @@
         "variant": "cpu",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-cpu-x64.zip",
         "size": 24067910,
-        "sha256": "3a3e417a0816329829081bdd443e3045ff3b2dbe866fcef89a1d919e941ce23f"
+        "sha256": "3a3e417a0816329829081bdd443e3045ff3b2dbe866fcef89a1d919e941ce23f",
+        "min_driver": null
       },
       {
         "os": "linux",
@@ -18,7 +19,8 @@
         "variant": "cpu",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-ubuntu-x64.tar.gz",
         "size": 22331121,
-        "sha256": "bb800fbd5e905fb8b9887c9a6cb0ab4f14c7267c5f99302874521e7558b0613f"
+        "sha256": "bb800fbd5e905fb8b9887c9a6cb0ab4f14c7267c5f99302874521e7558b0613f",
+        "min_driver": null
       },
       {
         "os": "windows",
@@ -26,7 +28,8 @@
         "variant": "vulkan",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-win-vulkan-x64.zip",
         "size": 36865203,
-        "sha256": "db9ab31997e93bf713d3dfec6eb1cf1b5a6a5f2940a3d4d111ad0ffab54c87d5"
+        "sha256": "db9ab31997e93bf713d3dfec6eb1cf1b5a6a5f2940a3d4d111ad0ffab54c87d5",
+        "min_driver": null
       },
       {
         "os": "linux",
@@ -34,7 +37,8 @@
         "variant": "vulkan",
         "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11804/llama-b11804-bin-ubuntu-vulkan-x64.tar.gz",
         "size": 34975120,
-        "sha256": "d7805abfa078792f8f48b191047a7e392412cfa3279e1668f04d8cb14ec1d764"
+        "sha256": "d7805abfa078792f8f48b191047a7e392412cfa3279e1668f04d8cb14ec1d764",
+        "min_driver": null
       },
       {
         "os": "windows",
